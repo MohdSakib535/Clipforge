@@ -5,6 +5,7 @@ import enum
 
 class VideoStatus(str, enum.Enum):
     uploading = "uploading"
+    downloading = "downloading"  # being imported from a link
     uploaded = "uploaded"
     ingesting = "ingesting"
     ready = "ready"

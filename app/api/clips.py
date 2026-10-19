@@ -19,8 +19,8 @@ router = APIRouter(prefix="/clips", tags=["clips"])
 
 
 def _download_name(clip: Clip) -> str:
-    """e.g. The_Popes_Exorcist_part-041_facebook_video"""
-    return clip_basename(clip.job.video.filename, clip.platform, clip.rank)
+    """e.g. part-041"""
+    return clip_basename(clip.rank)
 
 
 def _get_clip(db: Session, user: User, clip_id: str) -> Clip:

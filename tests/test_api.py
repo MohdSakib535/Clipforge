@@ -235,7 +235,7 @@ def test_unknown_video_404(client):
     assert client.get("/videos/does-not-exist").status_code == 404
 
 
-def test_download_and_zip_names_include_video_name_and_part(client, db_session, tmp_path):
+def test_download_and_zip_names_are_just_the_part_number(client, db_session, tmp_path):
     import zipfile
 
     vid = _upload_sample(client)  # uploaded as "sample.mp4"
@@ -256,9 +256,9 @@ def test_download_and_zip_names_include_video_name_and_part(client, db_session, 
     db_session.commit()
 
     dl = client.get(f"/clips/{clip.id}/download")
-    assert 'filename="sample_part-041_facebook_video.mp4"' in dl.headers["content-disposition"]
+    assert 'filename="part-041.mp4"' in dl.headers["content-disposition"]
     cap = client.get(f"/clips/{clip.id}/captions.srt")
-    assert 'filename="sample_part-041_facebook_video.srt"' in cap.headers["content-disposition"]
+    assert 'filename="part-041.srt"' in cap.headers["content-disposition"]
 
     z = client.get(f"/jobs/{job_id}/export.zip")
     assert 'filename="sample_clips.zip"' in z.headers["content-disposition"]
@@ -266,7 +266,7 @@ def test_download_and_zip_names_include_video_name_and_part(client, db_session, 
     out.write_bytes(z.content)
     with zipfile.ZipFile(out) as zf:
         names = set(zf.namelist())
-        base = "facebook_video/sample_part-041_facebook_video"
+        base = "facebook_video/part-041"
         assert names == {f"{base}.mp4", f"{base}.srt", f"{base}.json", f"{base}.txt"}
         assert "Source video: sample.mp4" in zf.read(f"{base}.txt").decode()
         assert '"part": 41' in zf.read(f"{base}.json").decode()

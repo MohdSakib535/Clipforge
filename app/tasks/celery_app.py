@@ -10,7 +10,7 @@ celery_app = Celery(
     "clipforge",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks.pipeline"],
+    include=["app.tasks.pipeline", "app.tasks.downloads"],
 )
 
 celery_app.conf.update(
@@ -23,4 +23,7 @@ celery_app.conf.update(
     # Laptop mode: one worker, concurrency 1 (set via CLI / compose command too).
     worker_concurrency=1,
     broker_connection_retry_on_startup=True,
+    # Link imports get their own queue + worker ("downloader" in compose), so a
+    # long download and a long clip job never wait for each other.
+    task_routes={"download_video": {"queue": "downloads"}},
 )

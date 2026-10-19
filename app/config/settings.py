@@ -50,6 +50,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     max_upload_bytes: int = 5 * 1024 * 1024 * 1024
 
+    # --- Import from a link (yt-dlp) ---
+    # Longest a single download may run before it is stopped and marked failed.
+    download_timeout_s: int = 3 * 3600
+    # How long "check link" waits for the site before giving up.
+    url_probe_timeout_s: int = 45
+    # Optional Netscape cookies.txt (e.g. exported from your browser) for videos
+    # that need a login or when YouTube asks to "confirm you're not a bot".
+    ytdlp_cookies_file: str = ""
+
     # --- Performance tuning (speed-first defaults) ---
     # I/O-bound stages (network) run concurrently; CPU encode runs in parallel
     # subprocesses. Defaults favour speed on a ~10-core / 16 GB laptop.

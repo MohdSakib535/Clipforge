@@ -18,10 +18,8 @@ def video_stem(video_filename: str) -> str:
     return stem.strip("_-")[:60] or "video"
 
 
-def clip_basename(video_filename: str, platform: str, rank: int | None) -> str:
-    """File name (no extension) for a downloaded clip, e.g.
-    ``The_Popes_Exorcist_part-041_facebook_video`` - the source video's name and
-    the part number, so a clip can be matched to its place in the video.
-
-    Parts are numbered in video order, zero-padded so they sort correctly."""
-    return f"{video_stem(video_filename)}_part-{rank or 0:03d}_{platform}"
+def clip_basename(rank: int | None) -> str:
+    """File name (no extension) for a downloaded clip: just the part number,
+    e.g. ``part-041``. Zero-padded so parts sort in video order. The source
+    video's name is left out on purpose (it is in the ZIP's .txt/.json)."""
+    return f"part-{rank or 0:03d}"

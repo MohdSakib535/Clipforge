@@ -20,6 +20,11 @@ openai==1.59.6
 httpx==0.28.1
 tenacity==9.0.0
 
+# Import from a link (YouTube & 1000+ sites). [default] adds yt-dlp-ejs, the
+# YouTube challenge solver (runs on Deno, installed in the Dockerfile).
+# Sites change often: if a site stops working, bump this to the latest release.
+yt-dlp[default]==2026.8.19
+
 # Config / logging
 PyYAML==6.0.2
 python-json-logger==3.2.1

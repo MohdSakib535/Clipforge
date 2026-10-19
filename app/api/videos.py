@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, Request, UploadFile, status
 from sqlalchemy.orm import Session
@@ -11,7 +13,16 @@ from app.api.errors import AppError, NotFoundError
 from app.config.settings import get_settings
 from app.db.session import get_db
 from app.models import User, Video, VideoStatus
-from app.schemas.video import RightsConfirm, UploadInit, UploadInitOut, VideoOut
+from app.schemas.video import (
+    RightsConfirm,
+    UploadInit,
+    UploadInitOut,
+    UrlImport,
+    UrlProbe,
+    UrlProbeOut,
+    VideoOut,
+)
+from app.services import downloader
 from app.services.storage import get_storage
 from app.tasks import dispatch
 
@@ -163,6 +174,56 @@ async def upload_single(
     video.status = VideoStatus.uploaded
     db.commit()
     dispatch.enqueue_ingest(video.id)
+    db.refresh(video)
+    return video
+
+
+# ---------------------------------------------------------------------------
+# Import from a link (YouTube, Vimeo, Facebook, direct .mp4, ...)
+# check link -> pick quality -> import (downloads in the background)
+# ---------------------------------------------------------------------------
+@router.post("/from-url/qualities", response_model=UrlProbeOut)
+async def probe_url(body: UrlProbe, _: User = Depends(get_current_user)) -> UrlProbeOut:
+    """List the qualities a link offers. The site lookup runs in a thread, so a
+    slow site never blocks other requests."""
+    settings = get_settings()
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(downloader.probe, body.url), timeout=settings.url_probe_timeout_s
+        )
+    except TimeoutError:
+        raise AppError(
+            "The site took too long to answer. Try again.", code="probe_timeout", status_code=504
+        ) from None
+    except downloader.DownloadError as exc:
+        raise AppError(str(exc), code="bad_link", status_code=400) from None
+    return UrlProbeOut.model_validate(result)
+
+
+@router.post("/from-url", response_model=VideoOut, status_code=status.HTTP_202_ACCEPTED)
+def import_from_url(
+    body: UrlImport,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Video:
+    """Start importing a link. Returns at once with status ``downloading``; poll
+    ``GET /videos/{id}`` for ``download_progress`` until it is ``ready``."""
+    try:
+        url = downloader.validate_url(body.url)
+        downloader.parse_quality(body.quality)
+    except downloader.DownloadError as exc:
+        raise AppError(str(exc), code="bad_link", status_code=400) from None
+
+    video = Video(
+        user_id=user.id,
+        filename=urlparse(url).hostname or "video",  # replaced by the title once downloaded
+        status=VideoStatus.downloading,
+        source_url=url,
+        download_progress=0,
+    )
+    db.add(video)
+    db.commit()
+    dispatch.enqueue_download(video.id, body.quality)
     db.refresh(video)
     return video
 

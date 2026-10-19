@@ -50,9 +50,13 @@ def db_session():
 @pytest.fixture
 def client(db_session, monkeypatch):
     # Record enqueued tasks instead of hitting Celery/Redis.
-    calls: dict[str, list] = {"ingest": [], "job": [], "clip": []}
+    calls: dict[str, list] = {"ingest": [], "job": [], "clip": [], "download": []}
     monkeypatch.setattr(
         "app.tasks.dispatch.enqueue_ingest", lambda vid: calls["ingest"].append(vid)
+    )
+    monkeypatch.setattr(
+        "app.tasks.dispatch.enqueue_download",
+        lambda vid, quality: calls["download"].append((vid, quality)),
     )
     monkeypatch.setattr("app.tasks.dispatch.enqueue_job", lambda jid: calls["job"].append(jid))
     monkeypatch.setattr(

@@ -37,6 +37,10 @@ class Video(Base, TimestampMixin):
     )
     error: Mapped[str | None] = mapped_column(String(2048), nullable=True)
 
+    # Set when imported from a link (YouTube etc.) instead of uploaded.
+    source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    download_progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Rights confirmation (user, video, timestamp) — processing is blocked until set.
     rights_confirmed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

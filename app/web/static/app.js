@@ -2,6 +2,8 @@ function clipforge() {
   return {
     steps: ["Upload", "Rights", "Settings", "Processing", "Review"],
     step: "upload",
+    source: "file", // "file" | "link"
+    link: { url: "", checking: false, importing: false, info: null, quality: "best" },
     file: null,
     uploading: false,
     uploadPct: 0,
@@ -36,6 +38,7 @@ function clipforge() {
       if (this._poll) clearInterval(this._poll);
       Object.assign(this, {
         step: "upload", file: null, uploading: false, uploadPct: 0,
+        link: { url: "", checking: false, importing: false, info: null, quality: "best" },
         video: null, rightsChecked: false, platformCfg: {},
         captions: { enabled: true, language: "" },
         job: null, clips: [], busy: false, error: "",
@@ -80,6 +83,38 @@ function clipforge() {
       } catch (e) {
         this.uploading = false;
         this.error = "Upload failed: " + e.message;
+      }
+    },
+
+    // Import from a link: check it (lists qualities), then download in the background.
+    async checkLink() {
+      if (!this.link.url || this.link.checking) return;
+      this.link.checking = true;
+      this.link.info = null;
+      try {
+        this.link.info = await this.postJSON("/videos/from-url/qualities", { url: this.link.url });
+        this.link.quality = "best";
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.link.checking = false;
+      }
+    },
+
+    async importLink() {
+      if (!this.link.info || this.link.importing) return;
+      this.link.importing = true;
+      try {
+        this.video = await this.postJSON("/videos/from-url", {
+          url: this.link.url,
+          quality: this.link.quality,
+        });
+        this.step = "rights";
+        this.pollVideo();
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.link.importing = false;
       }
     },
 
@@ -191,6 +226,7 @@ function clipforge() {
       this.clips = fresh.map((f) => {
         const cur = byId.get(f.id);
         if (!cur) return f;
+        const wasPlayable = this.isPlayable(cur);
         Object.assign(cur, {
           status: f.status,
           has_file: f.has_file,
@@ -198,8 +234,19 @@ function clipforge() {
           has_srt: f.has_srt,
           error: f.error,
         });
+        if (!wasPlayable && this.isPlayable(cur)) cur._rev = (cur._rev || 0) + 1;
         return cur;
       });
+    },
+
+    // A clip's player is only created once its file is ready; _rev changes each
+    // time a (re-)render finishes so the browser fetches the new file.
+    isPlayable(c) {
+      return c.has_file && ["ready", "approved"].includes(c.status);
+    },
+
+    previewUrl(c) {
+      return `/clips/${c.id}/preview?v=${c._rev || 0}`;
     },
 
     readyCount() {
@@ -244,7 +291,11 @@ function clipforge() {
         const r = await fetch(`/jobs/${this.job.id}/clips`);
         const all = await r.json();
         const fresh = all.find((x) => x.id === c.id);
-        if (fresh) Object.assign(c, fresh);
+        if (fresh) {
+          const wasPlayable = this.isPlayable(c);
+          Object.assign(c, fresh);
+          if (!wasPlayable && this.isPlayable(c)) c._rev = (c._rev || 0) + 1;
+        }
         if (!fresh || ["ready", "approved", "failed"].includes(fresh.status)) {
           clearInterval(iv);
         }
@@ -293,6 +344,10 @@ function clipforge() {
         rendering: "Rendering", finalizing: "Finalising", done: "Done",
       };
       return m[stage] || stage || "";
+    },
+    fmtSize(b) {
+      if (!b) return "";
+      return b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
     },
     fmtDur(s) {
       if (!s) return "";

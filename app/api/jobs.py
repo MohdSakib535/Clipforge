@@ -137,7 +137,7 @@ def export_zip(
     tmp.close()
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
         for c in ready:
-            base = f"{c.platform}/{clip_basename(video_name, c.platform, c.rank)}"
+            base = f"{c.platform}/{clip_basename(c.rank)}"
             zf.write(c.file_path, f"{base}.mp4")
             if c.srt_path:
                 zf.write(c.srt_path, f"{base}.srt")

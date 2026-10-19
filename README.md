@@ -16,12 +16,37 @@ publishing to YouTube/Facebook is designed-for but not built (see
 
 ```
 Upload ─▶ Rights ─▶ Platforms & settings ─▶ Processing ─▶ Review ─▶ Export
-  │         │              │                     │           │         │
-chunked   stored      config-driven         Celery       trim /     single
-resumable  (user,     presets (YAML)        pipeline     approve /   file or
-           video,                           (below)      re-render   ZIP + .txt/.json
-           timestamp)
+ or link    │              │                     │           │         │
+  │       stored      config-driven         Celery       trim /     single
+chunked    (user,     presets (YAML)        pipeline     approve /   file or
+resumable  video,                           (below)      re-render   ZIP + .txt/.json
+ upload    timestamp)
 ```
+
+### Import from a link
+
+Instead of uploading a file, paste a link (YouTube, Vimeo, Facebook, Instagram,
+X, a direct `.mp4`, and the other sites [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+supports):
+
+1. **Check link** lists the qualities the video offers (e.g. Best, 1080p, 720p…)
+   with approximate sizes. "720p" means the frame's short side, so it works the
+   same for vertical (Shorts) videos.
+2. **Download** returns at once. The download runs on its own Celery queue
+   (`downloads`) served by the `downloader` worker, so it never waits behind clip
+   processing and never holds it up. Progress (%) shows on the Rights step, and
+   you can confirm rights while it downloads.
+3. When it finishes, the file is probed and marked ready, exactly like an upload.
+
+At equal resolution H.264 + AAC is preferred, so horizontal clips can be cut
+without re-encoding. Playlists and live streams are rejected; the upload size
+limit also applies to downloads. Only import videos you own or are licensed to
+use. The rights confirmation still applies.
+
+YouTube needs a JavaScript runtime: the Docker image includes
+[Deno](https://deno.com) and `yt-dlp[default]` pulls in the `yt-dlp-ejs` solver.
+Sites change often: if a site stops working, bump `yt-dlp` in
+`requirements.txt` and rebuild.
 
 ### Processing pipeline (Celery)
 
@@ -76,8 +101,9 @@ never copied into clips.
 - **Analysis:** FFmpeg scene scores on keyframes + librosa
 - **LLM:** OpenAI behind a provider-agnostic `LLMClient` (cheap model for scoring, stronger model for final metadata)
 - **Video:** FFmpeg; MediaPipe for face-tracked reframing; `.srt` sidecar captions
+- **Import from a link:** yt-dlp (+ Deno for YouTube), on its own Celery queue
 - **UI:** single-page dashboard served by the API (Tailwind + Alpine via CDN — no build step)
-- **Containers:** Docker Compose (api, worker, redis, postgres)
+- **Containers:** Docker Compose (api, worker, downloader, flower, redis, postgres)
 
 ---
 
@@ -104,8 +130,10 @@ Services and host ports (chosen to avoid clashing with local installs):
 The `api` container runs `alembic upgrade head` on start, then serves the API
 and the dashboard. The `worker` container runs one Celery worker at
 concurrency 1 (laptop mode) and **auto-restarts on code changes** (via
-`watchmedo`), so edits to `app/` take effect without a manual restart. `flower`
-provides a live view of tasks, workers and queues.
+`watchmedo`), so edits to `app/` take effect without a manual restart. The
+`downloader` container runs a second worker that only serves the `downloads`
+queue (link imports, two at a time), so downloads and clip jobs never wait for
+each other. `flower` provides a live view of tasks, workers and queues.
 
 ### Try it with a sample video
 
@@ -142,11 +170,14 @@ export DATABASE_URL="postgresql+psycopg://clipforge:clipforge@localhost:5433/cli
 export REDIS_URL="redis://localhost:6380/0"
 export OPENAI_API_KEY=sk-...
 
-# 4) Migrate, then run API + worker in two terminals
+# 4) Migrate, then run API + worker + downloader in three terminals
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 celery -A app.tasks.celery_app:celery_app worker --loglevel=info --concurrency=1
+celery -A app.tasks.celery_app:celery_app worker -Q downloads -n downloader@%h --concurrency=2
 ```
+
+Imports from YouTube also need Deno natively (`brew install deno`).
 
 You need **ffmpeg** installed natively (`brew install ffmpeg`). MediaPipe wheels
 require Python ≤ 3.12. To avoid OpenAI usage while iterating, set
@@ -167,6 +198,8 @@ See [`.env.example`](.env.example). Key ones:
 | `DATABASE_URL`, `REDIS_URL`, `STORAGE_PATH` | infrastructure |
 | `MAX_UPLOAD_BYTES` | upload limit |
 | `RENDER_CONCURRENCY`, `COPY_CONCURRENCY`, `RENDER_PRESET` | render speed tuning (see `.env.example`) |
+| `DOWNLOAD_TIMEOUT_S`, `URL_PROBE_TIMEOUT_S` | import from a link: max download time, max "check link" wait |
+| `YTDLP_COOKIES_FILE` | optional cookies.txt for videos that need a login (or YouTube's "not a bot" check) |
 
 **Cost tracking:** every job records audio-minutes transcribed, LLM tokens
 in/out and the models used, and shows an estimated cost on the review screen.
@@ -195,6 +228,8 @@ clips).
 |---|---|---|
 | POST | `/videos/upload` | single-shot upload |
 | POST | `/videos/upload/init` → PUT `/videos/{id}/upload/chunk` → POST `/videos/{id}/upload/complete` | resumable chunked upload |
+| POST | `/videos/from-url/qualities` | check a link: title, duration, available qualities |
+| POST | `/videos/from-url` | import a link at a quality (`best`, `1080`, `720`…); returns 202, downloads in the background (poll `GET /videos/{id}` for `download_progress`) |
 | POST | `/videos/{id}/confirm-rights` | mandatory rights confirmation |
 | POST | `/videos/{id}/jobs` | start a job (platforms, clip_count, length overrides, captions) |
 | GET | `/jobs/{id}` | status, stage, progress %, cost |
@@ -236,8 +271,8 @@ app/
   models/     User, Video, Job, Transcript, Clip
   schemas/    Pydantic request/response models
   services/   storage, ffmpeg, transcriber, llm, cost, analysis,
-              segments, scoring, reframe, captions, render
-  tasks/      Celery app, pipeline tasks, dispatch
+              segments, scoring, reframe, captions, render, downloader
+  tasks/      Celery app, pipeline tasks, link downloads, dispatch
   web/static/ single-page dashboard (index.html + app.js)
 alembic/      migrations
 tests/        pytest suite

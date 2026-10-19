@@ -1,4 +1,7 @@
 # Shared image for the API and the Celery worker.
+# Deno: the JavaScript runtime yt-dlp needs to download from YouTube.
+FROM denoland/deno:bin-2.9.7 AS deno
+
 FROM python:3.11-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
@@ -18,6 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=deno /deno /usr/local/bin/deno
 
 WORKDIR /app
 

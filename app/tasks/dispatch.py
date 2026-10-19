@@ -10,6 +10,12 @@ def enqueue_ingest(video_id: str) -> None:
     ingest_video.delay(video_id)
 
 
+def enqueue_download(video_id: str, quality: str) -> None:
+    from app.tasks.downloads import download_video
+
+    download_video.delay(video_id, quality)
+
+
 def enqueue_job(job_id: str) -> None:
     from app.tasks.pipeline import run_job
 

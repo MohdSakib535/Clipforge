@@ -1,23 +1,24 @@
 from __future__ import annotations
 
-from app.services.naming import clip_basename
+from app.services.naming import clip_basename, video_stem
 
 
-def test_clip_basename_has_video_name_part_and_platform():
-    name = clip_basename("The.Popes.Exorcist.2023.1080p.mkv", "facebook_video", 41)
-    assert name == "The_Popes_Exorcist_2023_1080p_part-041_facebook_video"
+def test_clip_basename_is_just_the_part_number():
+    assert clip_basename(41) == "part-041"
+    assert clip_basename(3) == "part-003"
+    assert clip_basename(None) == "part-000"
 
 
-def test_clip_basename_is_filesystem_safe_and_sorts():
-    name = clip_basename('My: "Movie" <final>?.mp4', "youtube_shorts", 3)
-    assert name == "My_Movie_final_part-003_youtube_shorts"
-    assert clip_basename("a.mp4", "x", 9) < clip_basename("a.mp4", "x", 10)  # zero-padded
+def test_clip_basename_sorts_in_video_order():
+    assert clip_basename(9) < clip_basename(10) < clip_basename(100)
 
 
-def test_clip_basename_keeps_hindi_and_handles_empty():
-    assert clip_basename("पोप.mp4", "facebook_reel", 1).startswith("पोप_part-001")
-    assert clip_basename("", "facebook_reel", None) == "video_part-000_facebook_reel"
+def test_video_stem_is_filesystem_safe():
+    assert video_stem("The.Popes.Exorcist.2023.1080p.mkv") == "The_Popes_Exorcist_2023_1080p"
+    assert video_stem('My: "Movie" <final>?.mp4') == "My_Movie_final"
+    assert video_stem("../../etc/passwd.mp4") == "passwd"
+    assert video_stem("") == "video"
 
 
-def test_clip_basename_cannot_escape_with_a_path():
-    assert clip_basename("../../etc/passwd.mp4", "x", 1) == "passwd_part-001_x"
+def test_video_stem_keeps_hindi():
+    assert video_stem("पोप.mp4") == "पोप"

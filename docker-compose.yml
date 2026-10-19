@@ -86,6 +86,29 @@ services:
       redis:
         condition: service_healthy
 
+  # Imports from a link (YouTube etc.) on their own queue, so a long download
+  # never waits behind clip processing on `worker`, and never holds it up.
+  # Downloads are network-bound: two can run at once.
+  downloader:
+    build: .
+    command: >
+      watchmedo auto-restart --directory=/app/app --pattern=*.py --recursive --
+      celery -A app.tasks.celery_app:celery_app worker -Q downloads -n downloader@%h
+      --loglevel=info --concurrency=2
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /data/storage
+    volumes:
+      - ./app:/app/app
+      - storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   # Flower: Celery monitoring UI at http://localhost:5555
   flower:
     build: .

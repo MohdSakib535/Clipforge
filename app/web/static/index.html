@@ -32,7 +32,52 @@
 
       <!-- STEP 1: Upload -->
       <section x-show="step==='upload'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
-        <h2 class="text-lg font-medium mb-4">Upload a video</h2>
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-medium">Add a video</h2>
+          <div class="flex text-xs bg-slate-800 rounded-lg p-1">
+            <button @click="source='file'" class="px-3 py-1 rounded"
+              :class="source==='file' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Upload file</button>
+            <button @click="source='link'" class="px-3 py-1 rounded"
+              :class="source==='link' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Paste link</button>
+          </div>
+        </div>
+
+        <!-- From a link -->
+        <div x-show="source==='link'" x-cloak>
+          <div class="flex gap-2">
+            <input type="url" x-model.trim="link.url" @keydown.enter="checkLink()" @input="link.info=null"
+              placeholder="https://www.youtube.com/watch?v=…  (YouTube, Vimeo, Facebook, Instagram, X, direct .mp4 …)"
+              class="flex-1 bg-slate-800 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+            <button @click="checkLink()" :disabled="!link.url || link.checking"
+              class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm"
+              x-text="link.checking ? 'Checking…' : 'Check link'"></button>
+          </div>
+          <template x-if="link.info">
+            <div class="mt-4 flex gap-4 bg-slate-800/60 rounded-lg p-4">
+              <img x-show="link.info.thumbnail" :src="link.info.thumbnail" referrerpolicy="no-referrer"
+                class="w-40 aspect-video object-cover rounded bg-slate-900" />
+              <div class="flex-1 min-w-0">
+                <div class="font-medium truncate" x-text="link.info.title"></div>
+                <div class="text-xs text-slate-400 mt-1">
+                  <span x-text="link.info.site"></span><span x-show="link.info.duration_s" x-text="` · ${fmtDur(link.info.duration_s)}`"></span>
+                </div>
+                <label class="block text-sm mt-3">Download quality
+                  <select x-model="link.quality" class="block mt-1 bg-slate-900 rounded px-2 py-1.5 text-sm">
+                    <template x-for="q in link.info.qualities" :key="q.id">
+                      <option :value="q.id" x-text="q.approx_size_bytes ? `${q.label}  (~${fmtSize(q.approx_size_bytes)})` : q.label"></option>
+                    </template>
+                  </select>
+                </label>
+              </div>
+            </div>
+          </template>
+          <button @click="importLink()" :disabled="!link.info || link.importing"
+            class="mt-5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Download</button>
+          <p class="text-xs text-slate-500 mt-3">Downloads in the background on the server. Only import videos you own or are licensed to use.</p>
+        </div>
+
+        <!-- From a file -->
+        <div x-show="source==='file'">
         <label class="block border-2 border-dashed border-slate-700 rounded-lg p-10 text-center cursor-pointer hover:border-indigo-500 transition">
           <input type="file" class="hidden" accept="video/mp4,video/x-matroska,video/quicktime,.mp4,.mkv,.mov" @change="pickFile($event)" />
           <div class="text-slate-400">
@@ -47,12 +92,22 @@
         <button @click="startUpload()" :disabled="!file || uploading"
           class="mt-5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Upload</button>
         <p class="text-xs text-slate-500 mt-3">Resumable chunked upload. The file is processed on your machine; nothing is published anywhere.</p>
+        </div>
       </section>
 
       <!-- STEP 2: Ingest + Rights -->
       <section x-show="step==='rights'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
         <h2 class="text-lg font-medium mb-4">Confirm rights</h2>
-        <div x-show="video && video.status!=='ready'" class="text-amber-300 text-sm mb-4">
+        <div x-show="video && video.status==='downloading'" class="mb-4">
+          <div class="text-sm text-amber-300 mb-2" x-text="`Downloading from link… ${video?.download_progress || 0}%`"></div>
+          <div class="h-2 bg-slate-800 rounded"><div class="h-2 bg-indigo-500 rounded transition-all" :style="`width:${video?.download_progress || 0}%`"></div></div>
+          <p class="text-xs text-slate-500 mt-2">You can tick the box below while it downloads.</p>
+        </div>
+        <div x-show="video && video.status==='failed'" class="text-rose-300 text-sm mb-4">
+          Failed: <span x-text="video?.error"></span>
+          <button @click="reset()" class="ml-2 underline text-slate-300">Try again</button>
+        </div>
+        <div x-show="video && !['ready','downloading','failed'].includes(video.status)" class="text-amber-300 text-sm mb-4">
           Preparing video (<span x-text="video?.status"></span>)… <span class="animate-pulse">●</span>
         </div>
         <div x-show="video && video.status==='ready'" class="text-sm text-slate-300 mb-4">
@@ -162,8 +217,13 @@
                 <span class="text-xs" :class="c.status==='failed'?'text-rose-400':'text-slate-400'" x-text="c.status"></span>
               </div>
 
-              <video x-show="c.has_file" controls :src="`/clips/${c.id}/preview`" class="w-full rounded-lg bg-black mb-3 max-h-80"></video>
-              <div x-show="!c.has_file" class="w-full rounded-lg bg-slate-800 mb-3 py-10 text-center text-slate-500 text-sm" x-text="c.status==='rendering'?'Rendering…':'No render yet'"></div>
+              <!-- The player only exists once the file is ready. If its src were set while the clip
+                   is still rendering the server answers 409, the browser marks the player as failed
+                   and never retries. The ?v= revision makes every re-render load a fresh file. -->
+              <template x-if="isPlayable(c)">
+                <video controls :src="previewUrl(c)" class="w-full rounded-lg bg-black mb-3 max-h-80"></video>
+              </template>
+              <div x-show="!isPlayable(c)" class="w-full rounded-lg bg-slate-800 mb-3 py-10 text-center text-slate-500 text-sm" x-text="c.status==='failed'?'Render failed':(c.status==='rendering'||c.status==='pending'?'Rendering…':'No render yet')"></div>
 
               <div class="flex items-center gap-2 text-sm mb-2">
                 <span class="px-2 py-0.5 rounded bg-indigo-600/40 text-indigo-200">Score <span x-text="Math.round(c.score||0)"></span></span>
