@@ -1,0 +1,104 @@
+# ClipForge dev stack.
+#
+# Host port mapping avoids clashes with anything already running locally:
+#   Postgres  5433 -> 5432
+#   Redis     6380 -> 6379
+#   API+UI    8080 -> 8000
+#
+# Quick start:
+#   cp .env.example .env   # fill in OPENAI_API_KEY
+#   docker compose up --build
+#   # Dashboard: http://localhost:8080/
+#   # API docs:  http://localhost:8080/docs
+#
+# The dashboard (single-page app) is served by the API container itself, so
+# there is no separate frontend service to build.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: clipforge
+      POSTGRES_PASSWORD: clipforge
+      POSTGRES_DB: clipforge
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clipforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /data/storage
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./app:/app/app
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    # Laptop mode: single worker, concurrency 1.
+    # watchmedo auto-restarts the worker whenever a .py file under app/ changes
+    # (dev convenience; needs the dev image built with INSTALL_DEV=true).
+    command: >
+      watchmedo auto-restart --directory=/app/app --pattern=*.py --recursive --
+      celery -A app.tasks.celery_app:celery_app worker --loglevel=info --concurrency=1
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /data/storage
+    volumes:
+      - ./app:/app/app
+      - storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Flower: Celery monitoring UI at http://localhost:5555
+  flower:
+    build: .
+    command: celery -A app.tasks.celery_app:celery_app flower --port=5555
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  storage:

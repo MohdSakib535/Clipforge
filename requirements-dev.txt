@@ -1,0 +1,12 @@
+-r requirements.txt
+
+pytest==8.3.4
+pytest-asyncio==0.25.2
+ruff==0.8.6
+black==24.10.0
+
+# watchmedo: auto-restart the Celery worker on code changes during dev.
+watchdog==6.0.0
+
+# Flower: web UI for monitoring Celery tasks/workers.
+flower==2.0.1

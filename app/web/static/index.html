@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ClipForge</title>
+    <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+    <style>
+      [x-cloak] { display: none !important; }
+      body { background: #0b1020; }
+    </style>
+  </head>
+  <body class="text-slate-100 min-h-screen">
+    <div x-data="clipforge()" x-init="init()" class="max-w-5xl mx-auto px-4 py-8">
+      <header class="flex items-center justify-between mb-8">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500 to-fuchsia-500 flex items-center justify-center font-bold">CF</div>
+          <h1 class="text-2xl font-semibold">ClipForge</h1>
+        </div>
+        <button @click="reset()" class="text-sm text-slate-400 hover:text-slate-200">Start over</button>
+      </header>
+
+      <!-- Stepper -->
+      <div class="flex gap-2 mb-8 text-xs">
+        <template x-for="(s, i) in steps" :key="i">
+          <div class="flex-1 text-center py-1 rounded"
+               :class="stepIndex() >= i ? 'bg-indigo-600/40 text-indigo-200' : 'bg-slate-800 text-slate-500'"
+               x-text="s"></div>
+        </template>
+      </div>
+
+      <!-- STEP 1: Upload -->
+      <section x-show="step==='upload'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
+        <h2 class="text-lg font-medium mb-4">Upload a video</h2>
+        <label class="block border-2 border-dashed border-slate-700 rounded-lg p-10 text-center cursor-pointer hover:border-indigo-500 transition">
+          <input type="file" class="hidden" accept="video/mp4,video/x-matroska,video/quicktime,.mp4,.mkv,.mov" @change="pickFile($event)" />
+          <div class="text-slate-400">
+            <div class="text-4xl mb-2">⬆</div>
+            <div x-text="file ? file.name : 'Click to choose an MP4 / MKV / MOV (up to ~5 GB)'"></div>
+          </div>
+        </label>
+        <div x-show="uploading" class="mt-4">
+          <div class="h-2 bg-slate-800 rounded"><div class="h-2 bg-indigo-500 rounded" :style="`width:${uploadPct}%`"></div></div>
+          <div class="text-xs text-slate-400 mt-1" x-text="`Uploading ${uploadPct}%`"></div>
+        </div>
+        <button @click="startUpload()" :disabled="!file || uploading"
+          class="mt-5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Upload</button>
+        <p class="text-xs text-slate-500 mt-3">Resumable chunked upload. The file is processed on your machine; nothing is published anywhere.</p>
+      </section>
+
+      <!-- STEP 2: Ingest + Rights -->
+      <section x-show="step==='rights'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
+        <h2 class="text-lg font-medium mb-4">Confirm rights</h2>
+        <div x-show="video && video.status!=='ready'" class="text-amber-300 text-sm mb-4">
+          Preparing video (<span x-text="video?.status"></span>)… <span class="animate-pulse">●</span>
+        </div>
+        <div x-show="video && video.status==='ready'" class="text-sm text-slate-300 mb-4">
+          Ready: <span x-text="fmtDur(video.duration_s)"></span>, <span x-text="`${video.width}×${video.height}`"></span>, <span x-text="video.audio_tracks"></span> audio track(s).
+        </div>
+        <label class="flex items-start gap-3 text-sm bg-slate-800/60 rounded-lg p-4">
+          <input type="checkbox" x-model="rightsChecked" class="mt-1" />
+          <span>I own this video or have the rights/licence to edit and publish it.</span>
+        </label>
+        <button @click="confirmRights()" :disabled="!rightsChecked || !video || video.status!=='ready'"
+          class="mt-5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Continue</button>
+      </section>
+
+      <!-- STEP 3: Settings -->
+      <section x-show="step==='settings'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
+        <h2 class="text-lg font-medium mb-4">Choose platforms & settings</h2>
+        <p class="text-sm text-slate-400 mb-3">Pick each platform and set how many clips you want for it.</p>
+        <div class="grid sm:grid-cols-2 gap-3 mb-6">
+          <template x-for="p in platforms" :key="p.key">
+            <div class="bg-slate-800/60 rounded-lg p-3"
+                 :class="(p.key in platformCfg) ? 'ring-1 ring-indigo-500' : ''">
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input type="checkbox" @change="togglePlatform(p)" :checked="p.key in platformCfg" />
+                <div>
+                  <div class="font-medium" x-text="p.label"></div>
+                  <div class="text-xs text-slate-400" x-text="`${p.aspect} · allowed ${p.length_min_s}-${p.length_max_s}s`"></div>
+                </div>
+              </label>
+              <template x-if="p.key in platformCfg">
+                <div class="mt-3 pl-7 space-y-2">
+                  <div class="flex gap-4 text-xs">
+                    <label class="flex items-center gap-1 cursor-pointer">
+                      <input type="radio" :name="`mode-${p.key}`" value="coverage" x-model="platformCfg[p.key].mode" /> Cover whole video
+                    </label>
+                    <label class="flex items-center gap-1 cursor-pointer">
+                      <input type="radio" :name="`mode-${p.key}`" value="highlights" x-model="platformCfg[p.key].mode" /> Top highlights
+                    </label>
+                  </div>
+                  <div x-show="platformCfg[p.key].mode==='coverage'" class="flex flex-wrap items-center gap-2 text-xs">
+                    <label class="text-slate-300">Seconds per clip:</label>
+                    <input type="number" :min="p.length_min_s" :max="p.length_max_s"
+                           x-model.number="platformCfg[p.key].lengthS"
+                           class="w-20 bg-slate-900 rounded px-2 py-1" />
+                    <span class="text-indigo-300 font-medium" x-text="coverageEstimate(p)"></span>
+                  </div>
+                  <div x-show="platformCfg[p.key].mode==='highlights'" class="flex items-center gap-2 text-xs">
+                    <label class="text-slate-300">Number of clips:</label>
+                    <input type="number" min="1" max="20" x-model.number="platformCfg[p.key].clipCount"
+                           class="w-20 bg-slate-900 rounded px-2 py-1" />
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+
+        <div class="grid sm:grid-cols-2 gap-4 mb-2">
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="captions.enabled" /> Caption file (.srt)</label>
+          <input x-model="captions.language" placeholder="Language (auto)" class="bg-slate-800 rounded px-2 py-1 text-sm" />
+        </div>
+        <p class="text-xs text-slate-500 mb-6">Captions are never drawn on the video. They come as a separate .srt file you can upload with the clip.</p>
+
+        <button @click="createJob()" :disabled="Object.keys(platformCfg).length===0 || busy"
+          class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Generate clips</button>
+      </section>
+
+      <!-- STEP 4: Processing -->
+      <section x-show="step==='processing'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
+        <h2 class="text-lg font-medium mb-4">Processing</h2>
+        <div class="h-3 bg-slate-800 rounded"><div class="h-3 bg-gradient-to-r from-indigo-500 to-fuchsia-500 rounded transition-all" :style="`width:${job?.progress||0}%`"></div></div>
+        <div class="flex justify-between text-sm text-slate-400 mt-2">
+          <span x-text="stageLabel(job?.stage)"></span>
+          <span x-text="`${job?.progress||0}%`"></span>
+        </div>
+        <div class="text-xs text-slate-500 mt-3">Estimated cost so far: $<span x-text="(job?.estimated_cost_usd||0).toFixed(4)"></span></div>
+        <div x-show="clips.length > 0" class="mt-5 flex flex-wrap items-center justify-between gap-3 bg-slate-800/60 rounded-lg p-3">
+          <span class="text-sm text-slate-300">
+            Clips ready: <span class="font-semibold text-emerald-300" x-text="readyCount()"></span>
+            of <span x-text="clips.length"></span>
+          </span>
+          <button @click="step='review'" :disabled="readyCount()===0"
+            class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-sm">Review ready clips →</button>
+        </div>
+        <div x-show="job?.status==='failed'" class="mt-4 text-rose-400 text-sm" x-text="job?.error"></div>
+      </section>
+
+      <!-- STEP 5: Review -->
+      <section x-show="step==='review'" x-cloak>
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-medium">Review clips (<span x-text="clips.length"></span>)</h2>
+          <div class="flex gap-2">
+            <a :href="`/jobs/${job.id}/export.zip`" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download all (ZIP)</a>
+            <button @click="refreshClips()" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Refresh</button>
+          </div>
+        </div>
+        <div x-show="job && !['completed','failed','cancelled'].includes(job.status)"
+             class="mb-4 text-sm bg-indigo-600/20 text-indigo-200 rounded-lg px-3 py-2">
+          Still rendering — <span x-text="readyCount()"></span> of <span x-text="clips.length"></span> clips ready. New clips appear here as they finish.
+        </div>
+        <div class="text-xs text-slate-500 mb-4">Models: <span x-text="JSON.stringify(job?.models_used||{})"></span> · Cost $<span x-text="(job?.estimated_cost_usd||0).toFixed(4)"></span> · <span x-text="job?.audio_minutes?.toFixed(1)"></span> audio min</div>
+
+        <div class="grid md:grid-cols-2 gap-5">
+          <template x-for="c in clips" :key="c.id">
+            <div class="bg-slate-900/60 rounded-xl border border-slate-800 p-4" :class="c.status==='approved' ? 'ring-1 ring-emerald-500' : ''">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-xs px-2 py-0.5 rounded bg-slate-800"><span x-text="platformLabel(c.platform)"></span> · Part <span x-text="c.rank"></span></span>
+                <span class="text-xs" :class="c.status==='failed'?'text-rose-400':'text-slate-400'" x-text="c.status"></span>
+              </div>
+
+              <video x-show="c.has_file" controls :src="`/clips/${c.id}/preview`" class="w-full rounded-lg bg-black mb-3 max-h-80"></video>
+              <div x-show="!c.has_file" class="w-full rounded-lg bg-slate-800 mb-3 py-10 text-center text-slate-500 text-sm" x-text="c.status==='rendering'?'Rendering…':'No render yet'"></div>
+
+              <div class="flex items-center gap-2 text-sm mb-2">
+                <span class="px-2 py-0.5 rounded bg-indigo-600/40 text-indigo-200">Score <span x-text="Math.round(c.score||0)"></span></span>
+                <span class="text-slate-400 text-xs" x-text="`${c.start_s?.toFixed(1)}s → ${c.end_s?.toFixed(1)}s`"></span>
+              </div>
+              <p class="text-xs text-slate-400 mb-2" x-text="c.reason"></p>
+
+              <input x-model="c.title" class="w-full bg-slate-800 rounded px-2 py-1 text-sm mb-2" placeholder="Title" />
+              <textarea x-model="c.description" rows="2" class="w-full bg-slate-800 rounded px-2 py-1 text-xs mb-2" placeholder="Description"></textarea>
+              <div class="text-xs text-indigo-300 mb-3" x-text="(c.hashtags||[]).map(h=>'#'+h).join(' ')"></div>
+
+              <div class="grid grid-cols-2 gap-2 text-xs mb-3">
+                <label>Start (s)<input type="number" step="0.1" x-model.number="c.start_s" class="w-full bg-slate-800 rounded px-2 py-1" /></label>
+                <label>End (s)<input type="number" step="0.1" x-model.number="c.end_s" class="w-full bg-slate-800 rounded px-2 py-1" /></label>
+              </div>
+              <label class="flex items-center gap-2 text-xs mb-3">
+                <input type="checkbox" x-model="c.captions_enabled" /> Caption file (.srt)
+              </label>
+
+              <div class="flex flex-wrap gap-2">
+                <button @click="saveClip(c)" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Save</button>
+                <button @click="rerender(c)" class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-xs">Save & re-render</button>
+                <button @click="approve(c)" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs">Approve</button>
+                <a :href="`/clips/${c.id}/download`" x-show="c.has_file" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Download</a>
+                <a :href="`/clips/${c.id}/captions.srt`" x-show="c.has_srt" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Captions (.srt)</a>
+                <button @click="del(c)" class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 text-xs">Delete</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <div x-show="error" x-cloak class="fixed bottom-4 right-4 bg-rose-700 text-white px-4 py-2 rounded-lg text-sm" x-text="error" @click="error=''"></div>
+    </div>
+
+    <script src="/ui/app.js"></script>
+  </body>
+</html>

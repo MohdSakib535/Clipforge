@@ -1,0 +1,37 @@
+# Core API / web
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-multipart==0.0.20
+websockets==14.1
+
+# Database
+SQLAlchemy==2.0.36
+alembic==1.14.0
+psycopg[binary]==3.2.3
+
+# Background jobs
+celery[redis]==5.4.0
+redis==5.2.1
+
+# External APIs / resilience
+openai==1.59.6
+httpx==0.28.1
+tenacity==9.0.0
+
+# Config / logging
+PyYAML==6.0.2
+python-json-logger==3.2.1
+
+# ---------------------------------------------------------------------------
+# Heavy media / ML dependencies.
+# These are required by the Celery worker (video processing) but are imported
+# lazily, so the API and the unit-test suite run without them installed.
+# ---------------------------------------------------------------------------
+ffmpeg-python==0.2.0
+numpy==1.26.4
+scenedetect[opencv]==0.6.5
+librosa==0.10.2.post1
+faster-whisper==1.1.0
+mediapipe==0.10.18
