@@ -1,12 +1,6 @@
 from __future__ import annotations
 
-from app.services.segments import (
-    Candidate,
-    build_candidates,
-    build_coverage_segments,
-    select_non_overlapping,
-    snap_boundary,
-)
+from app.services.segments import build_coverage_segments, snap_boundary
 
 
 def _sentences():
@@ -15,23 +9,6 @@ def _sentences():
         {"text": f"Sentence {i}.", "start": float(i * 10), "end": float(i * 10 + 10)}
         for i in range(6)
     ]
-
-
-def test_candidates_respect_length_window():
-    cands = build_candidates(_sentences(), scene_cuts=[], min_s=20, max_s=30)
-    assert cands, "expected some candidates"
-    for c in cands:
-        assert 20 <= c.duration <= 30
-
-
-def test_candidates_start_and_end_on_sentence_boundaries():
-    sentences = _sentences()
-    starts = {s["start"] for s in sentences}
-    ends = {s["end"] for s in sentences}
-    cands = build_candidates(sentences, scene_cuts=[], min_s=20, max_s=40)
-    for c in cands:
-        assert c.start in starts
-        assert c.end in ends
 
 
 def test_snap_boundary_moves_to_nearby_scene_cut():
@@ -51,36 +28,6 @@ def test_snap_boundary_refuses_mid_word_cut():
 def test_snap_boundary_ignores_far_cuts():
     t = snap_boundary(10.0, scene_cuts=[25.0], words=[], tol=1.0)
     assert t == 10.0
-
-
-def test_candidates_count_scenes_and_energy():
-    cands = build_candidates(
-        _sentences(),
-        scene_cuts=[0.0, 15.0, 45.0],
-        min_s=20,
-        max_s=60,
-        energy_peaks=[5.0, 25.0, 50.0],
-    )
-    assert cands
-    first = cands[0]
-    assert first.scene_count >= 1
-    assert first.energy_peaks >= 1
-
-
-def test_select_non_overlapping_picks_top_scores():
-    a = Candidate(0, 10, "a")
-    b = Candidate(5, 15, "b")  # overlaps a
-    c = Candidate(20, 30, "c")
-    chosen = select_non_overlapping([(90, a), (80, b), (70, c)], count=5)
-    # b overlaps the higher-scored a and is dropped; a and c survive, time-sorted.
-    assert [x.text for x in chosen] == ["a", "c"]
-
-
-def test_select_respects_count():
-    cands = [Candidate(i * 20, i * 20 + 10, str(i)) for i in range(5)]
-    scored = [(float(i), c) for i, c in enumerate(cands)]
-    chosen = select_non_overlapping(scored, count=2)
-    assert len(chosen) == 2
 
 
 def test_coverage_covers_whole_video_contiguously():
@@ -107,3 +54,40 @@ def test_coverage_clip_count_scales_with_target():
 
 def test_coverage_empty_transcript():
     assert build_coverage_segments([], [], target_s=20) == []
+
+
+def _assert_tiles(covers, duration):
+    assert covers[0].start == 0.0
+    assert abs(covers[-1].end - duration) < 0.01
+    for k in range(len(covers) - 1):
+        assert covers[k + 1].start == covers[k].end  # no gaps, no overlap
+
+
+def test_coverage_includes_leading_and_trailing_parts_without_speech():
+    # Like a nature film: music only until 190s, speech 190-500s, music to 510s.
+    sentences = [
+        {"text": f"s{i}", "start": 190.0 + i * 10, "end": 198.0 + i * 10} for i in range(31)
+    ]
+    covers = build_coverage_segments(sentences, [], 180, duration_s=510)
+    _assert_tiles(covers, 510)
+    assert covers[0].text == ""  # the silent intro is a clip too
+    assert len(covers) == 3
+
+
+def test_coverage_with_no_speech_at_all_is_cut_on_time():
+    covers = build_coverage_segments([], [], 30, duration_s=95)
+    _assert_tiles(covers, 95)
+    # 95 = 30+30+35: the 5s remainder is folded into the last clip.
+    assert [round(c.duration) for c in covers] == [30, 30, 35]
+
+
+def test_coverage_never_cuts_inside_a_sentence():
+    sentences = [
+        {"text": "a", "start": 0.0, "end": 9.0},
+        {"text": "long one", "start": 25.0, "end": 41.0},  # target 30 lands inside
+        {"text": "b", "start": 70.0, "end": 80.0},
+    ]
+    covers = build_coverage_segments(sentences, [], 30, duration_s=100)
+    _assert_tiles(covers, 100)
+    assert covers[0].end == 41.0
+    assert covers[0].text == "a long one"

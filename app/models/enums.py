@@ -26,7 +26,7 @@ class JobStage(str, enum.Enum):
     queued = "queued"
     transcribing = "transcribing"
     analyzing = "analyzing"
-    finding_highlights = "finding_highlights"
+    planning_clips = "planning_clips"  # cutting the video into whole-video parts
     cutting = "cutting"
     reframing = "reframing"
     captioning = "captioning"

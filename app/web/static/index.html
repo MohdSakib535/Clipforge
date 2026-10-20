@@ -124,7 +124,7 @@
       <!-- STEP 3: Settings -->
       <section x-show="step==='settings'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
         <h2 class="text-lg font-medium mb-4">Choose platforms & settings</h2>
-        <p class="text-sm text-slate-400 mb-3">Pick each platform and set how many clips you want for it.</p>
+        <p class="text-sm text-slate-400 mb-3">Pick each platform and how long each clip should be. The whole video is cut into clips of about that length.</p>
         <div class="grid sm:grid-cols-2 gap-3 mb-6">
           <template x-for="p in platforms" :key="p.key">
             <div class="bg-slate-800/60 rounded-lg p-3"
@@ -137,26 +137,13 @@
                 </div>
               </label>
               <template x-if="p.key in platformCfg">
-                <div class="mt-3 pl-7 space-y-2">
-                  <div class="flex gap-4 text-xs">
-                    <label class="flex items-center gap-1 cursor-pointer">
-                      <input type="radio" :name="`mode-${p.key}`" value="coverage" x-model="platformCfg[p.key].mode" /> Cover whole video
-                    </label>
-                    <label class="flex items-center gap-1 cursor-pointer">
-                      <input type="radio" :name="`mode-${p.key}`" value="highlights" x-model="platformCfg[p.key].mode" /> Top highlights
-                    </label>
-                  </div>
-                  <div x-show="platformCfg[p.key].mode==='coverage'" class="flex flex-wrap items-center gap-2 text-xs">
+                <div class="mt-3 pl-7">
+                  <div class="flex flex-wrap items-center gap-2 text-xs">
                     <label class="text-slate-300">Seconds per clip:</label>
                     <input type="number" :min="p.length_min_s" :max="p.length_max_s"
                            x-model.number="platformCfg[p.key].lengthS"
                            class="w-20 bg-slate-900 rounded px-2 py-1" />
                     <span class="text-indigo-300 font-medium" x-text="coverageEstimate(p)"></span>
-                  </div>
-                  <div x-show="platformCfg[p.key].mode==='highlights'" class="flex items-center gap-2 text-xs">
-                    <label class="text-slate-300">Number of clips:</label>
-                    <input type="number" min="1" max="20" x-model.number="platformCfg[p.key].clipCount"
-                           class="w-20 bg-slate-900 rounded px-2 py-1" />
                   </div>
                 </div>
               </template>
@@ -199,7 +186,10 @@
         <div class="flex items-center justify-between mb-4">
           <h2 class="text-lg font-medium">Review clips (<span x-text="clips.length"></span>)</h2>
           <div class="flex gap-2">
-            <a :href="`/jobs/${job?.id}/export.zip`" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download all (ZIP)</a>
+            <a x-show="approvedCount() > 0" :href="`/jobs/${job?.id}/export.zip?only=approved`"
+               class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download approved (<span x-text="approvedCount()"></span>) ZIP</a>
+            <a :href="`/jobs/${job?.id}/export.zip`" class="px-3 py-1.5 rounded-lg text-sm"
+               :class="approvedCount() > 0 ? 'bg-slate-700 hover:bg-slate-600' : 'bg-emerald-600 hover:bg-emerald-500'">Download all (ZIP)</a>
             <button @click="refreshClips()" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Refresh</button>
           </div>
         </div>
@@ -288,7 +278,7 @@
             <div class="flex flex-wrap gap-2">
               <button @click="applyColorAll()" :disabled="colorAll.busy || !clips.some(c => isPlayable(c))"
                 class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs">Apply to all clips</button>
-              <button @click="resetColorAll()" :disabled="colorAll.busy || !clips.some(c => c.color_contrast||c.color_brightness||c.color_saturation)"
+              <button @click="resetColorAll()" :disabled="colorAll.busy || !clips.some(c => colorOn(c))"
                 class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">Reset all</button>
             </div>
           </div>
@@ -310,15 +300,26 @@
                    and never retries. ?v=file_version changes whenever the file does (re-render,
                    music added/removed), so the browser never plays a stale cached copy. -->
               <template x-if="isPlayable(c)">
-                <video controls :src="previewUrl(c)" class="w-full rounded-lg bg-black mb-3 max-h-80"></video>
+                <div class="relative mb-3">
+                  <!-- While the colour sliders differ from the file, show them live on the player. -->
+                  <video controls :src="previewUrl(c)" class="w-full rounded-lg bg-black max-h-80"
+                    :style="colorChanged(c) ? `filter: url(#cf-${c.id})` : ''"></video>
+                  <span x-show="colorChanged(c)" class="absolute top-2 left-2 text-[10px] px-1.5 py-0.5 rounded bg-amber-600/90 text-white pointer-events-none">
+                    Colour preview · not applied yet</span>
+                  <svg width="0" height="0" class="absolute" aria-hidden="true">
+                    <filter :id="`cf-${c.id}`" color-interpolation-filters="sRGB">
+                      <feColorMatrix type="matrix" :values="colorPreviewMatrix(c)" />
+                    </filter>
+                  </svg>
+                </div>
               </template>
               <div x-show="!isPlayable(c)" class="w-full rounded-lg bg-slate-800 mb-3 py-10 text-center text-slate-500 text-sm" x-text="c.status==='failed'?'Render failed':(c.status==='rendering'||c.status==='pending'?'Rendering…':'No render yet')"></div>
 
               <div class="flex items-center gap-2 text-sm mb-2">
-                <span class="px-2 py-0.5 rounded bg-indigo-600/40 text-indigo-200">Score <span x-text="Math.round(c.score||0)"></span></span>
+                <span x-show="c.has_speech === false" class="px-2 py-0.5 rounded bg-slate-700 text-slate-300 text-xs"
+                      title="This part has no spoken words (music or silence), so its title is just the part number.">No speech</span>
                 <span class="text-slate-400 text-xs" x-text="`${c.start_s?.toFixed(1)}s → ${c.end_s?.toFixed(1)}s`"></span>
               </div>
-              <p class="text-xs text-slate-400 mb-2" x-text="c.reason"></p>
 
               <input x-model="c.title" class="w-full bg-slate-800 rounded px-2 py-1 text-sm mb-2" placeholder="Title" />
               <textarea x-model="c.description" rows="2" class="w-full bg-slate-800 rounded px-2 py-1 text-xs mb-2" placeholder="Description"></textarea>
@@ -358,8 +359,9 @@
               <details class="mb-3 text-xs">
                 <summary class="cursor-pointer select-none text-slate-400 hover:text-slate-200">
                   Colour adjustment
-                  <span x-show="(c.color_contrast||c.color_brightness||c.color_saturation)" class="text-indigo-300">· on</span>
-                  <span x-show="colorChanged(c)" class="text-amber-300">· unsaved</span>
+                  <span x-show="colorOn(c)" class="text-indigo-300">· on</span>
+                  <span x-show="colorChanged(c)" class="text-amber-300"
+                        title="These values are not in the video file yet. Click Apply colour.">· not applied</span>
                 </summary>
                 <div class="mt-2 bg-slate-800/50 rounded px-2 py-2 space-y-1.5">
                   <label class="flex items-center gap-2">
@@ -383,7 +385,7 @@
                     <button @click="resetColor(c)" :disabled="!(c.color_contrast||c.color_brightness||c.color_saturation)"
                       class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Reset</button>
                   </div>
-                  <p class="text-slate-500">Small values look most natural. Applying re-renders this clip (its music is kept); horizontal clips re-encode, so it's slower than a normal cut.</p>
+                  <p class="text-slate-500">Small values look most natural. "Apply colour" re-renders this clip (its music is kept; size and length stay the same); "Save" doesn't change the colour. A graded clip is re-encoded, so it's slower than a normal cut.</p>
                 </div>
               </details>
 
@@ -392,7 +394,11 @@
               <div class="flex flex-wrap gap-2">
                 <button @click="saveClip(c)" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Save</button>
                 <button @click="rerender(c)" class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-xs">Save & re-render</button>
-                <button @click="approve(c)" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs">Approve</button>
+                <button @click="approve(c)" :disabled="!isPlayable(c)"
+                  :title="c.status==='approved' ? 'Click to un-approve' : 'Approved clips can be downloaded together'"
+                  class="px-2.5 py-1 rounded text-xs disabled:opacity-40"
+                  :class="c.status==='approved' ? 'bg-emerald-900 text-emerald-200 ring-1 ring-emerald-500 hover:bg-emerald-800' : 'bg-emerald-600 hover:bg-emerald-500'"
+                  x-text="c.status==='approved' ? 'Approved ✓' : 'Approve'"></button>
                 <a :href="downloadUrl(c)" x-show="c.has_file" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Download</a>
                 <a :href="`/clips/${c.id}/captions.srt`" x-show="c.has_srt" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Captions (.srt)</a>
                 <button @click="del(c)" class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 text-xs">Delete</button>

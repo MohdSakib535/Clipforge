@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -59,7 +61,10 @@ class Transcriber(ABC):
         audio_path: str | Path,
         language: str | None = None,
         on_progress: ProgressFn | None = None,
-    ) -> TranscriptResult: ...
+        cache_dir: str | Path | None = None,
+    ) -> TranscriptResult:
+        """``cache_dir``: where finished pieces are kept, so a run that is
+        interrupted (worker restart, crash) resumes instead of starting over."""
 
 
 def _merge_chunks(chunks: list[tuple[float, list[Word]]]) -> list[Word]:
@@ -148,37 +153,59 @@ class OpenAITranscriber(Transcriber):
             for w in (_as_dict(x) for x in words_raw)
         ]
 
+    def _chunk_cache_file(self, cache_dir: Path, idx: int, offset: float) -> Path:
+        # Model and chunk geometry are in the name: a cached piece is only
+        # reused for exactly the same request.
+        model = self.settings.openai_transcribe_model.replace("/", "_")
+        return cache_dir / f"{model}-{CHUNK_LEN_S:.0f}s-{idx:03d}-{offset:.1f}.json"
+
     def transcribe(
         self,
         audio_path: str | Path,
         language: str | None = None,
         on_progress: ProgressFn | None = None,
+        cache_dir: str | Path | None = None,
     ) -> TranscriptResult:
         audio_path = str(audio_path)
         info = ffmpeg.ffprobe_metadata(audio_path)
         duration = info.duration_s
         client = self._client()
+        cache = Path(cache_dir) if cache_dir else None
+        if cache:
+            cache.mkdir(parents=True, exist_ok=True)
 
         step = CHUNK_LEN_S - CHUNK_OVERLAP_S
+        results: dict[int, tuple[float, list[Word]]] = {}
         with tempfile.TemporaryDirectory() as tmp:
-            # 1) Slice all chunks up front. The input is already a compact MP3,
-            # so stream copy is enough — no re-encode per chunk.
+            # 1) Slice the chunks up front. The input is already a compact MP3,
+            # so stream copy is enough — no re-encode per chunk. Chunks an
+            # earlier, interrupted run already paid for are loaded instead.
             jobs: list[tuple[int, float, str]] = []
             offset = 0.0
             idx = 0
             while offset < duration:
-                chunk_path = str(Path(tmp) / f"chunk_{idx}.mp3")
-                ffmpeg.run(
-                    ffmpeg.build_audio_copy_chunk_cmd(audio_path, chunk_path, offset, CHUNK_LEN_S)
-                )
-                jobs.append((idx, offset, chunk_path))
+                cached = _load_chunk(self._chunk_cache_file(cache, idx, offset)) if cache else None
+                if cached is not None:
+                    results[idx] = (offset, cached)
+                else:
+                    chunk_path = str(Path(tmp) / f"chunk_{idx}.mp3")
+                    ffmpeg.run(
+                        ffmpeg.build_audio_copy_chunk_cmd(
+                            audio_path, chunk_path, offset, CHUNK_LEN_S
+                        )
+                    )
+                    jobs.append((idx, offset, chunk_path))
                 offset += step
                 idx += 1
+            total = idx
+            if results:
+                log.info("transcribe_resume", extra={"cached_chunks": len(results), "of": total})
+                if on_progress:
+                    on_progress(len(results) / total)
 
             # 2) Transcribe chunks concurrently (network I/O bound). Results are
             # collected on this thread, so on_progress may safely touch the DB.
-            workers = max(1, min(self.settings.transcribe_concurrency, len(jobs)))
-            results: dict[int, tuple[float, list[Word]]] = {}
+            workers = max(1, min(self.settings.transcribe_concurrency, len(jobs) or 1))
 
             def _work(job: tuple[int, float, str]) -> tuple[int, float, list[Word]]:
                 j_idx, j_off, j_path = job
@@ -190,8 +217,10 @@ class OpenAITranscriber(Transcriber):
                 for future in as_completed(futures):
                     j_idx, j_off, words = future.result()
                     results[j_idx] = (j_off, words)
+                    if cache:  # saved at once: a restart now loses only chunks in flight
+                        _save_chunk(self._chunk_cache_file(cache, j_idx, j_off), words)
                     if on_progress:
-                        on_progress(len(results) / len(jobs))
+                        on_progress(len(results) / total)
 
             # Preserve chunk order for correct overlap de-duplication.
             chunks = [results[i] for i in sorted(results)]
@@ -212,11 +241,45 @@ class LocalWhisperTranscriber(Transcriber):
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
 
+    def _detect_language(self, model, audio_path: str) -> str | None:
+        """Pick the spoken language by listening to up to 5 places across the audio.
+
+        faster-whisper's own detection uses only the first 30 seconds, then forces
+        that language on the whole file. A film that opens with music, a logo
+        jingle or one English word then gets transcribed in the wrong language
+        throughout. Voting across the file avoids that."""
+        import numpy as np
+
+        duration = ffmpeg.ffprobe_metadata(audio_path).duration_s
+        windows = max(1, min(5, int(duration // 120)))
+        totals: dict[str, float] = {}
+        for k in range(windows):
+            centre = duration * (k + 0.5) / windows
+            start = max(0.0, min(centre - 15, duration - 30))
+            raw = ffmpeg.run_capture(
+                [
+                    "ffmpeg", "-v", "error", "-ss", f"{start:.2f}", "-t", "30", "-i", audio_path,
+                    "-f", "f32le", "-ac", "1", "-ar", "16000", "-",
+                ]
+            )  # fmt: skip
+            samples = np.frombuffer(raw, dtype=np.float32)
+            if samples.size < 16000:  # under a second of audio
+                continue
+            _lang, _prob, all_probs = model.detect_language(audio=samples)
+            for code, prob in all_probs:
+                totals[code] = totals.get(code, 0.0) + float(prob)
+        if not totals:
+            return None
+        best = max(totals, key=totals.get)
+        log.info("whisper_language_vote", extra={"language": best, "windows": windows})
+        return best
+
     def transcribe(
         self,
         audio_path: str | Path,
         language: str | None = None,
         on_progress: ProgressFn | None = None,
+        cache_dir: str | Path | None = None,  # unused: local runs cost nothing to redo
     ) -> TranscriptResult:
         from faster_whisper import WhisperModel
 
@@ -227,9 +290,19 @@ class LocalWhisperTranscriber(Transcriber):
             self.settings.local_whisper_model,
             device=device,
             compute_type=self.settings.local_whisper_compute_type,
+            cpu_threads=os.cpu_count() or 4,  # default is only 4 threads
+        )
+        language = (
+            language
+            or self.settings.local_whisper_language
+            or self._detect_language(model, str(audio_path))
         )
         segments_iter, info = model.transcribe(
-            str(audio_path), language=language, word_timestamps=True
+            str(audio_path),
+            language=language,
+            word_timestamps=True,
+            beam_size=self.settings.local_whisper_beam_size,
+            vad_filter=self.settings.local_whisper_vad,
         )
         total = float(getattr(info, "duration", 0.0)) or 0.0
         words: list[Word] = []
@@ -250,8 +323,29 @@ class LocalWhisperTranscriber(Transcriber):
             language=getattr(info, "language", language),
             duration_s=float(getattr(info, "duration", 0.0)),
             provider=f"local:{self.settings.local_whisper_model}",
-            segments=segments,
+            # Same sentence grouping as the OpenAI path, so clip boundaries behave
+            # alike on both backends (Whisper's own segments can run 20-30s).
+            segments=_sentences_from_words(words) or segments,
         )
+
+
+def _load_chunk(path: Path) -> list[Word] | None:
+    try:
+        data = json.loads(path.read_text())
+        return [Word(w["word"], float(w["start"]), float(w["end"])) for w in data["words"]]
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError):
+        log.warning("transcribe_chunk_cache_unreadable", extra={"path": str(path)})
+        return None
+
+
+def _save_chunk(path: Path, words: list[Word]) -> None:
+    # Write then rename, so a crash mid-write never leaves a half file that
+    # would later be trusted.
+    tmp = path.with_suffix(".part")
+    tmp.write_text(json.dumps({"words": [w.as_dict() for w in words]}))
+    tmp.replace(path)
 
 
 def _as_dict(obj) -> dict:
@@ -268,6 +362,6 @@ def _leading_space(w: dict) -> str:
 
 def get_transcriber(settings: Settings | None = None) -> Transcriber:
     settings = settings or get_settings()
-    if settings.transcriber == "local":
+    if settings.transcribe_is_local:
         return LocalWhisperTranscriber(settings)
     return OpenAITranscriber(settings)

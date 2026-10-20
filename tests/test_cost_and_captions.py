@@ -3,25 +3,11 @@ from __future__ import annotations
 import pytest
 
 from app.services.captions import build_srt
-from app.services.cost import CostCapExceeded, CostTracker, chat_cost, transcription_cost
+from app.services.cost import CostCapExceeded, CostTracker, transcription_cost
 
 
 def test_transcription_cost_known_model():
     assert transcription_cost("whisper-1", 10) == pytest.approx(0.06)
-
-
-def test_chat_cost_known_model():
-    # gpt-4o-mini: $0.15/1M in, $0.60/1M out
-    c = chat_cost("gpt-4o-mini", 1_000_000, 1_000_000)
-    assert c == pytest.approx(0.75)
-
-
-def test_cheapest_chat_model_is_priced_below_mini():
-    # An unpriced model falls back to a pricey default, which would overcount
-    # and could trip the per-job cap, so the cheap test model must be listed.
-    nano = chat_cost("gpt-4.1-nano", 1_000_000, 1_000_000)
-    assert nano == pytest.approx(0.50)
-    assert nano < chat_cost("gpt-4o-mini", 1_000_000, 1_000_000)
 
 
 def test_cost_tracker_enforces_cap():
@@ -33,10 +19,9 @@ def test_cost_tracker_enforces_cap():
 def test_cost_tracker_accumulates():
     tracker = CostTracker(cap_usd=100.0)
     tracker.add_transcription("whisper-1", 10)
-    tracker.add_chat("gpt-4o-mini", 1000, 500)
-    assert tracker.audio_minutes == 10
-    assert tracker.tokens_in == 1000
-    assert tracker.total_usd > 0
+    tracker.add_transcription("large-v3-turbo", 30, free=True)  # local: counted, $0
+    assert tracker.audio_minutes == 40
+    assert tracker.total_usd == pytest.approx(0.06)
     assert "whisper-1" in tracker.models_used
 
 

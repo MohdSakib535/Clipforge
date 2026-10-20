@@ -34,7 +34,18 @@ def enqueue_bg_audio_mix(clip_ids: list[str], approved_ids: list[str]) -> None:
     mix_background_audio.delay(clip_ids, approved_ids)
 
 
-def enqueue_clip_render(clip_id: str, keep_approved: bool = False) -> None:
+# Redis serves lower numbers first (kombu checks priority 0 of every queue
+# before priority 3, 6, 9), so an edit someone is waiting for jumps ahead of a
+# batch such as a colour change on every clip.
+URGENT_PRIORITY = 0
+BATCH_PRIORITY = 9
+
+
+def enqueue_clip_render(clip_id: str, keep_approved: bool = False, urgent: bool = False) -> None:
+    """``urgent``: one clip someone is editing right now; it is rendered
+    before any batch re-renders still waiting in the queue."""
     from app.tasks.pipeline import render_single_clip
 
-    render_single_clip.delay(clip_id, keep_approved)
+    render_single_clip.apply_async(
+        args=[clip_id, keep_approved], priority=URGENT_PRIORITY if urgent else BATCH_PRIORITY
+    )

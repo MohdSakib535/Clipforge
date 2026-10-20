@@ -8,7 +8,6 @@
 # width / height                : render resolution
 # reframe                       : true when source 16:9 must be cropped to 9:16
 # captions_recommended          : UI hint
-# style                         : hint passed to the highlight scorer
 # ---------------------------------------------------------------------------
 presets:
   youtube_shorts:
@@ -22,7 +21,6 @@ presets:
     length_default_max_s: 60
     reframe: true
     captions_recommended: true
-    style: "short punchy moment with a strong hook in the first 2-3 seconds"
 
   youtube_clip:
     label: "YouTube long-form clip"
@@ -35,7 +33,6 @@ presets:
     length_default_max_s: 600
     reframe: false
     captions_recommended: false
-    style: "complete chapter-style segment covering a whole idea or argument"
 
   facebook_reel:
     label: "Facebook Reel"
@@ -48,7 +45,6 @@ presets:
     length_default_max_s: 90
     reframe: true
     captions_recommended: true
-    style: "short punchy moment, captions strongly recommended"
 
   facebook_video:
     label: "Facebook video clip"
@@ -61,4 +57,3 @@ presets:
     length_default_max_s: 900
     reframe: false
     captions_recommended: false
-    style: "longer storytelling segment with a complete narrative arc"

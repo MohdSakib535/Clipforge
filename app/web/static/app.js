@@ -10,7 +10,7 @@ function clipforge() {
     video: null,
     rightsChecked: false,
     platforms: [],
-    // { platform_key: { mode: 'coverage'|'highlights', lengthS, clipCount } }
+    // { platform_key: { lengthS } } - seconds per clip for each chosen platform
     platformCfg: {},
     captions: { enabled: true, language: "" },
     job: null,
@@ -160,14 +160,10 @@ function clipforge() {
       if (p.key in this.platformCfg) {
         delete this.platformCfg[p.key];
       } else {
-        // Default to "cover whole video" with a sensible per-format length.
+        // A sensible per-format length: 40 s vertical, 3 min horizontal.
         const want = p.is_vertical ? 40 : 180;
         const lengthS = Math.min(p.length_max_s, Math.max(p.length_min_s, want));
-        this.platformCfg[p.key] = {
-          mode: "coverage",
-          lengthS,
-          clipCount: p.is_vertical ? 5 : 3,
-        };
+        this.platformCfg[p.key] = { lengthS };
       }
     },
 
@@ -183,16 +179,10 @@ function clipforge() {
       this.busy = true;
       try {
         const platforms = Object.keys(this.platformCfg);
-        const clip_counts = {};
         const coverage_lengths = {};
-        for (const k of platforms) {
-          const cfg = this.platformCfg[k];
-          if (cfg.mode === "coverage") coverage_lengths[k] = cfg.lengthS;
-          else clip_counts[k] = cfg.clipCount;
-        }
+        for (const k of platforms) coverage_lengths[k] = this.platformCfg[k].lengthS;
         const body = {
           platforms: platforms,
-          clip_counts: clip_counts,
           coverage_lengths: coverage_lengths,
           captions: {
             enabled: this.captions.enabled,
@@ -243,6 +233,8 @@ function clipforge() {
           this.initColor(f);
           return f;
         }
+        // A re-render just finished: take the grade it really gave the file.
+        const finished = cur.status === "rendering" && ["ready", "approved"].includes(f.status);
         Object.assign(cur, {
           status: f.status,
           has_file: f.has_file,
@@ -253,7 +245,16 @@ function clipforge() {
           bg_audio_id: f.bg_audio_id,
           bg_audio_volume: f.bg_audio_volume,
           bg_audio_mute_original: f.bg_audio_mute_original,
+          color_rendered: f.color_rendered,
         });
+        if (finished) {
+          Object.assign(cur, {
+            color_contrast: f.color_contrast,
+            color_brightness: f.color_brightness,
+            color_saturation: f.color_saturation,
+          });
+          this.initColor(cur);
+        }
         return cur;
       });
     },
@@ -279,21 +280,32 @@ function clipforge() {
       return this.clips.filter((c) => ["ready", "approved"].includes(c.status)).length;
     },
 
+    approvedCount() {
+      return this.clips.filter((c) => c.status === "approved" && c.has_file).length;
+    },
+
+    // "Save" keeps text/trim edits only. The colour sliders are sent only when
+    // the clip is re-rendered, so a saved grade can never sit unapplied while
+    // the file (and the download) still has the old look.
     async saveClip(c) {
       await this.patchClip(c);
     },
 
-    async patchClip(c) {
+    async patchClip(c, { withColor = false } = {}) {
       const body = {
         start_s: c.start_s,
         end_s: c.end_s,
         title: c.title,
         description: c.description,
         captions_enabled: c.captions_enabled,
-        color_contrast: c.color_contrast ?? 0,
-        color_brightness: c.color_brightness ?? 0,
-        color_saturation: c.color_saturation ?? 0,
       };
+      if (withColor) {
+        Object.assign(body, {
+          color_contrast: c.color_contrast ?? 0,
+          color_brightness: c.color_brightness ?? 0,
+          color_saturation: c.color_saturation ?? 0,
+        });
+      }
       const r = await fetch(`/clips/${c.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -307,22 +319,39 @@ function clipforge() {
     },
 
     async rerender(c) {
-      if (!(await this.patchClip(c))) return;
+      if (!(await this.patchClip(c, { withColor: true }))) return;
       const r = await fetch(`/clips/${c.id}/render`, { method: "POST" });
       if (r.ok) {
         c.status = "rendering";
-        this.initColor(c); // current grade is now what's being rendered
+        this.markColorApplied(c); // the sliders' grade is what's being rendered
         this.watchClip(c);
       }
     },
 
     // ----- Colour grade (contrast / brightness / saturation) -----
+    // _colorApplied = the grade the clip FILE has (server: color_rendered), so
+    // "not applied" stays true until a re-render, even after a page reload.
     initColor(c) {
+      const g = c.color_rendered || {
+        contrast: c.color_contrast,
+        brightness: c.color_brightness,
+        saturation: c.color_saturation,
+      };
+      c._colorApplied = { c: g.contrast ?? 0, b: g.brightness ?? 0, s: g.saturation ?? 0 };
+    },
+
+    markColorApplied(c) {
       c._colorApplied = {
         c: c.color_contrast ?? 0,
         b: c.color_brightness ?? 0,
         s: c.color_saturation ?? 0,
       };
+    },
+
+    // The clip's FILE has a grade (not just the sliders).
+    colorOn(c) {
+      const a = c._colorApplied || { c: 0, b: 0, s: 0 };
+      return !!(a.c || a.b || a.s);
     },
 
     colorChanged(c) {
@@ -332,6 +361,28 @@ function clipforge() {
         (c.color_brightness ?? 0) !== a.b ||
         (c.color_saturation ?? 0) !== a.s
       );
+    },
+
+    // Live preview of the sliders on the player, before any re-render: an SVG
+    // colour matrix doing what ffmpeg's eq does (contrast + brightness on
+    // luma, saturation on chroma; same slider mapping as
+    // ffmpeg.color_eq_filter), relative to the grade the file already has, so
+    // a graded clip isn't graded twice. Per channel X:
+    // X' = s*X + (k - s)*Y + offset, with Y the BT.709 luma.
+    colorPreviewMatrix(c) {
+      const eq = (con, bri, sat) => ({ k: 1 + con / 100, b: bri / 250, s: 1 + sat / 100 });
+      const a = c._colorApplied || { c: 0, b: 0, s: 0 };
+      const file = eq(a.c, a.b, a.s);
+      const want = eq(c.color_contrast ?? 0, c.color_brightness ?? 0, c.color_saturation ?? 0);
+      const k = want.k / file.k;
+      const s = want.s / file.s;
+      const offset = 0.5 * (1 - want.k) + want.b - k * (0.5 * (1 - file.k) + file.b);
+      const luma = [0.2126, 0.7152, 0.0722];
+      const rows = [0, 1, 2].map((ch) => {
+        const coef = luma.map((w, i) => (k - s) * w + (i === ch ? s : 0));
+        return [...coef, 0, offset];
+      });
+      return [...rows, [0, 0, 0, 1, 0]].flat().map((v) => v.toFixed(4)).join(" ");
     },
 
     resetColor(c) {
@@ -349,10 +400,15 @@ function clipforge() {
           brightness: this.colorAll.brightness,
           saturation: this.colorAll.saturation,
         });
+        const want = {
+          c: this.colorAll.contrast, b: this.colorAll.brightness, s: this.colorAll.saturation,
+        };
         const byId = new Map(this.clips.map((c) => [c.id, c]));
+        const queued = new Set();
         for (const f of res.clips) {
           const c = byId.get(f.id);
           if (!c) continue;
+          queued.add(f.id);
           Object.assign(c, {
             status: f.status,
             error: f.error,
@@ -360,10 +416,19 @@ function clipforge() {
             color_brightness: f.color_brightness,
             color_saturation: f.color_saturation,
           });
-          this.initColor(c);
+          this.markColorApplied(c);
+        }
+        // Clips whose file already had this grade were not re-rendered; the
+        // server brought their saved sliders in line, so mirror that here.
+        for (const c of this.clips) {
+          const a = c._colorApplied;
+          if (queued.has(c.id) || !this.isPlayable(c) || !a) continue;
+          if (a.c === want.c && a.b === want.b && a.s === want.s) {
+            Object.assign(c, { color_contrast: want.c, color_brightness: want.b, color_saturation: want.s });
+          }
         }
         if (res.skipped) {
-          this.notice = `Re-rendering ${res.queued} clip(s) with the new colour. ${res.skipped} not ready were skipped.`;
+          this.notice = `Re-rendering ${res.queued} clip(s) with the new colour. ${res.skipped} skipped (still rendering, or already this colour).`;
         }
         this.watchRendering();
       } catch (e) {
@@ -388,18 +453,21 @@ function clipforge() {
         const fresh = all.find((x) => x.id === c.id);
         if (fresh) Object.assign(c, fresh);
         if (!fresh || ["ready", "approved", "failed"].includes(fresh.status)) {
+          if (fresh) this.initColor(c); // the grade the new file really has
           clearInterval(iv);
         }
       }, 2000);
     },
 
+    // Toggle: approve a ready clip, or un-approve an approved one.
     async approve(c) {
+      const next = c.status === "approved" ? "ready" : "approved";
       const r = await fetch(`/clips/${c.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "approved" }),
+        body: JSON.stringify({ status: next }),
       });
-      if (r.ok) c.status = "approved";
+      if (r.ok) c.status = next;
     },
 
     async del(c) {
@@ -589,7 +657,7 @@ function clipforge() {
     stageLabel(stage) {
       const m = {
         queued: "Queued", transcribing: "Transcribing",
-        analyzing: "Analysing scenes & audio", finding_highlights: "Finding highlights",
+        analyzing: "Analysing scenes & audio", planning_clips: "Planning clips",
         cutting: "Cutting", reframing: "Reframing",
         rendering: "Rendering", finalizing: "Finalising", done: "Done",
       };

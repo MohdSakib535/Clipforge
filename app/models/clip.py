@@ -25,13 +25,7 @@ class Clip(Base, TimestampMixin):
     start_s: Mapped[float] = mapped_column(Float)
     end_s: Mapped[float] = mapped_column(Float)
 
-    # Scoring / rationale from the LLM.
-    score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    hook_strength: Mapped[float | None] = mapped_column(Float, nullable=True)
-    standalone: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    # Suggested metadata.
+    # Metadata: "Part N - <first words>" and the part's transcript; editable.
     title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     hashtags: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -66,11 +60,36 @@ class Clip(Base, TimestampMixin):
     )
     error: Mapped[str | None] = mapped_column(String(2048), nullable=True)
 
-    # Rank within the job's selection (1 = best).
+    # Part number: position in the video (1 = first part).
     rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     extra: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     job: Mapped[Job] = relationship(back_populates="clips")
+
+    @property
+    def has_speech(self) -> bool | None:
+        """False for a clip with no spoken words (music, silence), from the
+        transcript. None for clips made before this was recorded."""
+        return (self.extra or {}).get("has_speech")
+
+    @property
+    def color_rendered(self) -> dict[str, int] | None:
+        """The colour grade the clip's FILE was last rendered with. The
+        ``color_*`` columns are what the sliders were last saved as, which may
+        not be applied yet. None for clips rendered before this was recorded."""
+        return (self.extra or {}).get("color_rendered")
+
+    def rendered_grade(self) -> tuple[int, int, int]:
+        """(contrast, brightness, saturation) the file has. A clip rendered
+        before this was recorded is assumed to match its saved values."""
+        g = self.color_rendered
+        if g is None:
+            return (
+                self.color_contrast or 0,
+                self.color_brightness or 0,
+                self.color_saturation or 0,
+            )
+        return (g["contrast"], g["brightness"], g["saturation"])
 
     @property
     def has_file(self) -> bool:

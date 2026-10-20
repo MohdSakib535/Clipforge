@@ -23,7 +23,6 @@ class PlatformPreset(BaseModel):
     length_default_max_s: int = Field(gt=0)
     reframe: bool = False
     captions_recommended: bool = False
-    style: str = ""
 
     @model_validator(mode="after")
     def _check_ranges(self) -> PlatformPreset:

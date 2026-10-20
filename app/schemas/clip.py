@@ -4,7 +4,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import ClipStatus
 
-__all__ = ["ClipOut", "ClipUpdate", "ColorGradeApply", "ColorGradeResult"]
+__all__ = ["ClipOut", "ClipUpdate", "ColorGrade", "ColorGradeApply", "ColorGradeResult"]
+
+
+class ColorGrade(BaseModel):
+    contrast: int = 0
+    brightness: int = 0
+    saturation: int = 0
 
 
 class ClipOut(BaseModel):
@@ -16,10 +22,6 @@ class ClipOut(BaseModel):
     start_s: float
     end_s: float
     duration_s: float | None = None
-    score: float | None = None
-    hook_strength: float | None = None
-    standalone: bool | None = None
-    reason: str | None = None
     title: str | None = None
     description: str | None = None
     hashtags: list[str] = []
@@ -27,6 +29,9 @@ class ClipOut(BaseModel):
     color_contrast: int = 0
     color_brightness: int = 0
     color_saturation: int = 0
+    # The grade the clip file actually has (the three above may be saved but
+    # not applied yet). None: rendered before this was recorded.
+    color_rendered: ColorGrade | None = None
     caption_style: str | None = None
     language: str | None = None
     status: ClipStatus
@@ -36,6 +41,7 @@ class ClipOut(BaseModel):
     file_version: int | None = None
     has_thumbnail: bool = False
     has_srt: bool = False
+    has_speech: bool | None = None
     bg_audio_id: str | None = None
     bg_audio_volume: int = 40
     bg_audio_mute_original: bool = False

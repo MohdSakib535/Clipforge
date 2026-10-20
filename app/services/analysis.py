@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.logging import get_logger
@@ -10,13 +9,10 @@ from app.services import ffmpeg
 log = get_logger(__name__)
 
 
-@dataclass
-class AnalysisResult:
-    scene_cuts: list[float]  # scene boundary timestamps (seconds)
-    energy_peaks: list[float]  # timestamps of loudness/energy peaks (seconds)
+SCENE_THRESHOLD = 0.12
 
 
-def detect_scenes(video_path: str, threshold: float = 0.12) -> list[float]:
+def detect_scenes(video_path: str, threshold: float = SCENE_THRESHOLD) -> list[float]:
     """Scene-change timestamps, found by comparing consecutive keyframes only.
 
     Runs directly on the source — no proxy needed. On a 104-min 1080p film this
@@ -34,24 +30,3 @@ def detect_scenes(video_path: str, threshold: float = 0.12) -> list[float]:
     cuts = [round(t, 3) for t, score in ffmpeg.parse_scene_scores(text) if score > threshold]
     log.info("scene_detect", extra={"cuts": len(cuts)})
     return cuts
-
-
-def audio_energy_peaks(
-    audio_path: str, hop_s: float = 0.5, percentile: float = 80.0
-) -> list[float]:
-    """Return timestamps where short-time RMS energy exceeds a percentile."""
-    import librosa
-    import numpy as np
-
-    y, sr = librosa.load(audio_path, sr=16000, mono=True)
-    frame_length = int(sr * hop_s)
-    if frame_length <= 0 or y.size == 0:
-        return []
-    rms = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=frame_length)[0]
-    if rms.size == 0:
-        return []
-    thresh = float(np.percentile(rms, percentile))
-    times = librosa.frames_to_time(range(len(rms)), sr=sr, hop_length=frame_length)
-    peaks = [round(float(t), 3) for t, e in zip(times, rms, strict=False) if e >= thresh]
-    log.info("audio_energy", extra={"peaks": len(peaks)})
-    return peaks

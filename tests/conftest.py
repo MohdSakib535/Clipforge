@@ -5,10 +5,15 @@ import tempfile
 
 # Configure environment BEFORE any app module imports settings.
 _TMP_STORAGE = tempfile.mkdtemp(prefix="clipforge-test-")
-os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
-os.environ.setdefault("REDIS_URL", "memory://")
+# Forced, not setdefault: inside the Docker containers these point at the real
+# Postgres/Redis, and tests (e.g. ones that run Celery tasks in-process) must
+# never touch them.
+os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
+os.environ["REDIS_URL"] = "memory://"
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
-os.environ.setdefault("TRANSCRIBER", "openai")
+# Forced: the transcriber choice must not depend on the developer's .env,
+# which inside the Docker containers is loaded into the environment.
+os.environ["TRANSCRIBER"] = "openai"
 # Always a temp dir: inside the Docker containers STORAGE_PATH is already set to
 # the real storage volume, and tests must never write files there.
 os.environ["STORAGE_PATH"] = _TMP_STORAGE
@@ -23,6 +28,11 @@ from app.config.settings import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db.session import get_db  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.tasks.celery_app import celery_app  # noqa: E402
+
+# Some tests run Celery tasks in-process (task.apply). "memory://" is a broker,
+# not a result backend, so give them an in-memory one.
+celery_app.conf.result_backend = "cache+memory://"
 
 
 @pytest.fixture(autouse=True)
@@ -52,10 +62,15 @@ def db_session():
 @pytest.fixture
 def client(db_session, monkeypatch):
     # Record enqueued tasks instead of hitting Celery/Redis.
+    def _record_clip_render(cid, keep_approved=False, urgent=False):
+        calls["clip"].append((cid, keep_approved))
+        calls["clip_urgent"].append(urgent)
+
     calls: dict[str, list] = {
         "ingest": [],
         "job": [],
         "clip": [],
+        "clip_urgent": [],
         "download": [],
         "music": [],
         "audio_link": [],
@@ -75,10 +90,7 @@ def client(db_session, monkeypatch):
         lambda vid, quality: calls["download"].append((vid, quality)),
     )
     monkeypatch.setattr("app.tasks.dispatch.enqueue_job", lambda jid: calls["job"].append(jid))
-    monkeypatch.setattr(
-        "app.tasks.dispatch.enqueue_clip_render",
-        lambda cid, keep_approved=False: calls["clip"].append((cid, keep_approved)),
-    )
+    monkeypatch.setattr("app.tasks.dispatch.enqueue_clip_render", _record_clip_render)
 
     def _override_get_db():
         yield db_session

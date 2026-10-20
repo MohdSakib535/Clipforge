@@ -37,6 +37,5 @@ python-json-logger==3.2.1
 ffmpeg-python==0.2.0
 numpy==1.26.4
 scenedetect[opencv]==0.6.5
-librosa==0.10.2.post1
 faster-whisper==1.1.0
 mediapipe==0.10.18

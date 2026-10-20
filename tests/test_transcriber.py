@@ -83,3 +83,53 @@ def test_merge_chunks_dedups_overlap():
     texts = [w.word for w in merged]
     assert texts == ["a", "b", "c"]  # duplicate "b" dropped
     assert merged[-1].start == 6.0
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_interrupted_transcription_resumes_from_saved_chunks(tmp_path, monkeypatch):
+    """A worker restart mid-transcription must not pay for finished pieces again."""
+    from app.config.settings import Settings
+
+    audio = tmp_path / "audio.mp3"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1300",
+         "-ac", "1", "-c:a", "libmp3lame", "-b:a", "32k", str(audio)],
+        check=True,
+    )  # fmt: skip
+    cache = tmp_path / "chunks"
+    settings = Settings(_env_file=None, openai_api_key="sk-test", transcribe_concurrency=1)
+
+    calls: list[str] = []
+
+    def flaky(client, path, lang):
+        calls.append(path)
+        if len(calls) == 3:
+            raise RuntimeError("worker restarted")  # third piece never finishes
+        return [Word(" hi", 1.0, 1.5)]
+
+    first = OpenAITranscriber(settings)
+    monkeypatch.setattr(first, "_client", lambda: None)
+    monkeypatch.setattr(first, "_transcribe_chunk", flaky)
+    with pytest.raises(RuntimeError):
+        first.transcribe(audio, cache_dir=cache)
+    assert len(list(cache.glob("*.json"))) == 2  # the two finished pieces were kept
+
+    calls.clear()
+    second = OpenAITranscriber(settings)
+    monkeypatch.setattr(second, "_client", lambda: None)
+    monkeypatch.setattr(second, "_transcribe_chunk", flaky)
+    seen: list[float] = []
+    result = second.transcribe(audio, cache_dir=cache, on_progress=seen.append)
+
+    assert len(calls) == 1  # only the missing piece was sent (and paid for)
+    assert [round(w.start) for w in result.words] == [1, 596, 1191]
+    assert seen[0] == pytest.approx(2 / 3) and seen[-1] == 1.0
+
+
+def test_corrupt_saved_chunk_is_ignored(tmp_path):
+    from app.services.transcriber import _load_chunk
+
+    bad = tmp_path / "x.json"
+    bad.write_text("{not json")
+    assert _load_chunk(bad) is None
+    assert _load_chunk(tmp_path / "missing.json") is None

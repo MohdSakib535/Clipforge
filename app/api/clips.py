@@ -74,7 +74,7 @@ def render_clip_endpoint(
     clip.status = ClipStatus.rendering
     clip.error = None
     db.commit()
-    dispatch.enqueue_clip_render(clip.id, keep_approved)
+    dispatch.enqueue_clip_render(clip.id, keep_approved, urgent=True)
     db.refresh(clip)
     return clip
 

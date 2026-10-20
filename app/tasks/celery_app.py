@@ -23,12 +23,15 @@ celery_app.conf.update(
     # Laptop mode: one worker, concurrency 1 (set via CLI / compose command too).
     worker_concurrency=1,
     broker_connection_retry_on_startup=True,
-    # Link imports and background-music mixing get their own queues + workers
-    # ("downloader" and "mixer" in compose), so they never wait behind a long
-    # clip job on the main worker, nor hold it up.
+    # Link imports, background-music mixing and re-rendering edited clips get
+    # their own queues + workers ("downloader", "mixer" and "renderer" in
+    # compose), so they never wait behind a long clip job on the main worker,
+    # nor hold it up. A colour change on 80 clips re-renders 80 clips: on the
+    # main worker that would block every new job until it finished.
     task_routes={
         "download_video": {"queue": "downloads"},
         "download_audio_track": {"queue": "downloads"},
         "mix_background_audio": {"queue": "audio"},
+        "render_single_clip": {"queue": "renders"},
     },
 )

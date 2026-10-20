@@ -11,13 +11,11 @@ ENV PYTHONUNBUFFERED=1 \
 # System deps:
 #   ffmpeg          - cutting / reframing / captions / encoding
 #   libgl1, libglib - OpenCV / MediaPipe runtime
-#   libsndfile1     - librosa audio IO
 #   build-essential - some wheels need a compiler at install time
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         libgl1 \
         libglib2.0-0 \
-        libsndfile1 \
         build-essential \
         curl \
     && rm -rf /var/lib/apt/lists/*

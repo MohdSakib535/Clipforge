@@ -77,6 +77,9 @@ services:
       DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge
       REDIS_URL: redis://redis:6379/0
       STORAGE_PATH: /data/storage
+      # The local Whisper model (~1.6 GB) downloads on first use; keep it on the
+      # persistent storage volume so recreating the container doesn't re-download.
+      HF_HOME: /data/storage/.hf-cache
     volumes:
       - ./app:/app/app
       - storage:/data/storage
@@ -118,6 +121,29 @@ services:
       watchmedo auto-restart --directory=/app/app --pattern=*.py --recursive --
       celery -A app.tasks.celery_app:celery_app worker -Q audio -n mixer@%h
       --loglevel=info --concurrency=1
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /data/storage
+    volumes:
+      - ./app:/app/app
+      - storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Re-renders edited clips (trim, colour on one or all clips) on its own queue,
+  # so a colour change on dozens of clips never blocks new jobs on `worker`.
+  # Two re-renders at a time; each is an FFmpeg encode that uses several cores.
+  renderer:
+    build: .
+    command: >
+      watchmedo auto-restart --directory=/app/app --pattern=*.py --recursive --
+      celery -A app.tasks.celery_app:celery_app worker -Q renders -n renderer@%h
+      --loglevel=info --concurrency=2
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge

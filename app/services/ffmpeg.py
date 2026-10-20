@@ -338,6 +338,103 @@ def build_copy_remux_cmd(src: str, dst_mkv: str, start_s: float, end_s: float) -
     ]  # fmt: skip
 
 
+# Copy cuts with the pre-normalised track: each clip's slice gets one gain to
+# this loudness, and a limiter with this ceiling keeps true peaks at or below
+# about -1.5 dBTP (measured on a 104-min film: -14.4..-15.8 LUFS, peaks
+# -1.6..-2.3 dBTP; per-clip loudnorm gave -14.8..-16.3 LUFS, -0.6..-0.8 dBTP).
+CLIP_LOUDNESS_TARGET = -14.0
+_PEAK_CEILING = 10 ** (-3.0 / 20)
+_MAX_GAIN_DB = 10.0
+
+
+def build_normalized_audio_cmd(src: str, dst: str) -> list[str]:
+    """The whole first audio track, loudness-normalised ONCE with the same
+    filter every clip uses, as AAC. Horizontal clips then take their slice of
+    it instead of running loudnorm per clip (loudnorm is ~95% of a copy cut's
+    time: ~16 s per 10 minutes of audio)."""
+    return [
+        "ffmpeg", "-y",
+        "-i", src,
+        "-map", "0:a:0", "-vn", "-sn", "-dn", "-map_chapters", "-1",
+        "-af", AUDIO_NORM_FILTER,
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        dst,
+    ]  # fmt: skip
+
+
+def build_copy_video_cut_cmd(src: str, dst_mkv: str, start_s: float, end_s: float) -> list[str]:
+    """Like :func:`build_copy_remux_cmd` but picture only: the audio comes
+    from the pre-normalised track (:func:`build_mux_normalized_audio_cmd`)."""
+    duration = max(0.0, end_s - start_s)
+    return [
+        "ffmpeg", "-y",
+        "-ss", f"{start_s:.3f}",
+        "-t", f"{duration:.3f}",
+        "-i", src,
+        "-map", "0:v:0", "-an", "-sn", "-dn", "-map_chapters", "-1",
+        "-c", "copy",
+        "-copyts",
+        dst_mkv,
+    ]  # fmt: skip
+
+
+def build_mux_normalized_audio_cmd(
+    video_mkv: str,
+    normalized_audio: str,
+    dst: str,
+    start_s: float,
+    duration_s: float,
+    gain_db: float = 0.0,
+) -> list[str]:
+    """Picture from the copy cut (copied, not re-encoded) + the slice of the
+    normalised track that starts where the picture really starts (its
+    keyframe, ``start_s`` in source time), brought to the clip loudness with
+    ``gain_db`` and a peak limiter. Both start at t=0 in the MP4; the source's
+    chapters are left out, as in every other cut."""
+    return [
+        "ffmpeg", "-y",
+        "-i", video_mkv,
+        "-ss", f"{start_s:.3f}",
+        "-t", f"{duration_s:.3f}",
+        "-i", normalized_audio,
+        "-map", "0:v:0", "-map", "1:a:0", "-map_chapters", "-1",
+        "-c:v", "copy",
+        "-af", f"volume={gain_db:.2f}dB,alimiter=limit={_PEAK_CEILING:.4f}:level=0:latency=1",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        dst,
+    ]  # fmt: skip
+
+
+_LUFS_RE = re.compile(r"I:\s+(-?[\d.]+) LUFS")
+
+
+def measure_loudness(src: str | Path, start_s: float, duration_s: float) -> float | None:
+    """Integrated loudness (LUFS) of a slice of ``src``; None if unmeasurable.
+    Cheap (~0.5 s per 10 min): no resampling, unlike loudnorm."""
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostats",
+            "-ss", f"{start_s:.3f}", "-t", f"{duration_s:.3f}", "-i", str(src),
+            "-vn", "-sn", "-dn", "-af", "ebur128", "-f", "null", "-",
+        ],
+        capture_output=True,
+        text=True,
+    )  # fmt: skip
+    found = _LUFS_RE.findall(proc.stderr) if proc.returncode == 0 else []
+    return float(found[-1]) if found else None
+
+
+def clip_gain_db(measured_lufs: float | None) -> float:
+    """Gain bringing a slice to CLIP_LOUDNESS_TARGET, at most +/-10 dB; none
+    for silence or an unmeasurable slice."""
+    if measured_lufs is None or measured_lufs < -60:
+        return 0.0
+    gain = CLIP_LOUDNESS_TARGET - measured_lufs
+    return max(-_MAX_GAIN_DB, min(_MAX_GAIN_DB, gain))
+
+
 def build_audio_normalize_cmd(src_mkv: str, dst: str) -> list[str]:
     """Step 2 of a no-re-encode cut: keep the video as-is, normalise the audio
     to stereo/loudnorm/AAC, and write a web-ready MP4 starting at t=0."""
@@ -346,6 +443,27 @@ def build_audio_normalize_cmd(src_mkv: str, dst: str) -> list[str]:
         "-i", src_mkv,
         "-map", "0:v:0", "-map", "0:a:0?",
         "-c:v", "copy",
+        "-af", AUDIO_NORM_FILTER,
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        dst,
+    ]  # fmt: skip
+
+
+def build_graded_cut_cmd(
+    src_mkv: str, dst: str, video_filter: str, *, preset: str = "veryfast"
+) -> list[str]:
+    """Step 2 of a cut that needs a colour grade: like
+    :func:`build_audio_normalize_cmd`, but the video is re-encoded through
+    ``video_filter``. The cut from step 1 is used as-is (no seeking, no
+    scaling), so a graded clip keeps exactly the frame size, start and length
+    it has without a grade."""
+    return [
+        "ffmpeg", "-y",
+        "-i", src_mkv,
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", video_filter,
+        "-c:v", "libx264", "-preset", preset, "-crf", "20", "-pix_fmt", "yuv420p",
         "-af", AUDIO_NORM_FILTER,
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",

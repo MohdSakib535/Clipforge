@@ -5,6 +5,7 @@ import json
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.api.errors import AppError, NotFoundError
+from app.config.settings import ConfigError, get_settings
 from app.db.session import SessionLocal, get_db
 from app.models import Clip, ClipStatus, Job, JobStatus, User, Video, VideoStatus
 from app.schemas.clip import ClipOut, ColorGradeApply, ColorGradeResult
@@ -30,6 +32,20 @@ def _get_job(db: Session, user: User, job_id: str) -> Job:
     if video is None or video.user_id != user.id:
         raise NotFoundError("Job not found")
     return job
+
+
+def _check_transcriber() -> None:
+    """Refuse to queue a job the worker could not run (a bad TRANSCRIBER, or
+    OpenAI chosen without a key). Tells the user at once instead of after a
+    failed job."""
+    try:
+        get_settings().check_transcriber_config()
+    except ConfigError as exc:
+        raise AppError(
+            str(exc),
+            code="transcriber_unavailable",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        ) from None
 
 
 @router.post(
@@ -58,6 +74,7 @@ def create_job(
             code="video_not_ready",
             status_code=status.HTTP_409_CONFLICT,
         )
+    _check_transcriber()
 
     job = Job(
         video_id=video.id,
@@ -123,9 +140,14 @@ def apply_color_grade(
     queued: list[tuple[Clip, bool]] = []  # (clip, was_approved)
     for clip in clips:
         ready = clip.file_path and clip.status in (ClipStatus.ready, ClipStatus.approved)
-        unchanged = (clip.color_contrast, clip.color_brightness, clip.color_saturation) == want
-        if not ready or unchanged:
-            continue  # still rendering / failed, or already at this grade
+        if not ready:
+            continue  # still rendering / failed
+        # Compare with the grade the FILE has, not the saved sliders: sliders
+        # saved without a re-render must not make a clip look already done.
+        if clip.rendered_grade() == want:
+            # Already looks like this; just bring saved sliders back in line.
+            clip.color_contrast, clip.color_brightness, clip.color_saturation = want
+            continue
         keep_approved = clip.status == ClipStatus.approved
         clip.color_contrast, clip.color_brightness, clip.color_saturation = want
         clip.status = ClipStatus.rendering
@@ -133,6 +155,7 @@ def apply_color_grade(
         queued.append((clip, keep_approved))
 
     if not queued:
+        db.commit()  # keep any sliders brought back in line above
         raise AppError(
             "No ready clips to change (clips still rendering, or already at this grade).",
             code="nothing_to_apply",
@@ -140,7 +163,8 @@ def apply_color_grade(
         )
     db.commit()
     for clip, keep_approved in queued:
-        dispatch.enqueue_clip_render(clip.id, keep_approved)
+        # One clip = an edit in progress: jump ahead of batch re-renders.
+        dispatch.enqueue_clip_render(clip.id, keep_approved, urgent=len(queued) == 1)
     return ColorGradeResult(
         queued=len(queued), skipped=len(clips) - len(queued), clips=[c for c, _ in queued]
     )
@@ -157,29 +181,32 @@ def _metadata_dict(clip: Clip, source_video: str) -> dict:
         "start_s": clip.start_s,
         "end_s": clip.end_s,
         "duration_s": clip.duration_s,
-        "score": clip.score,
-        "reason": clip.reason,
+        "has_speech": clip.has_speech,
     }
 
 
 @router.get("/jobs/{job_id}/export.zip")
 def export_zip(
     job_id: str,
+    only: Literal["approved"] | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> FileResponse:
+    """Every rendered clip, or with ``?only=approved`` just the approved ones."""
     job = _get_job(db, user, job_id)
+    wanted = [ClipStatus.approved]
+    if only != "approved":
+        wanted.append(ClipStatus.ready)
     clips = (
         db.query(Clip)
-        .filter(Clip.job_id == job.id, Clip.status.in_([ClipStatus.ready, ClipStatus.approved]))
+        .filter(Clip.job_id == job.id, Clip.status.in_(wanted))
         .order_by(Clip.platform, Clip.rank)
         .all()
     )
     ready = [c for c in clips if c.file_path and Path(c.file_path).exists()]
     if not ready:
-        raise AppError(
-            "No rendered clips to export yet.", code="nothing_to_export", status_code=409
-        )
+        message = "No approved clips to export yet." if only else "No rendered clips to export yet."
+        raise AppError(message, code="nothing_to_export", status_code=409)
 
     video_name = job.video.filename
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
@@ -204,7 +231,7 @@ def export_zip(
     return FileResponse(
         tmp.name,
         media_type="application/zip",
-        filename=f"{video_stem(video_name)}_clips.zip",
+        filename=f"{video_stem(video_name)}_{'approved' if only else 'clips'}.zip",
     )
 
 

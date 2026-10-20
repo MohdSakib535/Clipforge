@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, Integer, String
+from sqlalchemy import JSON, BigInteger, DateTime, Enum, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, uuid_str
@@ -24,7 +24,10 @@ class Video(Base, TimestampMixin):
     filename: Mapped[str] = mapped_column(String(512))
     path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
-    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Fast fingerprint of the file (services/filehash.py): the same film
+    # uploaded again reuses its transcript instead of paying for it twice.
+    content_hash: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)

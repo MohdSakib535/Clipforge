@@ -24,14 +24,12 @@ class Job(Base, TimestampMixin):
     progress: Mapped[int] = mapped_column(Integer, default=0)  # 0-100
     error: Mapped[str | None] = mapped_column(String(2048), nullable=True)
 
-    # Full job settings (platforms, clip_count, length overrides, caption settings).
+    # Full job settings (platforms, seconds per clip, caption settings).
     settings: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     platforms: Mapped[list[str]] = mapped_column(JSON, default=list)
 
-    # Cost tracking.
+    # Cost tracking (transcription).
     audio_minutes: Mapped[float] = mapped_column(Float, default=0.0)
-    llm_tokens_in: Mapped[int] = mapped_column(Integer, default=0)
-    llm_tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     models_used: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
 

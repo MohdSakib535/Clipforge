@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from sqlalchemy import text
 
-from app.config.settings import get_settings
+from app.config.settings import ConfigError, get_settings
 from app.db.session import engine
 
 router = APIRouter(tags=["health"])
@@ -22,8 +22,17 @@ def health() -> dict:
         db_ok = False
         db_error = str(exc)
 
+    transcriber: str | None = None
+    config_error: str | None = None
+    try:
+        settings.check_transcriber_config()
+        transcriber = settings.transcriber  # "openai" or "local"
+    except ConfigError as exc:
+        config_error = str(exc)
+
     return {
-        "status": "ok" if db_ok else "degraded",
-        "transcriber": settings.transcriber,
+        "status": "ok" if db_ok and transcriber else "degraded",
+        "transcriber": transcriber,
+        "config_error": config_error,
         "database": {"ok": db_ok, "error": db_error},
     }

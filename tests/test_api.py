@@ -53,7 +53,7 @@ def test_create_job_blocked_without_rights(client, db_session):
 
     resp = client.post(
         f"/videos/{vid}/jobs",
-        json={"platforms": ["youtube_shorts"], "clip_count": 3},
+        json={"platforms": ["youtube_shorts"]},
     )
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "rights_not_confirmed"
@@ -83,7 +83,6 @@ def test_create_job_success_enqueues(client, db_session):
         f"/videos/{vid}/jobs",
         json={
             "platforms": ["youtube_shorts", "youtube_clip"],
-            "clip_count": 4,
             "captions": {"enabled": True, "style": "word_highlight"},
         },
     )
@@ -92,24 +91,6 @@ def test_create_job_success_enqueues(client, db_session):
     assert job["platforms"] == ["youtube_shorts", "youtube_clip"]
     assert job["id"] in client.enqueued["job"]
     assert job["status"] == "queued"
-
-
-def test_create_job_with_per_platform_clip_counts(client, db_session):
-    vid = _upload_sample(client)
-    video = db_session.get(Video, vid)
-    video.status = VideoStatus.ready
-    video.rights_confirmed_at = datetime.now(UTC)
-    db_session.commit()
-    resp = client.post(
-        f"/videos/{vid}/jobs",
-        json={
-            "platforms": ["youtube_shorts", "facebook_reel"],
-            "clip_counts": {"youtube_shorts": 3, "facebook_reel": 8},
-        },
-    )
-    assert resp.status_code == 201, resp.text
-    settings = resp.json()["settings"]
-    assert settings["clip_counts"] == {"youtube_shorts": 3, "facebook_reel": 8}
 
 
 def test_create_job_coverage_mode(client, db_session):
@@ -143,19 +124,6 @@ def test_create_job_rejects_bad_coverage_length(client, db_session):
     assert resp.status_code == 422
 
 
-def test_create_job_rejects_bad_clip_count(client, db_session):
-    vid = _upload_sample(client)
-    video = db_session.get(Video, vid)
-    video.status = VideoStatus.ready
-    video.rights_confirmed_at = datetime.now(UTC)
-    db_session.commit()
-    resp = client.post(
-        f"/videos/{vid}/jobs",
-        json={"platforms": ["youtube_shorts"], "clip_counts": {"youtube_shorts": 99}},
-    )
-    assert resp.status_code == 422
-
-
 def test_create_job_rejects_unknown_platform(client, db_session):
     vid = _upload_sample(client)
     video = db_session.get(Video, vid)
@@ -174,9 +142,7 @@ def test_clip_patch_and_download_flow(client, db_session):
     video.rights_confirmed_at = datetime.now(UTC)
     video.duration_s = 600.0
     db_session.commit()
-    job_resp = client.post(
-        f"/videos/{vid}/jobs", json={"platforms": ["youtube_shorts"], "clip_count": 2}
-    )
+    job_resp = client.post(f"/videos/{vid}/jobs", json={"platforms": ["youtube_shorts"]})
     job_id = job_resp.json()["id"]
 
     clip = Clip(
@@ -387,3 +353,97 @@ def test_download_and_zip_names_are_just_the_part_number(client, db_session, tmp
         assert names == {f"{base}.mp4", f"{base}.srt", f"{base}.json", f"{base}.txt"}
         assert "Source video: sample.mp4" in zf.read(f"{base}.txt").decode()
         assert '"part": 41' in zf.read(f"{base}.json").decode()
+
+
+def test_export_only_approved_and_approve_can_be_undone(client, db_session, tmp_path):
+    import zipfile
+
+    vid = _upload_sample(client)
+    video = db_session.get(Video, vid)
+    video.status = VideoStatus.ready
+    video.rights_confirmed_at = datetime.now(UTC)
+    db_session.commit()
+    job_id = client.post(f"/videos/{vid}/jobs", json={"platforms": ["facebook_video"]}).json()["id"]
+
+    clips = []
+    for rank in (1, 2, 3):
+        mp4 = tmp_path / f"c{rank}.mp4"
+        mp4.write_bytes(b"x" * 10)
+        clip = Clip(
+            job_id=job_id, platform="facebook_video", start_s=rank * 60, end_s=rank * 60 + 50,
+            rank=rank, status=ClipStatus.ready, file_path=str(mp4),
+        )  # fmt: skip
+        db_session.add(clip)
+        clips.append(clip)
+    db_session.commit()
+
+    # Nothing approved yet: the approved-only export says so.
+    resp = client.get(f"/jobs/{job_id}/export.zip?only=approved")
+    assert resp.status_code == 409 and "approved" in resp.json()["error"]["message"]
+
+    for c in (clips[0], clips[2]):
+        assert client.patch(f"/clips/{c.id}", json={"status": "approved"}).status_code == 200
+    z = client.get(f"/jobs/{job_id}/export.zip?only=approved")
+    assert 'filename="sample_approved.zip"' in z.headers["content-disposition"]
+    out = tmp_path / "approved.zip"
+    out.write_bytes(z.content)
+    with zipfile.ZipFile(out) as zf:
+        parts = {n.split("/")[1].split(".")[0] for n in zf.namelist()}
+    assert parts == {"part-001", "part-003"}
+
+    # Un-approve: back to ready, and gone from the approved export.
+    undo = client.patch(f"/clips/{clips[2].id}", json={"status": "ready"})
+    assert undo.json()["status"] == "ready"
+    z = client.get(f"/jobs/{job_id}/export.zip?only=approved")
+    out.write_bytes(z.content)
+    with zipfile.ZipFile(out) as zf:
+        assert {n.split("/")[1].split(".")[0] for n in zf.namelist()} == {"part-001"}
+
+    # The plain export still has every rendered clip.
+    out.write_bytes(client.get(f"/jobs/{job_id}/export.zip").content)
+    with zipfile.ZipFile(out) as zf:
+        assert len({n.split("/")[1].split(".")[0] for n in zf.namelist()}) == 3
+    assert client.get(f"/jobs/{job_id}/export.zip?only=junk").status_code == 422
+
+
+def test_clip_reports_whether_it_has_speech(client, db_session):
+    vid = _upload_sample(client)
+    video = db_session.get(Video, vid)
+    video.status = VideoStatus.ready
+    video.rights_confirmed_at = datetime.now(UTC)
+    db_session.commit()
+    job_id = client.post(f"/videos/{vid}/jobs", json={"platforms": ["facebook_video"]}).json()["id"]
+    for rank, extra in ((1, {"has_speech": False}), (2, {"has_speech": True}), (3, {})):
+        db_session.add(
+            Clip(
+                job_id=job_id, platform="facebook_video", start_s=rank, end_s=rank + 60,
+                rank=rank, status=ClipStatus.ready, extra=extra,
+            )
+        )  # fmt: skip
+    db_session.commit()
+    got = [c["has_speech"] for c in client.get(f"/jobs/{job_id}/clips").json()]
+    assert got == [False, True, None]  # None: clip made before this was recorded
+
+
+def test_color_all_compares_with_the_grade_the_file_really_has(client, db_session):
+    job_id, clips = _color_job(client, db_session)
+    ready, approved = clips["ready"], clips["approved"]
+    # Sliders saved at +10 but never applied: the file has no grade yet.
+    ready.color_contrast = 10
+    ready.extra = {"color_rendered": {"contrast": 0, "brightness": 0, "saturation": 0}}
+    # The file already has +10; its sliders were later saved back to 0.
+    approved.extra = {"color_rendered": {"contrast": 10, "brightness": 0, "saturation": 0}}
+    db_session.commit()
+    client.enqueued["clip"].clear()
+
+    r = client.post(f"/jobs/{job_id}/color", json={"contrast": 10})
+    assert r.status_code == 200 and r.json()["queued"] == 1
+    # Re-rendered even though its saved sliders already said +10.
+    assert [cid for cid, _ in client.enqueued["clip"]] == [ready.id]
+    # Not re-rendered (the file is right); only its sliders were brought in line.
+    db_session.refresh(approved)
+    assert approved.status == ClipStatus.approved and approved.color_contrast == 10
+
+    got = {c["id"]: c for c in client.get(f"/jobs/{job_id}/clips").json()}
+    assert got[approved.id]["color_rendered"] == {"contrast": 10, "brightness": 0, "saturation": 0}
+    assert got[clips["rendering"].id]["color_rendered"] is None  # never recorded
