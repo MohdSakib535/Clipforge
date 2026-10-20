@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.config.platforms import get_preset
 from app.models.enums import JobStage, JobStatus
@@ -21,6 +21,15 @@ class JobCreate(BaseModel):
     # 3 min horizontal.
     coverage_lengths: dict[str, int] = Field(default_factory=dict)
     captions: CaptionSettings = Field(default_factory=CaptionSettings)
+    # False: skip speech-to-text. Much faster and free; parts are cut on time
+    # at scene changes, titled "Part N", with no caption file.
+    transcribe: bool = True
+
+    @model_validator(mode="after")
+    def _no_captions_without_transcript(self):
+        if not self.transcribe:
+            self.captions.enabled = False  # captions come from the transcript
+        return self
 
     @field_validator("platforms")
     @classmethod

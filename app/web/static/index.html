@@ -151,9 +151,19 @@
           </template>
         </div>
 
-        <div class="grid sm:grid-cols-2 gap-4 mb-2">
-          <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="captions.enabled" /> Caption file (.srt)</label>
-          <input x-model="captions.language" placeholder="Language (auto)" class="bg-slate-800 rounded px-2 py-1 text-sm" />
+        <div class="bg-slate-800/60 rounded-lg p-3 mb-4">
+          <label class="flex items-center gap-3 text-sm cursor-pointer">
+            <input type="checkbox" x-model="transcribe" />
+            <span class="font-medium">Transcription (speech to text)</span>
+            <span class="text-xs px-1.5 py-0.5 rounded" :class="transcribe ? 'bg-indigo-600/50' : 'bg-slate-700'" x-text="transcribe ? 'On' : 'Off'"></span>
+          </label>
+          <p class="text-xs text-slate-400 mt-1.5" x-show="transcribe">Parts end at sentence ends; each clip gets a title and description from its speech, and a caption file.</p>
+          <p class="text-xs text-amber-300 mt-1.5" x-show="!transcribe">Off: much faster and free. Parts are cut on time at scene changes, titles are just "Part N", and there is no caption file.</p>
+        </div>
+
+        <div class="grid sm:grid-cols-2 gap-4 mb-2" :class="transcribe ? '' : 'opacity-40'">
+          <label class="flex items-center gap-2 text-sm"><input type="checkbox" x-model="captions.enabled" :disabled="!transcribe" /> Caption file (.srt)</label>
+          <input x-model="captions.language" :disabled="!transcribe" placeholder="Language (auto)" class="bg-slate-800 rounded px-2 py-1 text-sm" />
         </div>
         <p class="text-xs text-slate-500 mb-6">Captions are never drawn on the video. They come as a separate .srt file you can upload with the clip.</p>
 

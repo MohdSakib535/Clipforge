@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, Header, Request, UploadFile, status
+from fastapi import APIRouter, Depends, Header, Request, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -249,6 +249,28 @@ def confirm_rights(
     db.commit()
     db.refresh(video)
     return video
+
+
+@router.post("/{video_id}/abort", status_code=status.HTTP_204_NO_CONTENT)
+def abort_video(
+    video_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """Start over during an upload or a link download: delete the unfinished
+    video and its partial file. A link download notices on its next progress
+    update and stops. Finished videos are never deleted here."""
+    video = _get_video(db, user, video_id)
+    if video.status not in (VideoStatus.uploading, VideoStatus.downloading):
+        raise AppError(
+            "Only an unfinished upload or download can be stopped.",
+            code="not_in_progress",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    get_storage().delete(f"videos/{video.id}")
+    db.delete(video)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{video_id}", response_model=VideoOut)

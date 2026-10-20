@@ -386,12 +386,25 @@ def build_mux_normalized_audio_cmd(
     start_s: float,
     duration_s: float,
     gain_db: float = 0.0,
+    *,
+    video_filter: str | None = None,
+    preset: str = "veryfast",
 ) -> list[str]:
     """Picture from the copy cut (copied, not re-encoded) + the slice of the
     normalised track that starts where the picture really starts (its
     keyframe, ``start_s`` in source time), brought to the clip loudness with
     ``gain_db`` and a peak limiter. Both start at t=0 in the MP4; the source's
-    chapters are left out, as in every other cut."""
+    chapters are left out, as in every other cut.
+
+    With ``video_filter`` (a colour grade) the picture is re-encoded through
+    it instead of copied. The audio is the same either way, so a graded clip
+    sounds exactly like the ungraded one and needs no per-clip loudnorm."""
+    video = ["-c:v", "copy"]
+    if video_filter:
+        video = [
+            "-vf", video_filter,
+            "-c:v", "libx264", "-preset", preset, "-crf", "20", "-pix_fmt", "yuv420p",
+        ]  # fmt: skip
     return [
         "ffmpeg", "-y",
         "-i", video_mkv,
@@ -399,7 +412,7 @@ def build_mux_normalized_audio_cmd(
         "-t", f"{duration_s:.3f}",
         "-i", normalized_audio,
         "-map", "0:v:0", "-map", "1:a:0", "-map_chapters", "-1",
-        "-c:v", "copy",
+        *video,
         "-af", f"volume={gain_db:.2f}dB,alimiter=limit={_PEAK_CEILING:.4f}:level=0:latency=1",
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",

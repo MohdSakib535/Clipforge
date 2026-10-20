@@ -13,6 +13,7 @@ function clipforge() {
     // { platform_key: { lengthS } } - seconds per clip for each chosen platform
     platformCfg: {},
     captions: { enabled: true, language: "" },
+    transcribe: true, // Settings step: speech-to-text on/off
     job: null,
     clips: [],
     busy: false,
@@ -26,6 +27,9 @@ function clipforge() {
     _trackPoll: null,
     _poll: null,
     _watch: null,
+    _upload: null, // AbortController of the upload in progress
+    _uploadDone: null, // settles when that upload loop has stopped
+    _uploadVideoId: null,
 
     stepIndex() {
       return this.steps.findIndex(
@@ -41,21 +45,67 @@ function clipforge() {
         this.error = "Could not load platforms";
       }
       await this.loadTracks();
+      // Captions come from the transcript: off with it, back on with it.
+      this.$watch("transcribe", (on) => (this.captions.enabled = on));
     },
 
-    reset() {
+    // Start over. Work still running is stopped and what it made is deleted,
+    // after a confirm: an unfinished upload or download loses its partial
+    // video; a queued/running job loses its clips, but the video and its
+    // transcript stay so processing it again is quick. Finished work is kept.
+    async reset() {
+      const running = this.runningWork();
+      if (running && !confirm(running.question)) return;
       if (this._poll) clearInterval(this._poll);
       if (this._watch) clearInterval(this._watch);
       this._watch = null;
       this.music.busy = false;
+      if (running) {
+        try {
+          await running.stop();
+        } catch (e) {} // already finished or gone: nothing left to stop
+      }
       Object.assign(this, {
         step: "upload", file: null, uploading: false, uploadPct: 0,
         link: { url: "", checking: false, importing: false, info: null, quality: "best" },
         colorAll: { contrast: 0, brightness: 0, saturation: 0, busy: false },
         video: null, rightsChecked: false, platformCfg: {},
-        captions: { enabled: true, language: "" },
+        captions: { enabled: true, language: "" }, transcribe: true,
         job: null, clips: [], busy: false, error: "", notice: "",
       });
+    },
+
+    runningWork() {
+      if (this.uploading && this._upload) {
+        const ctrl = this._upload;
+        return {
+          question: "The upload isn't finished.\n\nStop it and delete the partial video?",
+          stop: async () => {
+            ctrl.abort();
+            await this._uploadDone;
+            if (this._uploadVideoId) {
+              await fetch(`/videos/${this._uploadVideoId}/abort`, { method: "POST" });
+            }
+          },
+        };
+      }
+      if (this.video?.status === "downloading") {
+        const id = this.video.id;
+        return {
+          question: "The video is still downloading.\n\nStop it and delete the partial download?",
+          stop: () => fetch(`/videos/${id}/abort`, { method: "POST" }),
+        };
+      }
+      if (this.job && ["queued", "running"].includes(this.job.status)) {
+        const id = this.job.id;
+        return {
+          question:
+            "Processing is still running.\n\nStop it and delete this job's clips? " +
+            "The video and its transcript are kept, so processing it again is quick.",
+          stop: () => fetch(`/jobs/${id}/cancel`, { method: "POST" }),
+        };
+      }
+      return null;
     },
 
     pickFile(e) {
@@ -64,6 +114,11 @@ function clipforge() {
 
     async startUpload() {
       if (!this.file) return;
+      const ctrl = new AbortController(); // Start over aborts it
+      let settle;
+      this._upload = ctrl;
+      this._uploadDone = new Promise((resolve) => (settle = resolve));
+      this._uploadVideoId = null;
       this.uploading = true;
       this.uploadPct = 0;
       try {
@@ -72,9 +127,11 @@ function clipforge() {
           size_bytes: this.file.size,
         });
         const vid = init.video_id;
+        this._uploadVideoId = vid;
         const chunk = init.chunk_size;
         let offset = 0;
         while (offset < this.file.size) {
+          if (ctrl.signal.aborted) return;
           const slice = this.file.slice(offset, offset + chunk);
           const buf = await slice.arrayBuffer();
           const end = offset + slice.size - 1;
@@ -85,17 +142,23 @@ function clipforge() {
               "Content-Range": `bytes ${offset}-${end}/${this.file.size}`,
             },
             body: buf,
+            signal: ctrl.signal,
           });
           offset += slice.size;
           this.uploadPct = Math.round((offset / this.file.size) * 100);
         }
+        if (ctrl.signal.aborted) return;
         this.video = await this.postJSON(`/videos/${vid}/upload/complete`, {});
         this.uploading = false;
         this.step = "rights";
         this.pollVideo();
       } catch (e) {
+        if (ctrl.signal.aborted) return; // stopped on purpose (Start over)
         this.uploading = false;
         this.error = "Upload failed: " + e.message;
+      } finally {
+        if (this._upload === ctrl) this._upload = null;
+        settle();
       }
     },
 
@@ -184,8 +247,9 @@ function clipforge() {
         const body = {
           platforms: platforms,
           coverage_lengths: coverage_lengths,
+          transcribe: this.transcribe,
           captions: {
-            enabled: this.captions.enabled,
+            enabled: this.transcribe && this.captions.enabled,
             language: this.captions.language || null,
           },
         };

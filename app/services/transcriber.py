@@ -214,13 +214,19 @@ class OpenAITranscriber(Transcriber):
 
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [pool.submit(_work, job) for job in jobs]
-                for future in as_completed(futures):
-                    j_idx, j_off, words = future.result()
-                    results[j_idx] = (j_off, words)
-                    if cache:  # saved at once: a restart now loses only chunks in flight
-                        _save_chunk(self._chunk_cache_file(cache, j_idx, j_off), words)
-                    if on_progress:
-                        on_progress(len(results) / total)
+                try:
+                    for future in as_completed(futures):
+                        j_idx, j_off, words = future.result()
+                        results[j_idx] = (j_off, words)
+                        if cache:  # saved at once: a restart now loses only chunks in flight
+                            _save_chunk(self._chunk_cache_file(cache, j_idx, j_off), words)
+                        if on_progress:
+                            on_progress(len(results) / total)
+                except BaseException:
+                    # Stopped (e.g. the job was cancelled): don't send the chunks
+                    # still waiting; finished ones stay cached for a retry.
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    raise
 
             # Preserve chunk order for correct overlap de-duplication.
             chunks = [results[i] for i in sorted(results)]

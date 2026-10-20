@@ -6,7 +6,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.config.platforms import PlatformPreset, get_preset
 from app.config.settings import ConfigError, Settings, get_settings
@@ -25,6 +27,7 @@ from app.models import (
 )
 from app.services import analysis, bgaudio, ffmpeg
 from app.services.cost import CostCapExceeded, CostTracker
+from app.services.discard import discard_job
 from app.services.filehash import file_fingerprint
 from app.services.render import RenderSpec, render_clip
 from app.services.romanize import has_words, is_mostly_devanagari, romanize
@@ -39,6 +42,22 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+class JobCancelled(Exception):
+    """The user stopped the job (Start over); it is deleted, not failed."""
+
+
+def _cancel_requested(db: Session, job_id: str) -> bool:
+    """Fresh read: the API marks a running job ``cancelled`` (or deletes a
+    queued one) from another process."""
+    status = db.execute(select(Job.status).where(Job.id == job_id)).scalar_one_or_none()
+    return status is None or status == JobStatus.cancelled
+
+
+def _check_cancel(db: Session, job: Job) -> None:
+    if _cancel_requested(db, job.id):
+        raise JobCancelled
+
+
 def _set_stage(db: Session, job: Job, stage: JobStage, progress: int) -> None:
     job.stage = stage
     job.progress = max(job.progress, progress)
@@ -308,6 +327,9 @@ def run_job(job_id: str) -> None:
             return
         if job.status == JobStatus.completed:
             return
+        if job.status == JobStatus.cancelled:  # stopped before it started
+            discard_job(db, job_id)
+            return
         video = db.get(Video, job.video_id)
 
         cost = CostTracker(cap_usd=settings.max_job_cost_usd, audio_minutes=job.audio_minutes)
@@ -316,18 +338,29 @@ def run_job(job_id: str) -> None:
             job.status = JobStatus.running
             job.error = None
             db.commit()
+        except StaleDataError:  # deleted by a cancel just as it was picked up
+            log.info("run_job_cancelled_before_start", extra={"job_id": job_id})
+            return
 
-            # Fail at once, not after minutes of work, if transcription can't run
-            # (unknown TRANSCRIBER, or OpenAI chosen without a key).
-            settings.check_transcriber_config()
+        try:
+
+            # Transcription can be switched off per job (Settings step): then
+            # parts are cut on time at scene changes, with no titles from speech.
+            transcribe = bool((job.settings or {}).get("transcribe", True))
+            if transcribe:
+                # Fail at once, not after minutes of work, if transcription can't
+                # run (unknown TRANSCRIBER, or OpenAI chosen without a key).
+                settings.check_transcriber_config()
 
             # 1+2) Transcribe and detect scenes CONCURRENTLY: transcription waits
             # on the network, scene detection runs in an ffmpeg subprocess, so
             # they overlap almost for free.
-            _set_stage(db, job, JobStage.transcribing, 5)
+            _set_stage(db, job, JobStage.transcribing if transcribe else JobStage.analyzing, 5)
 
             def _tx_progress(fraction: float) -> None:
-                # Runs on this thread (the transcriber collects results here).
+                # Runs on this thread (the transcriber collects results here),
+                # so a Start over stops transcription within a chunk/segment.
+                _check_cancel(db, job)
                 job.progress = max(job.progress, 5 + int(20 * fraction))
                 db.commit()
 
@@ -341,22 +374,34 @@ def run_job(job_id: str) -> None:
                 and _stream_copy_ok(db, video)
             )
             scene_cuts = _cached_scene_cuts(video)
-            with ThreadPoolExecutor(max_workers=2) as bg:
+            bg = ThreadPoolExecutor(max_workers=2)
+            try:
                 scene_future = (
                     bg.submit(analysis.detect_scenes, source) if scene_cuts is None else None
                 )
-                if needs_norm:
+                norm_future = (
                     bg.submit(_ensure_normalized_audio, _normalized_audio_path(video), source)
-                transcript = _transcribe(db, video, cost, on_progress=_tx_progress)
+                    if needs_norm
+                    else None
+                )
+                if transcribe:
+                    transcript = _transcribe(db, video, cost, on_progress=_tx_progress)
+                    sentences, words = transcript.segments or [], transcript.words or []
+                else:
+                    sentences, words = [], []
                 _save_cost(db, job, cost)
+                _check_cancel(db, job)
                 _set_stage(db, job, JobStage.analyzing, 25)
                 if scene_future is not None:
                     scene_cuts = scene_future.result()
                     _save_scene_cuts(db, video, scene_cuts)
-            # (leaving the "with" waits for the normalised audio as well)
-
-            sentences = transcript.segments or []
-            words = transcript.words or []
+                if norm_future is not None:
+                    norm_future.result()  # copy cuts use it
+            finally:
+                # A cancel or failure doesn't wait for these ffmpeg runs: scene
+                # detection ends on its own, and the normalised audio is a
+                # cache for this video, which is kept.
+                bg.shutdown(wait=False, cancel_futures=True)
 
             platforms: list[str] = job.platforms or []
             caption_cfg = (job.settings or {}).get("captions", {})
@@ -368,6 +413,7 @@ def run_job(job_id: str) -> None:
                 span = int(55 / total_platforms)
                 render_range = (base + max(1, span // 2), base + span)
 
+                _check_cancel(db, job)
                 _set_stage(db, job, JobStage.planning_clips, base)
 
                 # Tile the entire video into ~target-second parts; each part is a clip.
@@ -384,9 +430,10 @@ def run_job(job_id: str) -> None:
                 _set_stage(db, job, JobStage.rendering, render_range[0])
                 _render_parts(
                     db, job, video, preset, parts, words, caption_cfg, settings,
-                    progress=render_range,
+                    progress=render_range, transcribed=transcribe,
                 )  # fmt: skip
 
+            _check_cancel(db, job)
             _set_stage(db, job, JobStage.finalizing, 98)
             job.status = JobStatus.completed
             job.stage = JobStage.done
@@ -394,6 +441,8 @@ def run_job(job_id: str) -> None:
             db.commit()
             log.info("job_complete", extra={"clips": len(job.clips)})
 
+        except JobCancelled:
+            discard_job(db, job_id)
         except ConfigError as exc:
             _save_cost(db, job, cost)
             job.status = JobStatus.failed
@@ -407,6 +456,10 @@ def run_job(job_id: str) -> None:
             db.commit()
             log.warning("job_cost_capped", extra={"error": str(exc)})
         except Exception as exc:
+            db.rollback()
+            if _cancel_requested(db, job_id):  # stopped while something broke
+                discard_job(db, job_id)
+                return
             job.status = JobStatus.failed
             job.error = str(exc)[:2000]
             db.commit()
@@ -468,6 +521,7 @@ def _render_parts(
     settings: Settings,
     *,
     progress: tuple[int, int],
+    transcribed: bool = True,
 ) -> None:
     """Create a clip row per part (sequential, needs the DB), then render clips
     in parallel and mark EACH one ready the moment it finishes, so the
@@ -477,6 +531,7 @@ def _render_parts(
     which keeps the SQLAlchemy session single-threaded. ``progress`` is the
     (start, end) job-progress range for this batch."""
     copy_ok = not preset.is_vertical and _stream_copy_ok(db, video)
+    _check_cancel(db, job)
 
     specs: list[tuple[str, RenderSpec]] = []  # (clip_id, spec)
     for rank, part in enumerate(parts, start=1):
@@ -486,7 +541,8 @@ def _render_parts(
             platform=preset.key,
             start_s=part.start,
             end_s=part.end,
-            extra={"has_speech": has_words(part.text or "")},
+            # Without a transcript we can't tell whether a part has speech.
+            extra={"has_speech": has_words(part.text or "") if transcribed else None},
             title=title,
             description=description,
             hashtags=[],
@@ -526,6 +582,11 @@ def _render_parts(
             done += 1
             job.progress = max(job.progress, lo + int((hi - lo) * done / len(specs)))
             db.commit()
+            if _cancel_requested(db, job.id):
+                # Drop the clips not started yet; let the running ones finish
+                # (seconds) so no ffmpeg keeps writing into deleted folders.
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise JobCancelled
 
 
 # ---------------------------------------------------------------------------

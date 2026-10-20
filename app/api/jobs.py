@@ -18,6 +18,7 @@ from app.db.session import SessionLocal, get_db
 from app.models import Clip, ClipStatus, Job, JobStatus, User, Video, VideoStatus
 from app.schemas.clip import ClipOut, ColorGradeApply, ColorGradeResult
 from app.schemas.job import JobCreate, JobOut
+from app.services.discard import discard_job
 from app.services.naming import clip_basename, video_stem
 from app.tasks import dispatch
 
@@ -87,6 +88,30 @@ def create_job(
     db.refresh(job)
     dispatch.enqueue_job(job.id)
     return job
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Start over while a job is still queued or running: stop it and delete
+    what it made (its clips and their files). The video and its transcript
+    are kept, so processing it again is quick. A finished (or failed) job is
+    left alone."""
+    job = _get_job(db, user, job_id)
+    if job.status == JobStatus.queued:
+        # Not started: delete now; the worker skips a job that no longer exists.
+        discard_job(db, job.id)
+        return {"status": "cancelled", "deleted": True}
+    if job.status == JobStatus.running:
+        # The pipeline checks this between steps (within seconds), stops,
+        # and deletes the job and its clips itself.
+        job.status = JobStatus.cancelled
+        db.commit()
+        return {"status": "cancelling", "deleted": False}
+    return {"status": job.status.value, "deleted": False}
 
 
 @router.get("/jobs/{job_id}", response_model=JobOut)

@@ -31,11 +31,27 @@ def _failure_reason(exc: Exception) -> str:
     return downloader.clean_error(exc)
 
 
+class DownloadCancelled(Exception):
+    """The video was deleted (Start over) while downloading."""
+
+
 def _save_progress(video_id: str, pct: int) -> None:
     # Own short session: yt-dlp may call this from its fragment threads.
     with SessionLocal() as db:
-        db.execute(update(Video).where(Video.id == video_id).values(download_progress=pct))
+        res = db.execute(update(Video).where(Video.id == video_id).values(download_progress=pct))
         db.commit()
+    if res.rowcount == 0:  # deleted by Start over: stop downloading
+        raise DownloadCancelled
+
+
+def _video_gone(video_id: str) -> bool:
+    with SessionLocal() as db:
+        return db.get(Video, video_id) is None
+
+
+def _drop_cancelled_download(video_id: str) -> None:
+    get_storage().delete(f"videos/{video_id}")
+    log.info("download_cancelled", extra={"video_id": video_id})
 
 
 @celery_app.task(
@@ -61,11 +77,17 @@ def download_video(video_id: str, quality: str = "best") -> None:
                 on_progress=lambda pct: _save_progress(video_id, pct),
             )
         except Exception as exc:
+            if _video_gone(video_id):  # Start over: remove the partial file
+                _drop_cancelled_download(video_id)
+                return
             db.refresh(video)
             video.status = VideoStatus.failed
             video.error = _failure_reason(exc)
             db.commit()
             log.exception("download_failed", extra={"video_id": video_id})
+            return
+        if _video_gone(video_id):  # Start over just as it finished
+            _drop_cancelled_download(video_id)
             return
 
         # Keep the real title (clip file names are derived from it); only a

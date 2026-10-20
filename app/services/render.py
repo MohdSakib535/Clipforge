@@ -130,7 +130,13 @@ def _copy_cut_with_normalized_audio(spec: RenderSpec) -> float:
     """Fast path: copy the picture, take the matching slice of the
     pre-normalised audio and give it one measured gain to the clip loudness
     (plus a peak limiter). No per-clip loudnorm: a 10-minute part takes ~6 s
-    instead of ~17-28 s."""
+    instead of ~17-28 s.
+
+    With a colour grade the picture of that same cut is re-encoded through it
+    (unscaled), so the clip keeps the frame size, start, length and sound it
+    has without a grade; only the x264 encode is added."""
+    grade = _color_filter(spec)
+    video_filter = _join_filters(_even_size(spec), grade) if grade else None
     with tempfile.TemporaryDirectory() as tmp:
         cut = str(Path(tmp) / "cut.mkv")
         ffmpeg.run(ffmpeg.build_copy_video_cut_cmd(spec.source_path, cut, spec.start_s, spec.end_s))
@@ -139,16 +145,19 @@ def _copy_cut_with_normalized_audio(spec: RenderSpec) -> float:
         gain = ffmpeg.clip_gain_db(ffmpeg.measure_loudness(spec.normalized_audio, start, duration))
         ffmpeg.run(
             ffmpeg.build_mux_normalized_audio_cmd(
-                cut, spec.normalized_audio, spec.out_path, start, duration, gain_db=gain
+                cut, spec.normalized_audio, spec.out_path, start, duration, gain_db=gain,
+                video_filter=video_filter, preset=spec.encode_preset,
             )
-        )
+        )  # fmt: skip
     return start
 
 
 def _render_horizontal(spec: RenderSpec) -> float:
-    if spec.stream_copy_ok and spec.normalized_audio and _color_filter(spec) is None:
-        return _copy_cut_with_normalized_audio(spec)
+    if spec.stream_copy_ok and spec.normalized_audio:
+        return _copy_cut_with_normalized_audio(spec)  # with or without a grade
     if spec.stream_copy_ok:
+        # No pre-normalised track (a video not processed since it was added):
+        # copy cut + per-clip loudnorm.
         with tempfile.TemporaryDirectory() as tmp:
             cut = str(Path(tmp) / "cut.mkv")
             ffmpeg.run(ffmpeg.build_copy_remux_cmd(spec.source_path, cut, spec.start_s, spec.end_s))

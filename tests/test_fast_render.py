@@ -165,7 +165,7 @@ def test_fast_cut_starts_on_the_keyframe(flash_beep):
 
 
 @needs_ffmpeg
-def test_graded_or_unnormalised_clips_use_the_old_path(flash_beep, monkeypatch):
+def test_graded_clips_use_the_normalised_track_too(flash_beep, monkeypatch):
     d, src, norm = flash_beep
     used = []
     monkeypatch.setattr(render, "_copy_cut_with_normalized_audio", lambda s: used.append(s) or 0.0)
@@ -174,10 +174,51 @@ def test_graded_or_unnormalised_clips_use_the_old_path(flash_beep, monkeypatch):
         preset=get_preset("facebook_video"), src_width=320, src_height=180, words=[],
         stream_copy_ok=True,
     )  # fmt: skip
-    render._render_horizontal(RenderSpec(out_path=str(d / "g.mp4"), normalized_audio=str(norm),
-                                         color_brightness=20, **base))  # fmt: skip
+    graded = RenderSpec(out_path=str(d / "g.mp4"), normalized_audio=str(norm),
+                        color_brightness=20, **base)  # fmt: skip
+    render._render_horizontal(graded)
     render._render_horizontal(RenderSpec(out_path=str(d / "n.mp4"), **base))
-    assert used == []  # a grade needs a re-encode; no track -> per-clip loudnorm
+    # A grade re-encodes the picture but no longer runs loudnorm per clip;
+    # without the normalised track it is still the old per-clip path.
+    assert used == [graded]
+
+
+def test_graded_mux_reencodes_the_picture_only():
+    mux = ffmpeg.build_mux_normalized_audio_cmd(
+        "cut.mkv", "norm.m4a", "out.mp4", 9.92, 60.08, gain_db=1.0,
+        video_filter="eq=contrast=1.2", preset="ultrafast",
+    )  # fmt: skip
+    assert mux[mux.index("-vf") + 1] == "eq=contrast=1.2"
+    assert mux[mux.index("-c:v") + 1] == "libx264" and mux[mux.index("-preset") + 1] == "ultrafast"
+    assert mux[mux.index("-af") + 1].startswith("volume=1.00dB,alimiter=")  # no loudnorm
+    assert "loudnorm" not in " ".join(mux)
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("start", [5.0, 7.3])
+def test_graded_fast_cut_matches_the_ungraded_clip(flash_beep, start):
+    """Colour changes the picture only: same keyframe start, length, frame
+    size, sync and loudness as the ungraded fast cut."""
+    d, src, norm = flash_beep
+    outs = {}
+    for name, grade in (("plain", 0), ("graded", 30)):
+        out = d / f"{name}_{start}.mp4"
+        spec = RenderSpec(
+            source_path=str(src), out_path=str(out), thumb_path=str(out.with_suffix(".jpg")),
+            start_s=start, end_s=start + 12, preset=get_preset("facebook_video"),
+            src_width=320, src_height=180, words=[], stream_copy_ok=True,
+            normalized_audio=str(norm), color_contrast=grade, color_saturation=grade,
+            encode_preset="ultrafast",
+        )  # fmt: skip
+        outs[name] = (render._render_horizontal(spec), out)
+    (p_start, plain), (g_start, graded) = outs["plain"], outs["graded"]
+    assert g_start == p_start  # same keyframe
+    p, g = ffmpeg.ffprobe_metadata(plain), ffmpeg.ffprobe_metadata(graded)
+    assert (g.width, g.height) == (p.width, p.height) == (320, 180)
+    assert abs(g.duration_s - p.duration_s) < 0.1
+    offsets = _av_offsets_ms(graded)
+    assert len(offsets) >= 3 and all(abs(o) <= 45 for o in offsets), offsets
+    assert abs(_lufs(graded) - _lufs(plain)) <= 0.2  # same audio
 
 
 # ---------------------------------------------------------------------------
