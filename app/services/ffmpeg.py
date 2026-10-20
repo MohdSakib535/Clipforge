@@ -250,6 +250,22 @@ def reframe_filter(
         return f"crop={src_w}:{crop_h}:0:(in_h-out_h)/2,scale={out_w}:{out_h}"
 
 
+def color_eq_filter(contrast: int, brightness: int, saturation: int) -> str | None:
+    """A gentle colour grade from three sliders, each 0 = no change.
+
+    The sliders are small percentages so the look stays natural: contrast and
+    saturation scale around 1.0 (+/-1% per step), brightness is deliberately
+    softer (ffmpeg brightness is strong, so 1 step = 0.004). All-zero returns
+    ``None`` (no filter, so an unchanged clip can still be stream-copied)."""
+    c, b, s = int(contrast), int(brightness), int(saturation)
+    if c == b == s == 0:
+        return None
+    contrast_v = round(1.0 + c / 100.0, 4)
+    brightness_v = round(b / 250.0, 4)
+    saturation_v = round(1.0 + s / 100.0, 4)
+    return f"eq=contrast={contrast_v}:brightness={brightness_v}:saturation={saturation_v}"
+
+
 def fit_filter(src_w: int, src_h: int, box_w: int, box_h: int) -> str:
     """Scale to fit inside box_w x box_h keeping the source aspect ratio — no
     cropping, so widescreen movies keep their full frame."""

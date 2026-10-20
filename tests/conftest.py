@@ -9,7 +9,9 @@ os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "memory://")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("TRANSCRIBER", "openai")
-os.environ.setdefault("STORAGE_PATH", _TMP_STORAGE)
+# Always a temp dir: inside the Docker containers STORAGE_PATH is already set to
+# the real storage volume, and tests must never write files there.
+os.environ["STORAGE_PATH"] = _TMP_STORAGE
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -50,9 +52,23 @@ def db_session():
 @pytest.fixture
 def client(db_session, monkeypatch):
     # Record enqueued tasks instead of hitting Celery/Redis.
-    calls: dict[str, list] = {"ingest": [], "job": [], "clip": [], "download": []}
+    calls: dict[str, list] = {
+        "ingest": [],
+        "job": [],
+        "clip": [],
+        "download": [],
+        "music": [],
+        "audio_link": [],
+    }
     monkeypatch.setattr(
         "app.tasks.dispatch.enqueue_ingest", lambda vid: calls["ingest"].append(vid)
+    )
+    monkeypatch.setattr(
+        "app.tasks.dispatch.enqueue_audio_download", lambda tid: calls["audio_link"].append(tid)
+    )
+    monkeypatch.setattr(
+        "app.tasks.dispatch.enqueue_bg_audio_mix",
+        lambda ids, approved: calls["music"].append((ids, approved)),
     )
     monkeypatch.setattr(
         "app.tasks.dispatch.enqueue_download",
@@ -60,7 +76,8 @@ def client(db_session, monkeypatch):
     )
     monkeypatch.setattr("app.tasks.dispatch.enqueue_job", lambda jid: calls["job"].append(jid))
     monkeypatch.setattr(
-        "app.tasks.dispatch.enqueue_clip_render", lambda cid: calls["clip"].append(cid)
+        "app.tasks.dispatch.enqueue_clip_render",
+        lambda cid, keep_approved=False: calls["clip"].append((cid, keep_approved)),
     )
 
     def _override_get_db():

@@ -111,7 +111,7 @@
           Preparing video (<span x-text="video?.status"></span>)… <span class="animate-pulse">●</span>
         </div>
         <div x-show="video && video.status==='ready'" class="text-sm text-slate-300 mb-4">
-          Ready: <span x-text="fmtDur(video.duration_s)"></span>, <span x-text="`${video.width}×${video.height}`"></span>, <span x-text="video.audio_tracks"></span> audio track(s).
+          Ready: <span x-text="fmtDur(video?.duration_s)"></span>, <span x-text="`${video?.width}×${video?.height}`"></span>, <span x-text="video?.audio_tracks"></span> audio track(s).
         </div>
         <label class="flex items-start gap-3 text-sm bg-slate-800/60 rounded-lg p-4">
           <input type="checkbox" x-model="rightsChecked" class="mt-1" />
@@ -199,7 +199,7 @@
         <div class="flex items-center justify-between mb-4">
           <h2 class="text-lg font-medium">Review clips (<span x-text="clips.length"></span>)</h2>
           <div class="flex gap-2">
-            <a :href="`/jobs/${job.id}/export.zip`" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download all (ZIP)</a>
+            <a :href="`/jobs/${job?.id}/export.zip`" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download all (ZIP)</a>
             <button @click="refreshClips()" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Refresh</button>
           </div>
         </div>
@@ -207,6 +207,94 @@
              class="mb-4 text-sm bg-indigo-600/20 text-indigo-200 rounded-lg px-3 py-2">
           Still rendering — <span x-text="readyCount()"></span> of <span x-text="clips.length"></span> clips ready. New clips appear here as they finish.
         </div>
+        <!-- Background music: upload a track or grab the audio of a link, then add it to all
+             clips here, or per clip with the "Background music" checkbox on each card. -->
+        <div class="bg-slate-900/60 rounded-xl border border-slate-800 p-4 mb-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-medium">Background music</h3>
+            <label class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs cursor-pointer"
+                   :class="music.uploading ? 'opacity-40 pointer-events-none' : ''">
+              <input type="file" class="hidden" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.opus,.flac" @change="uploadMusic($event)" />
+              <span x-text="music.uploading ? 'Uploading…' : '+ Upload audio'"></span>
+            </label>
+          </div>
+
+          <!-- Grab only the audio of a link -->
+          <div class="flex gap-2 mb-3">
+            <input type="url" x-model.trim="music.link" @keydown.enter="grabMusicLink()"
+              placeholder="…or paste a link to grab its audio (YouTube, SoundCloud, …)"
+              class="flex-1 bg-slate-800 rounded-lg px-3 py-1.5 text-xs outline-none focus:ring-2 focus:ring-indigo-500" />
+            <button @click="grabMusicLink()" :disabled="!music.link || music.grabbing"
+              class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs"
+              x-text="music.grabbing ? 'Starting…' : 'Get audio'"></button>
+          </div>
+          <template x-for="t in tracks.filter(t => t.status !== 'ready')" :key="t.id">
+            <div class="flex items-center gap-2 text-xs mb-2">
+              <span class="truncate max-w-xs" x-text="t.filename"></span>
+              <template x-if="t.status==='processing'">
+                <span class="flex items-center gap-2 text-amber-300">
+                  <span class="w-24 h-1.5 bg-slate-800 rounded"><span class="block h-1.5 bg-indigo-500 rounded" :style="`width:${t.progress||0}%`"></span></span>
+                  <span x-text="(t.progress||0) >= 99 ? 'Converting…' : `Downloading ${t.progress||0}%`"></span>
+                </span>
+              </template>
+              <span x-show="t.status==='failed'" class="text-rose-300 truncate max-w-md" x-text="`Failed: ${t.error||''}`"></span>
+              <button x-show="t.status==='failed'" @click="removeTrack(t)" class="text-slate-400 hover:text-slate-200 underline">remove</button>
+            </div>
+          </template>
+
+          <p x-show="!readyTracks().length" class="text-xs text-slate-500">Upload an MP3 / M4A / WAV or grab the audio of a link, then add it to all clips here, or tick "Background music" on a clip.</p>
+          <div x-show="readyTracks().length" class="flex flex-wrap items-end gap-4">
+            <label class="text-xs">Track
+              <select x-model="music.trackId" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm max-w-xs">
+                <template x-for="t in readyTracks()" :key="t.id">
+                  <option :value="t.id" :selected="t.id===music.trackId" x-text="`${t.filename} (${fmtDur(t.duration_s)})`"></option>
+                </template>
+              </select>
+            </label>
+            <label class="text-xs">Volume <span class="text-slate-400" x-text="`${music.volume}%`"></span>
+              <input type="range" min="0" max="100" step="5" x-model.number="music.volume" class="block mt-2 w-40" />
+            </label>
+            <label class="flex items-center gap-2 text-xs pb-1" title="Drop the clip's own sound so only the music plays">
+              <input type="checkbox" x-model="music.muteOriginal" /> Mute original audio (music only)
+            </label>
+            <template x-if="music.trackId">
+              <audio controls preload="none" :src="`/audio/${music.trackId}/file`" class="h-8"></audio>
+            </template>
+            <div class="flex flex-wrap gap-2">
+              <button @click="setMusic(music.trackId, music.volume, null, music.muteOriginal)" :disabled="!music.trackId || music.busy"
+                class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs">Add to all clips</button>
+              <button @click="setMusic(null, music.volume, null)" :disabled="music.busy || !clips.some(c => c.bg_audio_id)"
+                class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">Remove from all</button>
+              <button @click="deleteTrack()" :disabled="!music.trackId || music.busy"
+                class="px-3 py-1.5 rounded-lg bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40 text-xs">Delete track</button>
+            </div>
+          </div>
+          <p x-show="readyTracks().length" class="text-xs text-slate-500 mt-3">100% = as loud as the speech; 40% is a clearly audible background. Tick <b>Mute original audio</b> to drop the clip's own sound and play only the music (turn the volume up for those). The music loops if it is shorter than the clip and fades out at the end. Only the audio is redone, so this takes a second or two per clip. Only use music you're allowed to use.</p>
+        </div>
+
+        <!-- Colour adjustment for every clip at once. Each clip also has its own grade on its card. -->
+        <div class="bg-slate-900/60 rounded-xl border border-slate-800 p-4 mb-5">
+          <h3 class="text-sm font-medium mb-3">Colour adjustment — all clips</h3>
+          <div class="flex flex-wrap items-end gap-4">
+            <label class="text-xs">Contrast <span class="text-slate-400" x-text="colorAll.contrast"></span>
+              <input type="range" min="-50" max="50" step="1" x-model.number="colorAll.contrast" class="block mt-2 w-36" />
+            </label>
+            <label class="text-xs">Brightness <span class="text-slate-400" x-text="colorAll.brightness"></span>
+              <input type="range" min="-50" max="50" step="1" x-model.number="colorAll.brightness" class="block mt-2 w-36" />
+            </label>
+            <label class="text-xs">Saturation <span class="text-slate-400" x-text="colorAll.saturation"></span>
+              <input type="range" min="-50" max="50" step="1" x-model.number="colorAll.saturation" class="block mt-2 w-36" />
+            </label>
+            <div class="flex flex-wrap gap-2">
+              <button @click="applyColorAll()" :disabled="colorAll.busy || !clips.some(c => isPlayable(c))"
+                class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs">Apply to all clips</button>
+              <button @click="resetColorAll()" :disabled="colorAll.busy || !clips.some(c => c.color_contrast||c.color_brightness||c.color_saturation)"
+                class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">Reset all</button>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500 mt-3">Applies the same gentle grade to every ready clip; each one re-renders (slower than music, since the video is re-encoded) and keeps its background music. Small values look most natural. You can still set a different grade per clip on its card.</p>
+        </div>
+
         <div class="text-xs text-slate-500 mb-4">Models: <span x-text="JSON.stringify(job?.models_used||{})"></span> · Cost $<span x-text="(job?.estimated_cost_usd||0).toFixed(4)"></span> · <span x-text="job?.audio_minutes?.toFixed(1)"></span> audio min</div>
 
         <div class="grid md:grid-cols-2 gap-5">
@@ -219,7 +307,8 @@
 
               <!-- The player only exists once the file is ready. If its src were set while the clip
                    is still rendering the server answers 409, the browser marks the player as failed
-                   and never retries. The ?v= revision makes every re-render load a fresh file. -->
+                   and never retries. ?v=file_version changes whenever the file does (re-render,
+                   music added/removed), so the browser never plays a stale cached copy. -->
               <template x-if="isPlayable(c)">
                 <video controls :src="previewUrl(c)" class="w-full rounded-lg bg-black mb-3 max-h-80"></video>
               </template>
@@ -243,11 +332,68 @@
                 <input type="checkbox" x-model="c.captions_enabled" /> Caption file (.srt)
               </label>
 
+              <!-- Background music for this clip: tick to add, untick to remove. -->
+              <div x-show="readyTracks().length || c.bg_audio_id" class="flex flex-wrap items-center gap-2 text-xs mb-3 bg-slate-800/50 rounded px-2 py-1.5">
+                <label class="flex items-center gap-1.5 mr-1" :class="c.bg_audio_id ? 'text-indigo-200' : 'text-slate-300'">
+                  <input type="checkbox" :checked="!!c.bg_audio_id" @change="toggleClipMusic(c, $event.target.checked)"
+                    :disabled="!isPlayable(c) || music.busy" />
+                  Background music
+                </label>
+                <select x-model="c._musicId" class="bg-slate-800 rounded px-1.5 py-1 max-w-[10rem]">
+                  <template x-for="t in readyTracks()" :key="t.id">
+                    <option :value="t.id" :selected="t.id===c._musicId" x-text="t.filename"></option>
+                  </template>
+                </select>
+                <input type="range" min="0" max="100" step="5" x-model.number="c._musicVol" class="w-24" />
+                <span class="w-9 text-slate-400" x-text="`${c._musicVol}%`"></span>
+                <label class="flex items-center gap-1.5" title="Drop this clip's own sound so only the music plays">
+                  <input type="checkbox" x-model="c._musicMute" /> mute original
+                </label>
+                <button x-show="musicChanged(c)" @click="setMusic(c._musicId, c._musicVol, [c.id], c._musicMute)" :disabled="!isPlayable(c) || music.busy"
+                  class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Apply</button>
+                <span x-show="c.status==='rendering' && c.has_file" class="text-amber-300">mixing…</span>
+              </div>
+
+              <!-- Colour grade for this clip. Applying re-renders the clip (keeps its music). -->
+              <details class="mb-3 text-xs">
+                <summary class="cursor-pointer select-none text-slate-400 hover:text-slate-200">
+                  Colour adjustment
+                  <span x-show="(c.color_contrast||c.color_brightness||c.color_saturation)" class="text-indigo-300">· on</span>
+                  <span x-show="colorChanged(c)" class="text-amber-300">· unsaved</span>
+                </summary>
+                <div class="mt-2 bg-slate-800/50 rounded px-2 py-2 space-y-1.5">
+                  <label class="flex items-center gap-2">
+                    <span class="w-20 text-slate-400">Contrast</span>
+                    <input type="range" min="-50" max="50" step="1" x-model.number="c.color_contrast" class="flex-1" />
+                    <span class="w-7 text-right text-slate-400" x-text="c.color_contrast||0"></span>
+                  </label>
+                  <label class="flex items-center gap-2">
+                    <span class="w-20 text-slate-400">Brightness</span>
+                    <input type="range" min="-50" max="50" step="1" x-model.number="c.color_brightness" class="flex-1" />
+                    <span class="w-7 text-right text-slate-400" x-text="c.color_brightness||0"></span>
+                  </label>
+                  <label class="flex items-center gap-2">
+                    <span class="w-20 text-slate-400">Saturation</span>
+                    <input type="range" min="-50" max="50" step="1" x-model.number="c.color_saturation" class="flex-1" />
+                    <span class="w-7 text-right text-slate-400" x-text="c.color_saturation||0"></span>
+                  </label>
+                  <div class="flex items-center gap-2 pt-1">
+                    <button @click="rerender(c)" :disabled="!isPlayable(c) || !colorChanged(c)"
+                      class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Apply colour (re-render)</button>
+                    <button @click="resetColor(c)" :disabled="!(c.color_contrast||c.color_brightness||c.color_saturation)"
+                      class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Reset</button>
+                  </div>
+                  <p class="text-slate-500">Small values look most natural. Applying re-renders this clip (its music is kept); horizontal clips re-encode, so it's slower than a normal cut.</p>
+                </div>
+              </details>
+
+              <p x-show="c.error && c.status!=='failed'" class="text-xs text-amber-300 mb-3" x-text="c.error"></p>
+
               <div class="flex flex-wrap gap-2">
                 <button @click="saveClip(c)" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Save</button>
                 <button @click="rerender(c)" class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-xs">Save & re-render</button>
                 <button @click="approve(c)" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs">Approve</button>
-                <a :href="`/clips/${c.id}/download`" x-show="c.has_file" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Download</a>
+                <a :href="downloadUrl(c)" x-show="c.has_file" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Download</a>
                 <a :href="`/clips/${c.id}/captions.srt`" x-show="c.has_srt" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Captions (.srt)</a>
                 <button @click="del(c)" class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 text-xs">Delete</button>
               </div>
@@ -257,6 +403,7 @@
       </section>
 
       <div x-show="error" x-cloak class="fixed bottom-4 right-4 bg-rose-700 text-white px-4 py-2 rounded-lg text-sm" x-text="error" @click="error=''"></div>
+      <div x-show="notice && !error" x-cloak class="fixed bottom-4 right-4 bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm" x-text="notice" @click="notice=''"></div>
     </div>
 
     <script src="/ui/app.js"></script>

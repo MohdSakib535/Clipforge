@@ -30,10 +30,24 @@ class RenderSpec:
     reframe_samples: int = 8
     # Source video can be cut without re-encoding (see ffmpeg.can_stream_copy).
     stream_copy_ok: bool = False
+    # Gentle colour grade (each 0 = no change). Any non-zero value forces a
+    # re-encode, since changing pixels rules out a stream copy.
+    color_contrast: int = 0
+    color_brightness: int = 0
+    color_saturation: int = 0
 
 
 def srt_path_for(clip_path: str) -> str:
     return str(Path(clip_path).with_suffix(".srt"))
+
+
+def _color_filter(spec: RenderSpec) -> str | None:
+    return ffmpeg.color_eq_filter(spec.color_contrast, spec.color_brightness, spec.color_saturation)
+
+
+def _join_filters(*parts: str | None) -> str | None:
+    chain = [p for p in parts if p]
+    return ",".join(chain) if chain else None
 
 
 def _clip_relative_words(words: list[dict], start: float, end: float) -> list[dict]:
@@ -85,7 +99,8 @@ def _render_vertical(spec: RenderSpec) -> float:
             spec.src_height,
             samples=spec.reframe_samples,
         )
-    vf = ffmpeg.reframe_filter(spec.src_width, spec.src_height, p.width, p.height, focus)
+    reframe_vf = ffmpeg.reframe_filter(spec.src_width, spec.src_height, p.width, p.height, focus)
+    vf = _join_filters(reframe_vf, _color_filter(spec))
     ffmpeg.run(
         ffmpeg.build_render_cmd(
             spec.source_path,
@@ -100,7 +115,8 @@ def _render_vertical(spec: RenderSpec) -> float:
 
 
 def _render_horizontal(spec: RenderSpec) -> float:
-    if spec.stream_copy_ok:
+    # A colour grade changes pixels, so it cannot be a stream copy.
+    if spec.stream_copy_ok and _color_filter(spec) is None:
         with tempfile.TemporaryDirectory() as tmp:
             cut = str(Path(tmp) / "cut.mkv")
             ffmpeg.run(ffmpeg.build_copy_remux_cmd(spec.source_path, cut, spec.start_s, spec.end_s))
@@ -108,7 +124,10 @@ def _render_horizontal(spec: RenderSpec) -> float:
             start = ffmpeg.media_start_time(cut)
             ffmpeg.run(ffmpeg.build_audio_normalize_cmd(cut, spec.out_path))
         return start
-    vf = ffmpeg.fit_filter(spec.src_width, spec.src_height, spec.preset.width, spec.preset.height)
+    fit_vf = ffmpeg.fit_filter(
+        spec.src_width, spec.src_height, spec.preset.width, spec.preset.height
+    )
+    vf = _join_filters(fit_vf, _color_filter(spec))
     ffmpeg.run(
         ffmpeg.build_render_cmd(
             spec.source_path,
@@ -119,6 +138,7 @@ def _render_horizontal(spec: RenderSpec) -> float:
             preset=spec.encode_preset,
         )
     )
+    # A re-encoded horizontal clip starts exactly at start_s (no keyframe snap).
     return spec.start_s
 
 

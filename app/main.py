@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import clips, config_routes, health, jobs, videos
+from app.api import audio, clips, config_routes, health, jobs, videos
 from app.api.errors import register_exception_handlers
 from app.core.logging import configure_logging
 
@@ -49,6 +49,7 @@ def create_app() -> FastAPI:
     app.include_router(videos.router)
     app.include_router(jobs.router)
     app.include_router(clips.router)
+    app.include_router(audio.router)
 
     # Serve the single-page dashboard from the API itself (no separate build).
     if _STATIC_DIR.exists():

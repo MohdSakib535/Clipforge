@@ -87,6 +87,14 @@ def format_sort(max_res: int | None) -> list[str]:
     return [res, "fps", "vcodec:h264", "acodec:m4a"]
 
 
+def format_options(max_res: int | None, *, audio_only: bool = False) -> dict[str, Any]:
+    """yt-dlp format selection: video + audio merged, or just the audio
+    (m4a when the site has it; anything else is converted afterwards)."""
+    if audio_only:
+        return {"format": "bestaudio[ext=m4a]/bestaudio/best"}
+    return {"format": "bv*+ba/b", "format_sort": format_sort(max_res)}
+
+
 def _short_side(fmt: dict[str, Any]) -> int | None:
     sides = [v for v in (fmt.get("width"), fmt.get("height")) if v]
     return min(sides) if sides else None
@@ -133,13 +141,13 @@ def quality_options(info: dict[str, Any]) -> list[QualityOption]:
     return [best, *options]
 
 
-def check_single_video(info: dict[str, Any]) -> None:
+def check_single_video(info: dict[str, Any], *, need_video: bool = True) -> None:
     if info.get("_type") == "playlist" or info.get("entries") is not None:
         raise DownloadError("This is a playlist. Paste the link of a single video.")
     if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
         raise DownloadError("Live streams can't be imported. Try again after it ends.")
     formats = info.get("formats") or [info]
-    if not any(_has_video(f) for f in formats):
+    if need_video and not any(_has_video(f) for f in formats):
         raise DownloadError("This link has no video (audio only).")
 
 
@@ -255,44 +263,47 @@ def download(
     dest_dir: Path,
     quality: str = "best",
     on_progress: Callable[[int], None] | None = None,
+    *,
+    audio_only: bool = False,
+    max_bytes: int | None = None,
 ) -> DownloadResult:
-    """Download ``url`` at ``quality`` into ``dest_dir/source.<ext>``.
-
-    Partial ``.part`` files are resumed if the task is retried."""
+    """Download ``url`` at ``quality`` (or just its audio) into
+    ``dest_dir/source.<ext>``. Partial ``.part`` files are resumed if the task
+    is retried."""
     from yt_dlp import YoutubeDL
     from yt_dlp.utils import DownloadError as YdlError
 
     url = validate_url(url)
     max_res = parse_quality(quality)
-    max_bytes = get_settings().max_upload_bytes
+    max_bytes = max_bytes or get_settings().max_upload_bytes
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    opts = _base_opts() | {
-        "format": "bv*+ba/b",
-        "format_sort": format_sort(max_res),
-        "outtmpl": str(dest_dir / "source.%(ext)s"),
-        "max_filesize": max_bytes,
-        "concurrent_fragment_downloads": 4,
-        "progress_hooks": [ProgressTracker(on_progress)] if on_progress else [],
-    }
+    opts = (
+        _base_opts()
+        | format_options(max_res, audio_only=audio_only)
+        | {
+            "outtmpl": str(dest_dir / "source.%(ext)s"),
+            "max_filesize": max_bytes,
+            "concurrent_fragment_downloads": 4,
+            "progress_hooks": [ProgressTracker(on_progress)] if on_progress else [],
+        }
+    )
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
                 raise DownloadError("Could not read this link")
-            check_single_video(info)
+            check_single_video(info, need_video=not audio_only)
             info = ydl.process_ie_result(info, download=True)
     except YdlError as exc:
         raise DownloadError(clean_error(exc)) from None
 
     path = _downloaded_path(info, dest_dir)
     if path is None:
-        raise DownloadError(
-            "Nothing was downloaded. The video may be larger than the upload limit."
-        )
+        raise DownloadError("Nothing was downloaded. It may be larger than the upload limit.")
     if path.stat().st_size > max_bytes:
         path.unlink(missing_ok=True)
-        raise DownloadError("The video is larger than the upload limit. Pick a lower quality.")
+        raise DownloadError("The file is larger than the upload limit. Pick a lower quality.")
     return DownloadResult(path=path, title=info.get("title") or "video")
 
 

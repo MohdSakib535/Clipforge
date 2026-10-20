@@ -1,5 +1,6 @@
-"""Import a video from a link. Runs on the ``downloads`` queue (its own worker),
-so a long download never waits behind clip processing and never holds it up."""
+"""Import a video, or just the audio for background music, from a link. Runs
+on the ``downloads`` queue (its own worker), so a long download never waits
+behind clip processing and never holds it up."""
 
 from __future__ import annotations
 
@@ -11,8 +12,8 @@ from sqlalchemy import update
 from app.config.settings import get_settings
 from app.core.logging import get_logger
 from app.db.session import SessionLocal
-from app.models import Video, VideoStatus
-from app.services import downloader
+from app.models import AudioTrack, Video, VideoStatus
+from app.services import bgaudio, downloader
 from app.services.storage import get_storage
 from app.tasks.celery_app import celery_app
 from app.tasks.pipeline import ingest_video
@@ -20,6 +21,14 @@ from app.tasks.pipeline import ingest_video
 log = get_logger(__name__)
 
 _timeout_s = get_settings().download_timeout_s
+
+
+def _failure_reason(exc: Exception) -> str:
+    if isinstance(exc, downloader.DownloadError):
+        return str(exc)
+    if isinstance(exc, SoftTimeLimitExceeded):
+        return f"Download took longer than {_timeout_s // 60} minutes and was stopped."
+    return downloader.clean_error(exc)
 
 
 def _save_progress(video_id: str, pct: int) -> None:
@@ -52,15 +61,9 @@ def download_video(video_id: str, quality: str = "best") -> None:
                 on_progress=lambda pct: _save_progress(video_id, pct),
             )
         except Exception as exc:
-            if isinstance(exc, downloader.DownloadError):
-                reason = str(exc)
-            elif isinstance(exc, SoftTimeLimitExceeded):
-                reason = f"Download took longer than {_timeout_s // 60} minutes and was stopped."
-            else:
-                reason = downloader.clean_error(exc)
             db.refresh(video)
             video.status = VideoStatus.failed
-            video.error = reason
+            video.error = _failure_reason(exc)
             db.commit()
             log.exception("download_failed", extra={"video_id": video_id})
             return
@@ -80,3 +83,58 @@ def download_video(video_id: str, quality: str = "best") -> None:
     # Probe right here (~1s) rather than queueing it behind a long job on the
     # main worker, so the video is ready as soon as the download ends.
     ingest_video(video_id)
+
+
+# ---------------------------------------------------------------------------
+# Background music from a link (audio only)
+# ---------------------------------------------------------------------------
+def _save_track_progress(track_id: str, pct: int) -> None:
+    with SessionLocal() as db:
+        db.execute(update(AudioTrack).where(AudioTrack.id == track_id).values(progress=pct))
+        db.commit()
+
+
+@celery_app.task(
+    name="download_audio_track",
+    soft_time_limit=_timeout_s,
+    time_limit=_timeout_s + 60,
+)
+def download_audio_track(track_id: str) -> None:
+    """Grab only the audio of a link, then convert it like an uploaded track."""
+    with SessionLocal() as db:
+        track = db.get(AudioTrack, track_id)
+        if track is None or track.status != "processing":
+            return  # deleted meanwhile, or already done
+
+        dest_dir = Path(get_storage().path_for(f"audio/{track_id}"))
+        try:
+            result = downloader.download(
+                track.source_url or "",
+                dest_dir,
+                on_progress=lambda pct: _save_track_progress(track_id, pct),
+                audio_only=True,
+                max_bytes=get_settings().max_audio_upload_bytes,
+            )
+            info = bgaudio.prepare_track(result.path, dest_dir / "track.m4a")
+        except Exception as exc:
+            db.refresh(track)
+            track.status = "failed"
+            track.error = _failure_reason(exc)[:2000]
+            db.commit()
+            log.exception("audio_download_failed", extra={"track_id": track_id})
+            return
+        finally:
+            for f in dest_dir.glob("source.*"):  # keep only the converted track
+                f.unlink(missing_ok=True)
+
+        track_path = dest_dir / "track.m4a"
+        title = result.title.replace("/", "_").replace("\\", "_").strip()[:200] or "audio"
+        db.refresh(track)
+        track.filename = f"{title}.m4a"
+        track.path = str(track_path)
+        track.size_bytes = track_path.stat().st_size
+        track.duration_s = round(info.duration_s, 3)
+        track.progress = 100
+        track.status = "ready"
+        db.commit()
+        log.info("audio_download_done", extra={"track_id": track_id})

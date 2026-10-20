@@ -14,7 +14,7 @@ from app.api.deps import get_current_user
 from app.api.errors import AppError, NotFoundError
 from app.db.session import SessionLocal, get_db
 from app.models import Clip, ClipStatus, Job, JobStatus, User, Video, VideoStatus
-from app.schemas.clip import ClipOut
+from app.schemas.clip import ClipOut, ColorGradeApply, ColorGradeResult
 from app.schemas.job import JobCreate, JobOut
 from app.services.naming import clip_basename, video_stem
 from app.tasks import dispatch
@@ -95,6 +95,55 @@ def list_clips(
         .all()
     )
     return clips
+
+
+@router.post("/jobs/{job_id}/color", response_model=ColorGradeResult)
+def apply_color_grade(
+    job_id: str,
+    body: ColorGradeApply,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ColorGradeResult:
+    """Apply one colour grade to some or all of a job's clips (all three 0 =
+    remove the grade). Returns at once; each clip re-renders in the background
+    (its background music is re-applied automatically) and comes back ready.
+
+    A colour change edits pixels, so every affected clip is fully re-rendered —
+    slower than a music change, which only redoes audio."""
+    job = _get_job(db, user, job_id)
+
+    query = db.query(Clip).filter(Clip.job_id == job.id, Clip.status != ClipStatus.deleted)
+    if body.clip_ids is not None:
+        query = query.filter(Clip.id.in_(body.clip_ids))
+    clips = query.order_by(Clip.platform, Clip.rank).all()
+    if body.clip_ids is not None and len(clips) != len(set(body.clip_ids)):
+        raise NotFoundError("Clip not found")
+
+    want = (body.contrast, body.brightness, body.saturation)
+    queued: list[tuple[Clip, bool]] = []  # (clip, was_approved)
+    for clip in clips:
+        ready = clip.file_path and clip.status in (ClipStatus.ready, ClipStatus.approved)
+        unchanged = (clip.color_contrast, clip.color_brightness, clip.color_saturation) == want
+        if not ready or unchanged:
+            continue  # still rendering / failed, or already at this grade
+        keep_approved = clip.status == ClipStatus.approved
+        clip.color_contrast, clip.color_brightness, clip.color_saturation = want
+        clip.status = ClipStatus.rendering
+        clip.error = None
+        queued.append((clip, keep_approved))
+
+    if not queued:
+        raise AppError(
+            "No ready clips to change (clips still rendering, or already at this grade).",
+            code="nothing_to_apply",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    db.commit()
+    for clip, keep_approved in queued:
+        dispatch.enqueue_clip_render(clip.id, keep_approved)
+    return ColorGradeResult(
+        queued=len(queued), skipped=len(clips) - len(queued), clips=[c for c, _ in queued]
+    )
 
 
 def _metadata_dict(clip: Clip, source_video: str) -> dict:

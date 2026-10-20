@@ -35,6 +35,18 @@ def test_reframe_filter_same_aspect_is_scale_only():
     assert f == "scale=1920:1080"
 
 
+def test_color_eq_filter_zero_is_none():
+    # All-zero means no grade, so a clip can still be stream-copied.
+    assert ffmpeg.color_eq_filter(0, 0, 0) is None
+
+
+def test_color_eq_filter_maps_sliders():
+    f = ffmpeg.color_eq_filter(20, 0, -10)
+    assert f == "eq=contrast=1.2:brightness=0.0:saturation=0.9"
+    # brightness is softened (strong in ffmpeg): +50 -> 0.2, not 0.5
+    assert ffmpeg.color_eq_filter(0, 50, 0) == "eq=contrast=1.0:brightness=0.2:saturation=1.0"
+
+
 def test_fit_filter_keeps_widescreen_frame():
     # 2.39:1 movie into a 16:9 box: full width, letterbox height, no crop.
     assert ffmpeg.fit_filter(1920, 802, 1920, 1080) == "scale=1920:802"

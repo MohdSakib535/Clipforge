@@ -11,6 +11,7 @@ from app.services.downloader import (
     QualityOption,
     check_single_video,
     clean_error,
+    format_options,
     format_sort,
     parse_quality,
     quality_options,
@@ -54,6 +55,12 @@ def test_format_sort_limits_resolution_and_prefers_h264():
     assert format_sort(None)[0] == "res"
 
 
+def test_format_options_audio_only_grabs_just_the_audio():
+    assert format_options(None, audio_only=True) == {"format": "bestaudio[ext=m4a]/bestaudio/best"}
+    video = format_options(720)
+    assert video["format"] == "bv*+ba/b" and video["format_sort"][0] == "res:720"
+
+
 def test_quality_options_lists_each_resolution_best_first():
     opts = quality_options({"formats": _YT_FORMATS})
     assert [o.id for o in opts] == ["best", "1080", "720", "360"]
@@ -85,6 +92,8 @@ def test_check_single_video_rejects_playlist_live_and_audio_only():
     with pytest.raises(DownloadError, match="no video"):
         check_single_video({"formats": [{"vcodec": "none", "acodec": "mp3"}]})
     check_single_video({"formats": _YT_FORMATS})  # ok
+    # audio-only links are fine when we only want the audio (music tracks)
+    check_single_video({"formats": [{"vcodec": "none", "acodec": "mp3"}]}, need_video=False)
 
 
 def test_clean_error_strips_noise():

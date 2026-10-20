@@ -10,8 +10,18 @@ from app.config.platforms import PlatformPreset, get_preset
 from app.config.settings import Settings, get_settings
 from app.core.logging import bind_job_id, get_logger
 from app.db.session import SessionLocal
-from app.models import Clip, ClipStatus, Job, JobStage, JobStatus, Transcript, Video, VideoStatus
-from app.services import analysis, ffmpeg
+from app.models import (
+    AudioTrack,
+    Clip,
+    ClipStatus,
+    Job,
+    JobStage,
+    JobStatus,
+    Transcript,
+    Video,
+    VideoStatus,
+)
+from app.services import analysis, bgaudio, ffmpeg
 from app.services.cost import CostCapExceeded, CostTracker
 from app.services.llm import get_llm_client
 from app.services.render import RenderSpec, render_clip
@@ -420,6 +430,9 @@ def _render_spec(
         encode_preset=settings.render_preset,
         reframe_samples=settings.reframe_samples,
         stream_copy_ok=stream_copy_ok,
+        color_contrast=clip.color_contrast,
+        color_brightness=clip.color_brightness,
+        color_saturation=clip.color_saturation,
     )
 
 
@@ -519,7 +532,7 @@ def _render_selected(
 # Re-render a single clip after edits
 # ---------------------------------------------------------------------------
 @celery_app.task(name="render_single_clip")
-def render_single_clip(clip_id: str) -> None:
+def render_single_clip(clip_id: str, keep_approved: bool = False) -> None:
     with SessionLocal() as db:
         clip = db.get(Clip, clip_id)
         if clip is None:
@@ -538,12 +551,22 @@ def render_single_clip(clip_id: str) -> None:
 
         copy_ok = not preset.is_vertical and _stream_copy_ok(db, video)
         spec = _render_spec(clip, video, preset, words, settings, stream_copy_ok=copy_ok)
+        track = db.get(AudioTrack, clip.bg_audio_id) if clip.bg_audio_id else None
         try:
-            render_clip(spec)
+            # Locked so a music change can't touch the files mid-render; the
+            # clip's background music (if any) is mixed in again afterwards.
+            with bgaudio.clip_lock(spec.out_path):
+                render_clip(spec)
+                bgaudio.after_render(
+                    spec.out_path,
+                    track.path if track else None,
+                    clip.bg_audio_volume,
+                    mute_original=clip.bg_audio_mute_original,
+                )
             clip.file_path = spec.out_path
             clip.thumbnail_path = spec.thumb_path
             clip.duration_s = round(clip.end_s - clip.start_s, 3)
-            clip.status = ClipStatus.ready
+            clip.status = ClipStatus.approved if keep_approved else ClipStatus.ready
         except Exception as exc:
             clip.status = ClipStatus.failed
             clip.error = str(exc)[:2000]

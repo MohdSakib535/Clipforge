@@ -76,6 +76,52 @@ copied clip has to start on a keyframe, so it begins up to a couple of seconds
 before the chosen start. The source's own subtitle tracks and chapters are
 never copied into clips.
 
+### Background music (review screen)
+
+Upload an audio file (MP3, M4A, AAC, WAV, OGG, Opus, FLAC; up to 200 MB), or
+paste a link (YouTube, SoundCloud, …) and *Get audio* to grab only its audio
+(downloaded in the background on the `downloader` worker). Either way it joins
+your music library, converted to stereo AAC at the same loudness as the clips'
+speech (-14 LUFS), so **volume** means the same for every track: 100% = as
+loud as the speech, 40% (default) ≈ 8 dB below it.
+
+- **All clips at once:** pick a track and volume, then *Add to all clips*
+  (or *Remove from all*). Clips still rendering are skipped.
+- **One by one:** each clip card has a *Background music* checkbox (tick to
+  add, untick to remove) with its own track and volume (*Apply* appears when
+  you change them).
+- **Mute original audio (music only):** tick this (in the panel for all clips,
+  or on a clip) to drop the clip's own sound so only the music plays — for
+  b-roll or montages. Leave it off to mix music *under* the speech. Turn the
+  volume up for music-only clips, since there's no speech for it to sit under.
+
+The music loops if it is shorter than the clip, fades in/out, and a limiter
+stops speech + music from clipping. Only the audio is redone (the video is
+copied), so mixing takes a second or two per clip. It runs on its own `audio`
+queue (`mixer` worker), so it never waits behind a long render. The clip as
+rendered is kept next to it while music is on, so changing the volume or
+removing the music never needs a re-render, and *Save & re-render* puts the
+clip's music back automatically. Downloads and the ZIP include the music.
+Preview/download URLs carry the file's version (`file_version`, its mtime), so
+the browser always plays the current file, never a cached copy.
+
+### Colour adjustment (review screen)
+
+Three gentle sliders — **Contrast**, **Brightness**, **Saturation** (each
+0 = no change, range -50..50, mapped to a subtle ffmpeg `eq` grade), the same
+way background music works:
+
+- **All clips at once:** the *Colour adjustment — all clips* panel at the top;
+  set the sliders and click *Apply to all clips* (or *Reset all*).
+- **One by one:** each clip card has its own *Colour adjustment* panel.
+
+A colour change edits pixels, so unlike music it **re-renders** each clip
+(horizontal clips that were stream-copied now re-encode, so it's slower than a
+normal cut). The clip's background music is re-applied automatically after the
+re-render, so colour and music stack, and an approved clip stays approved.
+Defaults are 0, so new clips render with no grade and unchanged clips can still
+be stream-copied.
+
 ### Two ways to generate clips (per platform)
 
 - **Top highlights** — you pick a clip count; the LLM scores candidate windows
@@ -102,8 +148,10 @@ never copied into clips.
 - **LLM:** OpenAI behind a provider-agnostic `LLMClient` (cheap model for scoring, stronger model for final metadata)
 - **Video:** FFmpeg; MediaPipe for face-tracked reframing; `.srt` sidecar captions
 - **Import from a link:** yt-dlp (+ Deno for YouTube), on its own Celery queue
+- **Background music:** FFmpeg audio-only mix (video stream-copied), on its own Celery queue
+- **Colour adjustment:** per-clip FFmpeg `eq` grade, applied on re-render
 - **UI:** single-page dashboard served by the API (Tailwind + Alpine via CDN — no build step)
-- **Containers:** Docker Compose (api, worker, downloader, flower, redis, postgres)
+- **Containers:** Docker Compose (api, worker, downloader, mixer, flower, redis, postgres)
 
 ---
 
@@ -132,8 +180,9 @@ and the dashboard. The `worker` container runs one Celery worker at
 concurrency 1 (laptop mode) and **auto-restarts on code changes** (via
 `watchmedo`), so edits to `app/` take effect without a manual restart. The
 `downloader` container runs a second worker that only serves the `downloads`
-queue (link imports, two at a time), so downloads and clip jobs never wait for
-each other. `flower` provides a live view of tasks, workers and queues.
+queue (link imports, two at a time), and `mixer` serves the `audio` queue
+(background music), so downloads, music and clip jobs never wait for each
+other. `flower` provides a live view of tasks, workers and queues.
 
 ### Try it with a sample video
 
@@ -170,11 +219,12 @@ export DATABASE_URL="postgresql+psycopg://clipforge:clipforge@localhost:5433/cli
 export REDIS_URL="redis://localhost:6380/0"
 export OPENAI_API_KEY=sk-...
 
-# 4) Migrate, then run API + worker + downloader in three terminals
+# 4) Migrate, then run API + worker + downloader + mixer in four terminals
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 celery -A app.tasks.celery_app:celery_app worker --loglevel=info --concurrency=1
 celery -A app.tasks.celery_app:celery_app worker -Q downloads -n downloader@%h --concurrency=2
+celery -A app.tasks.celery_app:celery_app worker -Q audio -n mixer@%h --concurrency=1
 ```
 
 Imports from YouTube also need Deno natively (`brew install deno`).
@@ -198,6 +248,7 @@ See [`.env.example`](.env.example). Key ones:
 | `DATABASE_URL`, `REDIS_URL`, `STORAGE_PATH` | infrastructure |
 | `MAX_UPLOAD_BYTES` | upload limit |
 | `RENDER_CONCURRENCY`, `COPY_CONCURRENCY`, `RENDER_PRESET` | render speed tuning (see `.env.example`) |
+| `MAX_AUDIO_UPLOAD_BYTES` | background-music upload limit (default 200 MB) |
 | `DOWNLOAD_TIMEOUT_S`, `URL_PROBE_TIMEOUT_S` | import from a link: max download time, max "check link" wait |
 | `YTDLP_COOKIES_FILE` | optional cookies.txt for videos that need a login (or YouTube's "not a bot" check) |
 
@@ -234,7 +285,13 @@ clips).
 | POST | `/videos/{id}/jobs` | start a job (platforms, clip_count, length overrides, captions) |
 | GET | `/jobs/{id}` | status, stage, progress %, cost |
 | GET | `/jobs/{id}/clips` | clips with metadata |
-| PATCH | `/clips/{id}` | trim, edit title/description, caption style, approve/delete |
+| POST | `/audio/upload` | upload a background-music track (multipart `file`) |
+| POST | `/audio/from-url` | grab only the audio of a link as a track; returns 202, `status: processing` → `ready` (poll `GET /audio`) |
+| GET | `/audio` / `/audio/{id}/file` | your music library / play a track |
+| DELETE | `/audio/{id}` | delete a track (409 while a clip still uses it) |
+| POST | `/jobs/{id}/color` | apply one colour grade (`contrast`/`brightness`/`saturation`, -50..50) to some/all clips; returns at once, clips re-render in the background |
+| POST | `/jobs/{id}/background-audio` | `{audio_id, volume, clip_ids?}`: add (or with `audio_id: null` remove) music on some or all ready clips; returns at once, clips show `rendering` until mixed |
+| PATCH | `/clips/{id}` | trim, edit title/description, caption style, colour grade (`color_contrast`/`color_brightness`/`color_saturation`, -50..50), approve/delete |
 | POST | `/clips/{id}/render` | re-render after edits |
 | GET | `/clips/{id}/download` / `/preview` / `/thumbnail` / `/captions.srt` | clip file / inline player / thumbnail / sidecar captions |
 | GET | `/jobs/{id}/export.zip` | all approved/ready clips + per-clip `.srt` (horizontal) and `.txt`/`.json` metadata |
@@ -271,8 +328,8 @@ app/
   models/     User, Video, Job, Transcript, Clip
   schemas/    Pydantic request/response models
   services/   storage, ffmpeg, transcriber, llm, cost, analysis,
-              segments, scoring, reframe, captions, render, downloader
-  tasks/      Celery app, pipeline tasks, link downloads, dispatch
+              segments, scoring, reframe, captions, render, downloader, bgaudio
+  tasks/      Celery app, pipeline tasks, link downloads, music mixing, dispatch
   web/static/ single-page dashboard (index.html + app.js)
 alembic/      migrations
 tests/        pytest suite

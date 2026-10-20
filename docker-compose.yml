@@ -109,6 +109,29 @@ services:
       redis:
         condition: service_healthy
 
+  # Mixes background music under clips (review screen) on its own queue, so it
+  # never waits behind a long render on `worker`. One task at a time; each task
+  # mixes its clips in parallel (COPY_CONCURRENCY), ~1-2 s per clip.
+  mixer:
+    build: .
+    command: >
+      watchmedo auto-restart --directory=/app/app --pattern=*.py --recursive --
+      celery -A app.tasks.celery_app:celery_app worker -Q audio -n mixer@%h
+      --loglevel=info --concurrency=1
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /data/storage
+    volumes:
+      - ./app:/app/app
+      - storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   # Flower: Celery monitoring UI at http://localhost:5555
   flower:
     build: .

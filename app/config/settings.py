@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     # App
     log_level: str = "INFO"
     max_upload_bytes: int = 5 * 1024 * 1024 * 1024
+    max_audio_upload_bytes: int = 200 * 1024 * 1024  # background-music files
 
     # --- Import from a link (yt-dlp) ---
     # Longest a single download may run before it is stopped and marked failed.

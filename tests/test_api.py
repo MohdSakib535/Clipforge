@@ -212,12 +212,129 @@ def test_clip_patch_and_download_flow(client, db_session):
     # Re-render enqueues
     rr = client.post(f"/clips/{clip.id}/render")
     assert rr.status_code == 200
-    assert clip.id in client.enqueued["clip"]
+    assert clip.id in [cid for cid, _ in client.enqueued["clip"]]
 
     # Clips list for job
     listed = client.get(f"/jobs/{job_id}/clips")
     assert listed.status_code == 200
     assert len(listed.json()) == 1
+
+
+def test_clip_color_grade_patch(client, db_session):
+    vid = _upload_sample(client)
+    video = db_session.get(Video, vid)
+    video.status = VideoStatus.ready
+    video.rights_confirmed_at = datetime.now(UTC)
+    video.duration_s = 600.0
+    db_session.commit()
+    job_id = client.post(f"/videos/{vid}/jobs", json={"platforms": ["youtube_clip"]}).json()["id"]
+    clip = Clip(
+        job_id=job_id, platform="youtube_clip", start_s=0, end_s=30, status=ClipStatus.ready
+    )
+    db_session.add(clip)
+    db_session.commit()
+
+    # Defaults are 0 (no grade).
+    got = client.get(f"/jobs/{job_id}/clips").json()[0]
+    assert (got["color_contrast"], got["color_brightness"], got["color_saturation"]) == (0, 0, 0)
+
+    ok = client.patch(
+        f"/clips/{clip.id}",
+        json={"color_contrast": 15, "color_brightness": -10, "color_saturation": 20},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["color_contrast"] == 15 and ok.json()["color_saturation"] == 20
+    db_session.refresh(clip)
+    assert clip.color_contrast == 15 and clip.color_brightness == -10
+
+    # Out-of-range is rejected; a re-render still enqueues.
+    assert client.patch(f"/clips/{clip.id}", json={"color_contrast": 99}).status_code == 422
+    assert client.post(f"/clips/{clip.id}/render").status_code == 200
+    assert clip.id in [cid for cid, _ in client.enqueued["clip"]]
+
+
+def _color_job(client, db_session):
+    vid = _upload_sample(client)
+    video = db_session.get(Video, vid)
+    video.status = VideoStatus.ready
+    video.rights_confirmed_at = datetime.now(UTC)
+    video.duration_s = 600.0
+    db_session.commit()
+    job_id = client.post(f"/videos/{vid}/jobs", json={"platforms": ["youtube_clip"]}).json()["id"]
+    clips = {}
+    for i, st in enumerate([ClipStatus.ready, ClipStatus.approved, ClipStatus.rendering], 1):
+        c = Clip(
+            job_id=job_id,
+            platform="youtube_clip",
+            start_s=0,
+            end_s=30,
+            rank=i,
+            status=st,
+            file_path=f"/x/{i}.mp4",
+        )
+        db_session.add(c)
+        clips[st.value] = c
+    db_session.commit()
+    return job_id, clips
+
+
+def test_color_grade_all_clips(client, db_session):
+    job_id, clips = _color_job(client, db_session)
+    client.enqueued["clip"].clear()
+
+    r = client.post(f"/jobs/{job_id}/color", json={"contrast": 10, "brightness": -5})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # ready + approved queued; the rendering one skipped
+    assert body["queued"] == 2 and body["skipped"] == 1
+    ready, approved = clips["ready"], clips["approved"]
+    assert {cid for cid, _ in client.enqueued["clip"]} == {ready.id, approved.id}
+    keep = dict(client.enqueued["clip"])
+    assert keep[approved.id] is True and keep[ready.id] is False
+    for c in (ready, approved):
+        db_session.refresh(c)
+        assert c.status == ClipStatus.rendering
+        assert (c.color_contrast, c.color_brightness, c.color_saturation) == (10, -5, 0)
+    db_session.refresh(clips["rendering"])
+    assert clips["rendering"].color_contrast == 0  # untouched
+
+    # Same grade again (pretend the renders finished) changes nothing -> 409.
+    ready.status = approved.status = ClipStatus.ready
+    db_session.commit()
+    again = client.post(f"/jobs/{job_id}/color", json={"contrast": 10, "brightness": -5})
+    assert again.status_code == 409
+    assert again.json()["error"]["code"] == "nothing_to_apply"
+
+
+def test_color_grade_specific_clip_and_reset(client, db_session):
+    job_id, clips = _color_job(client, db_session)
+    one = clips["ready"]
+    client.enqueued["clip"].clear()
+
+    r = client.post(f"/jobs/{job_id}/color", json={"saturation": 20, "clip_ids": [one.id]})
+    assert r.status_code == 200 and r.json()["queued"] == 1
+    assert client.enqueued["clip"] == [(one.id, False)]
+    db_session.refresh(one)
+    assert one.color_saturation == 20
+
+    # Reset (all zeros) only re-renders clips that currently have a grade.
+    one.status = ClipStatus.ready
+    db_session.commit()
+    client.enqueued["clip"].clear()
+    reset = client.post(f"/jobs/{job_id}/color", json={"contrast": 0, "saturation": 0})
+    assert reset.status_code == 200 and reset.json()["queued"] == 1
+    db_session.refresh(one)
+    assert one.color_saturation == 0
+
+
+def test_color_grade_validation(client, db_session):
+    job_id, _ = _color_job(client, db_session)
+    assert client.post(f"/jobs/{job_id}/color", json={"contrast": 99}).status_code == 422
+    assert (
+        client.post(f"/jobs/{job_id}/color", json={"clip_ids": ["x"], "contrast": 5}).status_code
+        == 404
+    )
+    assert client.post("/jobs/missing/color", json={"contrast": 5}).status_code == 404
 
 
 def test_export_zip_empty_is_409(client, db_session):

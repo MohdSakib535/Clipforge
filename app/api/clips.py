@@ -70,10 +70,11 @@ def render_clip_endpoint(
 ) -> Clip:
     clip = _get_clip(db, user, clip_id)
     get_preset(clip.platform)  # validate platform still known
+    keep_approved = clip.status == ClipStatus.approved
     clip.status = ClipStatus.rendering
     clip.error = None
     db.commit()
-    dispatch.enqueue_clip_render(clip.id)
+    dispatch.enqueue_clip_render(clip.id, keep_approved)
     db.refresh(clip)
     return clip
 
