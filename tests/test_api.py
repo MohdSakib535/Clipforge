@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 
 from app.models import Clip, ClipStatus, Video, VideoStatus
 
@@ -343,16 +345,17 @@ def test_download_and_zip_names_are_just_the_part_number(client, db_session, tmp
     cap = client.get(f"/clips/{clip.id}/captions.srt")
     assert 'filename="part-041.srt"' in cap.headers["content-disposition"]
 
+    zips = lambda: set(Path(tempfile.gettempdir()).glob("*.zip"))  # noqa: E731
+    before = zips()
     z = client.get(f"/jobs/{job_id}/export.zip")
     assert 'filename="sample_clips.zip"' in z.headers["content-disposition"]
+    assert zips() <= before  # the temp ZIP is deleted once sent
     out = tmp_path / "out.zip"
     out.write_bytes(z.content)
     with zipfile.ZipFile(out) as zf:
         names = set(zf.namelist())
-        base = "facebook_video/part-041"
-        assert names == {f"{base}.mp4", f"{base}.srt", f"{base}.json", f"{base}.txt"}
-        assert "Source video: sample.mp4" in zf.read(f"{base}.txt").decode()
-        assert '"part": 41' in zf.read(f"{base}.json").decode()
+        assert names == {"facebook_video/part-041.mp4"}  # only the videos
+        assert zf.read("facebook_video/part-041.mp4") == b"x" * 10
 
 
 def test_export_only_approved_and_approve_can_be_undone(client, db_session, tmp_path):

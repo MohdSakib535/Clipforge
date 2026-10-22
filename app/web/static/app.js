@@ -22,6 +22,7 @@ function clipforge() {
     // Background music library + the review screen's "all clips" controls.
     tracks: [],
     music: { trackId: "", volume: 40, muteOriginal: false, uploading: false, busy: false, link: "", grabbing: false },
+    wiping: false, // "Delete all data" running
     // Colour grade applied to all clips at once (each clip also has its own).
     colorAll: { contrast: 0, brightness: 0, saturation: 0, busy: false },
     _trackPoll: null,
@@ -73,6 +74,40 @@ function clipforge() {
         captions: { enabled: true, language: "" }, transcribe: true,
         job: null, clips: [], busy: false, error: "", notice: "",
       });
+    },
+
+    // Free disk space: delete every video, job, clip and transcript with
+    // their files, after typing DELETE. The music library and the Whisper
+    // model are kept. The server refuses while work is still running.
+    async deleteAllData() {
+      if (this.wiping) return;
+      try {
+        const r = await fetch("/data/usage");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const u = await r.json();
+        const typed = prompt(
+          "Delete ALL data to free disk space?\n\n" +
+            `This permanently deletes every video (${u.videos}), job (${u.jobs}) and ` +
+            `clip (${u.clips}) with their transcripts: ${this.fmtSize(u.bytes) || "0 MB"}.\n` +
+            "Your music library and the Whisper model are kept.\n\n" +
+            "Download your ZIP first. Type DELETE to confirm:"
+        );
+        if (typed === null) return;
+        if (typed.trim() !== "DELETE") {
+          this.error = "Nothing deleted: type DELETE to confirm";
+          return;
+        }
+        this.wiping = true;
+        const res = await this.postJSON("/data/delete-all", { confirm: "DELETE" });
+        await this.reset();
+        this.notice =
+          `Deleted ${res.videos} videos and ${res.clips} clips, ` +
+          `freed ${this.fmtSize(res.bytes_freed) || "0 MB"}`;
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.wiping = false;
+      }
     },
 
     runningWork() {

@@ -7,7 +7,9 @@ ClipForge transcribes the video, cuts the whole of it into clips of the length
 you choose (always on a sentence boundary, never mid-word), reframes 16:9 → 9:16
 with face tracking, writes captions to a separate `.srt` file (never burned into
 the video), normalises audio and renders platform-correct files, each titled
-"Part N - <its first words>". No LLM is used. **Phase 1** (this repo) does everything up to export; direct
+"Part N - <its first words>". Transcription can be switched off per job for a
+faster, free run (see [Transcription on or off](#transcription-on-or-off-settings-screen)).
+No LLM is used. **Phase 1** (this repo) does everything up to export; direct
 publishing to YouTube/Facebook is designed-for but not built (see
 [Phase 2](#phase-2)).
 
@@ -54,10 +56,10 @@ Sites change often: if a site stops working, bump `yt-dlp` in
 | Stage | What happens |
 |---|---|
 | **ingest** | `ffprobe` metadata (duration, resolution, fps, audio tracks, codec) — about a second, even for a 3-hour file |
-| **transcribe** | Extract audio once → slice ~10-min chunks without re-encoding → transcribe chunks in parallel with word-level timestamps (retry/backoff) → shift & merge timestamps, de-duplicating the overlap. Progress updates per chunk. Transcript is cached per video. |
+| **transcribe** | Extract audio once → slice ~10-min chunks without re-encoding → transcribe chunks in parallel with word-level timestamps (retry/backoff) → shift & merge timestamps, de-duplicating the overlap. Progress updates per chunk. Transcript is cached per video. **Skipped** when transcription is off for the job (it starts at *analyzing*). |
 | **analyze** | Scene cuts from **keyframes only** (ffmpeg `-skip_frame nokey`; ~18s for a 104-min 1080p film), run in parallel with transcription and cached per video. Also, once per video and in parallel: the audio is loudness-normalised for horizontal clips (see below). |
-| **plan clips** | Tile the whole video into contiguous ~N-second parts (N per platform), cut at sentence ends (snapped to nearby scene cuts), never mid-word; no gaps, no overlap |
-| **titles** | Each clip: title `Part N - <first 9 words of its transcript>`, description = its transcript (Hindi in Devanagari is written in Roman letters), no hashtags; parts without speech are marked "No speech" |
+| **plan clips** | Tile the whole video into contiguous ~N-second parts (N per platform), cut at sentence ends (snapped to nearby scene cuts), never mid-word; no gaps, no overlap. With transcription off: cut at the target length, snapped to a scene cut within 1 s |
+| **titles** | Each clip: title `Part N - <first 9 words of its transcript>`, description = its transcript (Hindi in Devanagari is written in Roman letters), no hashtags; parts without speech are marked "No speech". With transcription off: just `Part N`, empty description, no "No speech" mark |
 | **render** | See below. Each clip is marked ready the moment it finishes, so you can start reviewing while the rest render. |
 | **finalize** | Mark complete; progress is polled (or streamed over WebSocket) |
 
@@ -132,6 +134,12 @@ way background music works:
   set the sliders and click *Apply to all clips* (or *Reset all*).
 - **One by one:** each clip card has its own *Colour adjustment* panel.
 
+**Live preview (one clip only):** while you move a clip's own sliders, its
+player shows the new colour at once, with a *Colour preview · not applied yet*
+badge. It is a browser-side SVG colour filter that mirrors the `eq` grade
+(close, not pixel-exact); nothing is sent or rendered until *Apply colour*. The
+all-clips panel has no live preview and works as before.
+
 A colour change edits pixels, so unlike music it **re-renders** each clip.
 Horizontal clips are still cut on the same keyframe and only that cut is
 re-encoded, so a graded clip keeps the frame size, start and length it had
@@ -149,6 +157,12 @@ clip whose file doesn't have that grade yet.
 Re-renders (colour, trim) run on their own `renders` queue (`renderer` worker,
 two at a time), so a colour change on dozens of clips never blocks new jobs.
 
+Re-rendering **one** clip (*Apply colour* or *Save & re-render* on a clip, or
+*Apply to all clips* when only one clip needs it) is sent with Celery priority
+0, batch re-renders with priority 9, so a single clip jumps ahead of a running
+batch instead of waiting for it. In a test, one clip was ready in 21 s while
+47 clips of a batch colour change were still waiting.
+
 ### How clips are chosen
 
 For each platform you pick a target length (e.g. 40s); the whole video is tiled
@@ -156,6 +170,35 @@ end-to-end into contiguous ~40s clips (snapped to sentence/scene boundaries, no
 gaps or overlap), and the clip count is derived automatically and shown in the
 UI. Every part becomes a clip, in order. Titles and descriptions come from each
 part's transcript and can be edited on the review screen.
+
+### Transcription on or off (settings screen)
+
+The settings screen has a **Transcription** switch, on by default.
+
+- **On:** as above: parts end at sentence ends, titles and descriptions come
+  from the speech, and a `.srt` caption file can be made.
+- **Off:** nothing is transcribed (no Whisper, no OpenAI cost), so the job is
+  much faster. Parts are cut at the target length, snapped to a scene change
+  within 1 s; titles are just `Part N` with no description; there is no caption
+  file (the captions options are disabled, and the API turns captions off
+  too). Clips aren't marked "No speech", because speech isn't checked.
+
+### Start over (stop and delete)
+
+*Start over* stops whatever is still running and deletes what it made, after a
+confirm (*Cancel* changes nothing):
+
+| Running | What happens |
+|---|---|
+| Upload | remaining chunks aren't sent; the partial video is deleted |
+| Link download | the download stops within a few seconds; the partial file is deleted |
+| Job, queued | deleted at once |
+| Job, processing | stops at its next check (during transcription, between stages, after each clip render); the job, its clip rows and clip files are deleted |
+
+The video, its transcript and its caches (normalised audio, scene cuts) are
+kept, so processing it again is quick. With OpenAI, chunks not yet sent are
+dropped and finished ones stay cached, so nothing is paid for twice. Finished
+work (a completed or failed job, a ready video) is never deleted.
 
 ---
 
@@ -337,17 +380,19 @@ in the preset's allowed range (default: 40 s vertical, 3 min horizontal).
 | POST | `/videos/from-url/qualities` | check a link: title, duration, available qualities |
 | POST | `/videos/from-url` | import a link at a quality (`best`, `1080`, `720`…); returns 202, downloads in the background (poll `GET /videos/{id}` for `download_progress`) |
 | POST | `/videos/{id}/confirm-rights` | mandatory rights confirmation |
-| POST | `/videos/{id}/jobs` | start a job (`platforms`, `coverage_lengths` = seconds per clip per platform, `captions`) |
+| POST | `/videos/{id}/abort` | stop an unfinished upload or link download and delete the partial video (204; 409 `not_in_progress` otherwise) |
+| POST | `/videos/{id}/jobs` | start a job (`platforms`, `coverage_lengths` = seconds per clip per platform, `captions`, `transcribe` = `true` by default; `false` skips transcription and turns captions off) |
 | GET | `/jobs/{id}` | status, stage, progress %, cost |
 | GET | `/jobs/{id}/clips` | clips with metadata |
+| POST | `/jobs/{id}/cancel` | Start over: a queued job is deleted (`{"status": "cancelled", "deleted": true}`); a running one stops and is deleted shortly after (`"cancelling"`); a finished job is left alone |
 | POST | `/audio/upload` | upload a background-music track (multipart `file`) |
 | POST | `/audio/from-url` | grab only the audio of a link as a track; returns 202, `status: processing` → `ready` (poll `GET /audio`) |
 | GET | `/audio` / `/audio/{id}/file` | your music library / play a track |
 | DELETE | `/audio/{id}` | delete a track (409 while a clip still uses it) |
-| POST | `/jobs/{id}/color` | apply one colour grade (`contrast`/`brightness`/`saturation`, -50..50) to some/all clips; returns at once, clips re-render in the background |
+| POST | `/jobs/{id}/color` | apply one colour grade (`contrast`/`brightness`/`saturation`, -50..50) to some/all clips; returns at once, clips re-render in the background (low priority; high when only one clip needs it) |
 | POST | `/jobs/{id}/background-audio` | `{audio_id, volume, clip_ids?}`: add (or with `audio_id: null` remove) music on some or all ready clips; returns at once, clips show `rendering` until mixed |
 | PATCH | `/clips/{id}` | trim, edit title/description, caption style, colour grade (`color_contrast`/`color_brightness`/`color_saturation`, -50..50), approve/delete |
-| POST | `/clips/{id}/render` | re-render after edits |
+| POST | `/clips/{id}/render` | re-render after edits (high priority: runs before batch re-renders) |
 | GET | `/clips/{id}/download` / `/preview` / `/thumbnail` / `/captions.srt` | clip file / inline player / thumbnail / sidecar captions |
 | GET | `/jobs/{id}/export.zip` | all approved/ready clips (`?only=approved`: approved only) + per-clip `.srt` and `.txt`/`.json` metadata |
 | WS | `/ws/jobs/{id}` | live progress stream |
@@ -367,7 +412,8 @@ docker compose run --rm --no-deps -v "$PWD/tests:/app/tests" api black --check a
 ```
 
 Tests cover segment building/snapping, preset loading, transcription chunking
-and resume, transcript reuse, Hinglish transliteration, cost capping, caption generation, FFmpeg command generation, and the API
+and resume, transcript reuse, Hinglish transliteration, cost capping, caption generation, FFmpeg command generation, render priority,
+Start over cancellation, transcription on/off, and the API
 endpoints (with mocked Celery tasks and an in-memory DB). Logs are structured
 JSON with `job_id` on every line.
 
@@ -384,7 +430,8 @@ app/
   models/     User, Video, Job, Transcript, Clip
   schemas/    Pydantic request/response models
   services/   storage, ffmpeg, transcriber, cost, analysis, segments, romanize,
-              filehash, naming, reframe, captions, render, downloader, bgaudio
+              filehash, naming, reframe, captions, render, downloader, bgaudio,
+              discard
   tasks/      Celery app, pipeline tasks, link downloads, music mixing, dispatch
   web/static/ single-page dashboard (index.html + app.js)
 alembic/      migrations

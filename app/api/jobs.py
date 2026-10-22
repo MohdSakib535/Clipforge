@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import os
 import tempfile
 import zipfile
 from pathlib import Path
@@ -10,6 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from app.api.deps import get_current_user
 from app.api.errors import AppError, NotFoundError
@@ -195,21 +196,6 @@ def apply_color_grade(
     )
 
 
-def _metadata_dict(clip: Clip, source_video: str) -> dict:
-    return {
-        "source_video": source_video,
-        "part": clip.rank,
-        "platform": clip.platform,
-        "title": clip.title,
-        "description": clip.description,
-        "hashtags": clip.hashtags,
-        "start_s": clip.start_s,
-        "end_s": clip.end_s,
-        "duration_s": clip.duration_s,
-        "has_speech": clip.has_speech,
-    }
-
-
 @router.get("/jobs/{job_id}/export.zip")
 def export_zip(
     job_id: str,
@@ -217,7 +203,8 @@ def export_zip(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> FileResponse:
-    """Every rendered clip, or with ``?only=approved`` just the approved ones."""
+    """Every rendered clip, or with ``?only=approved`` just the approved ones.
+    Only the videos: captions are downloaded per clip."""
     job = _get_job(db, user, job_id)
     wanted = [ClipStatus.approved]
     if only != "approved":
@@ -236,27 +223,16 @@ def export_zip(
     video_name = job.video.filename
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
     tmp.close()
-    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+    # MP4 is already compressed: store, don't deflate (much faster, same size).
+    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as zf:
         for c in ready:
-            base = f"{c.platform}/{clip_basename(c.rank)}"
-            zf.write(c.file_path, f"{base}.mp4")
-            if c.srt_path:
-                zf.write(c.srt_path, f"{base}.srt")
-            meta = _metadata_dict(c, video_name)
-            zf.writestr(f"{base}.json", json.dumps(meta, indent=2))
-            txt = (
-                f"Source video: {video_name}\n"
-                f"Part: {c.rank}\n\n"
-                f"Title: {c.title or ''}\n\n"
-                f"Description:\n{c.description or ''}\n\n"
-                f"Hashtags: {' '.join('#' + h for h in (c.hashtags or []))}\n"
-            )
-            zf.writestr(f"{base}.txt", txt)
+            zf.write(c.file_path, f"{c.platform}/{clip_basename(c.rank)}.mp4")
 
     return FileResponse(
         tmp.name,
         media_type="application/zip",
         filename=f"{video_stem(video_name)}_{'approved' if only else 'clips'}.zip",
+        background=BackgroundTask(os.unlink, tmp.name),  # delete once sent
     )
 
 

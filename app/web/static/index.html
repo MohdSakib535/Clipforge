@@ -201,6 +201,9 @@
             <a :href="`/jobs/${job?.id}/export.zip`" class="px-3 py-1.5 rounded-lg text-sm"
                :class="approvedCount() > 0 ? 'bg-slate-700 hover:bg-slate-600' : 'bg-emerald-600 hover:bg-emerald-500'">Download all (ZIP)</a>
             <button @click="refreshClips()" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Refresh</button>
+            <button @click="deleteAllData()" :disabled="wiping" title="Delete every video, clip and transcript to free disk space (music library is kept)"
+              class="px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-sm"
+              x-text="wiping ? 'Deleting…' : 'Delete all data'"></button>
           </div>
         </div>
         <div x-show="job && !['completed','failed','cancelled'].includes(job.status)"
