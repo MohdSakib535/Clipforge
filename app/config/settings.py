@@ -89,6 +89,28 @@ class Settings(BaseSettings):
     # Face-detection samples per clip during reframe (fewer = faster).
     reframe_samples: int = 8
 
+    # --- Reel maker ("Create a reel") ---
+    # The script comes from Ollama and the pictures from imagegen/server.py; both
+    # run natively on the Mac (Docker can't use its GPU), the voice (Kokoro) in
+    # the reelmaker worker.
+    ollama_url: str = "http://host.docker.internal:11434"
+    reel_script_model: str = "gemma3:4b"
+    imagegen_url: str = "http://host.docker.internal:8189"
+    # Pictures are made at 9:16 below full size (faster on a 16 GB Mac) and
+    # scaled up to 1080x1920; the slow zoom on each one hides the softness.
+    reel_image_width: int = 576
+    reel_image_height: int = 1024
+    reel_image_steps: int = 4
+    # Kokoro voice model, downloaded on first use to <storage>/.kokoro.
+    kokoro_model_url: str = (
+        "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
+        "model-files-v1.0/kokoro-v1.0.int8.onnx"
+    )
+    kokoro_voices_url: str = (
+        "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"
+        "model-files-v1.0/voices-v1.0.bin"
+    )
+
     # Path to the platform presets YAML (overridable for tests).
     platforms_config_path: str = str(REPO_ROOT / "app" / "config" / "platforms.yaml")
 

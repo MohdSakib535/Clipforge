@@ -12,7 +12,7 @@ from app.api.deps import get_current_user
 from app.api.errors import AppError, NotFoundError
 from app.config.settings import get_settings
 from app.db.session import get_db
-from app.models import AudioTrack, Clip, ClipStatus, Job, User, Video
+from app.models import AudioTrack, Clip, ClipStatus, Job, Reel, User, Video
 from app.schemas.audio import (
     AudioFromUrl,
     AudioTrackOut,
@@ -172,7 +172,15 @@ def delete_audio(
             code="audio_in_use",
             status_code=status.HTTP_409_CONFLICT,
         )
+    if db.query(Reel).filter(Reel.music_id == track.id, Reel.status == "generating").count():
+        raise AppError(
+            "A reel with this music is being made right now. Try again when it has finished.",
+            code="audio_in_use",
+            status_code=status.HTTP_409_CONFLICT,
+        )
     db.query(Clip).filter(Clip.bg_audio_id == track.id).update({Clip.bg_audio_id: None})
+    # Reels keep the music already mixed into their video; the next render has none.
+    db.query(Reel).filter(Reel.music_id == track.id).update({Reel.music_id: None})
     get_storage().delete(f"audio/{track.id}")
     db.delete(track)
     db.commit()

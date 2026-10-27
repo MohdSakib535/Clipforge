@@ -34,6 +34,18 @@ def enqueue_bg_audio_mix(clip_ids: list[str], approved_ids: list[str]) -> None:
     mix_background_audio.delay(clip_ids, approved_ids)
 
 
+def enqueue_reel_script(reel_id: str) -> None:
+    from app.tasks.reels import write_reel_script
+
+    write_reel_script.delay(reel_id)
+
+
+def enqueue_reel_render(reel_id: str) -> None:
+    from app.tasks.reels import render_reel
+
+    render_reel.delay(reel_id)
+
+
 # Redis serves lower numbers first (kombu checks priority 0 of every queue
 # before priority 3, 6, 9), so an edit someone is waiting for jumps ahead of a
 # batch such as a colour change on every clip.

@@ -1,0 +1,11 @@
+# Reel voice-over (Kokoro, services/tts.py). Installed with --no-deps (see
+# Dockerfile): kokoro-onnx 0.6 asks for numpy>=2, but mediapipe needs numpy<2,
+# and Kokoro runs fine on our numpy 1.26 (checked). These are its other
+# dependencies; onnxruntime already comes with faster-whisper.
+kokoro-onnx==0.6.1
+phonemizer==3.4.0
+espeakng-loader==0.2.4
+dlinfo==2.0.0
+joblib==1.6.0
+cloudpickle==3.1.2
+colorlog==6.12.0

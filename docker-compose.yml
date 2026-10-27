@@ -51,6 +51,9 @@ services:
       DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge
       REDIS_URL: redis://redis:6379/0
       STORAGE_PATH: /data/storage
+    # The reel editor's "Suggest music" asks Ollama on the Mac directly.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8080:8000"
     volumes:
@@ -149,6 +152,32 @@ services:
       DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge
       REDIS_URL: redis://redis:6379/0
       STORAGE_PATH: /data/storage
+    volumes:
+      - ./app:/app/app
+      - storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # "Create a reel": writes scripts (Ollama) and makes reels (pictures from
+  # imagegen/server.py, voice by Kokoro) on its own queue, one at a time.
+  # Ollama and the image generator run natively on the Mac (Docker can't use
+  # its GPU) and are reached at host.docker.internal.
+  reelmaker:
+    build: .
+    command: >
+      watchmedo auto-restart --directory=/app/app --pattern=*.py --recursive --
+      celery -A app.tasks.celery_app:celery_app worker -Q reels -n reelmaker@%h
+      --loglevel=info --concurrency=1
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://clipforge:clipforge@postgres:5432/clipforge
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PATH: /data/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./app:/app/app
       - storage:/data/storage

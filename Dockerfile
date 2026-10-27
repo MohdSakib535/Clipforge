@@ -12,12 +12,14 @@ ENV PYTHONUNBUFFERED=1 \
 #   ffmpeg          - cutting / reframing / captions / encoding
 #   libgl1, libglib - OpenCV / MediaPipe runtime
 #   build-essential - some wheels need a compiler at install time
+#   fonts-noto-core - reel captions (Devanagari and Latin) burned into the video
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         libgl1 \
         libglib2.0-0 \
         build-essential \
         curl \
+        fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=deno /deno /usr/local/bin/deno
@@ -28,8 +30,9 @@ WORKDIR /app
 # so the suite runs inside the container. Set to "false" for a lean prod image.
 ARG INSTALL_DEV=true
 
-COPY requirements.txt requirements-dev.txt ./
+COPY requirements.txt requirements-dev.txt requirements-tts.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt && \
+    pip install --no-deps -r requirements-tts.txt && \
     if [ "$INSTALL_DEV" = "true" ]; then pip install -r requirements-dev.txt; fi
 
 COPY . .

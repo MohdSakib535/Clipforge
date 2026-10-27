@@ -1,0 +1,259 @@
+"""The "Create a reel" API: options, script editing, generating, files."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+from app.config.settings import get_settings
+from app.models import AudioTrack, Reel
+from app.services import reel_render
+
+SCRIPT = {
+    "title": "Morning habits",
+    "hooks": ["Tired every morning?", "One habit changed my life"],
+    "scenes": [
+        {"narration": "Tired every morning?", "image_prompt": "a tired man in bed"},
+        {"narration": "Drink water first.", "image_prompt": "a glass of water"},
+        {"narration": "Follow for more.", "image_prompt": "a smiling woman"},
+    ],
+    "caption": "Save this!",
+    "hashtags": ["morning", "habits"],
+}
+
+
+def _create(client, **overrides) -> dict:
+    body = {"topic": "3 morning habits", "platform": "instagram", "language": "hi"}
+    resp = client.post("/reels", json={**body, **overrides})
+    assert resp.status_code == 202, resp.text
+    return resp.json()
+
+
+def _with_script(db_session, reel_id: str, status: str = "script_ready") -> Reel:
+    reel = db_session.get(Reel, reel_id)
+    reel.script = SCRIPT
+    reel.status = status
+    db_session.commit()
+    return reel
+
+
+def test_options_list_platforms_languages_and_voices(client):
+    body = client.get("/reels/options").json()
+    assert [p["key"] for p in body["platforms"]] == ["instagram", "facebook"]
+    hindi = next(lang for lang in body["languages"] if lang["key"] == "hi")
+    assert hindi["label"] == "Hindi" and hindi["voices"][0]["key"] == "hf_alpha"
+    assert body["duration"] == {"min": 15, "max": 90, "default": 35}
+
+
+def test_create_starts_writing_the_script(client):
+    reel = _create(client)
+    assert reel["status"] == "scripting"
+    assert reel["voice"] == "hf_alpha"  # the language's first voice
+    assert reel["duration_s"] == 35 and reel["script"] is None
+    assert client.enqueued["reel_script"] == [reel["id"]]
+    assert [r["id"] for r in client.get("/reels").json()] == [reel["id"]]
+
+
+def test_create_validates_choices(client):
+    def code(**body):
+        base = {"topic": "a topic", "platform": "instagram", "language": "en"}
+        return client.post("/reels", json={**base, **body}).status_code
+
+    assert code(platform="tiktok") == 400
+    assert code(language="xx") == 400
+    assert code(voice="hf_alpha") == 400  # a Hindi voice for English
+    assert code(topic="hi") == 422
+    assert code(duration_s=5) == 422
+    assert code(duration_s=200) == 422
+    assert code(voice="am_michael", duration_s=40) == 202
+
+
+def test_script_cannot_be_edited_while_it_is_written(client):
+    reel = _create(client)
+    resp = client.put(f"/reels/{reel['id']}/script", json=SCRIPT)
+    assert resp.status_code == 409
+
+
+def test_save_script_cleans_hashtags_and_marks_video_out_of_date(client, db_session):
+    reel = _create(client)
+    _with_script(db_session, reel["id"], status="ready")
+
+    same = client.put(f"/reels/{reel['id']}/script", json=SCRIPT).json()
+    assert same["status"] == "ready"  # nothing changed: the video still matches
+
+    edited = {**SCRIPT, "hashtags": ["#Morning Routine", "#morningroutine"], "title": " New "}
+    body = client.put(f"/reels/{reel['id']}/script", json=edited).json()
+    assert body["status"] == "script_ready"
+    assert body["script"]["hashtags"] == ["morningroutine"]
+    assert body["script"]["title"] == "New"
+
+    bad = {**SCRIPT, "scenes": []}
+    assert client.put(f"/reels/{reel['id']}/script", json=bad).status_code == 422
+
+
+def test_generate_needs_a_script_and_valid_music(client, db_session):
+    reel = _create(client)
+    db_session.get(Reel, reel["id"]).status = "failed"
+    db_session.commit()
+    assert client.post(f"/reels/{reel['id']}/generate", json={}).status_code == 409
+
+    _with_script(db_session, reel["id"])
+    resp = client.post(f"/reels/{reel['id']}/generate", json={"music_id": "nope"})
+    assert resp.status_code == 404
+    resp = client.post(f"/reels/{reel['id']}/generate", json={"voice": "af_heart"})
+    assert resp.status_code == 400  # English voice for a Hindi reel
+
+
+def test_generate_queues_the_render_with_voice_and_music(client, db_session):
+    reel = _create(client)
+    _with_script(db_session, reel["id"])
+    track = AudioTrack(user_id=db_session.get(Reel, reel["id"]).user_id, filename="song.mp3",
+                       path="/tmp/song.m4a", status="ready")  # fmt: skip
+    db_session.add(track)
+    db_session.commit()
+
+    resp = client.post(
+        f"/reels/{reel['id']}/generate",
+        json={"voice": "hm_omega", "music_id": track.id, "music_volume": 30},
+    )
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["status"] == "generating" and body["progress"] == 0
+    assert (body["voice"], body["music_id"], body["music_volume"]) == ("hm_omega", track.id, 30)
+    assert client.enqueued["reel_render"] == [reel["id"]]
+    # Busy now: no edits, no second render.
+    assert client.post(f"/reels/{reel['id']}/generate", json={}).status_code == 409
+    assert client.post(f"/reels/{reel['id']}/rewrite").status_code == 409
+
+
+def test_new_picture_drops_that_scene_picture_only(client, db_session):
+    reel = _create(client)
+    _with_script(db_session, reel["id"], status="ready")
+    folder = reel_render.reel_dir(reel["id"])
+    folder.mkdir(parents=True, exist_ok=True)
+    pictures = reel_render.scene_pictures(folder, SCRIPT["scenes"], get_settings())
+    for p in pictures:
+        p.write_bytes(b"png")
+    assert client.get(f"/reels/{reel['id']}").json()["scene_pictures"] == [True, True, True]
+    assert client.get(f"/reels/{reel['id']}/scenes/1/picture").status_code == 200
+
+    resp = client.post(f"/reels/{reel['id']}/scenes/1/new-picture")
+    assert resp.status_code == 202
+    assert resp.json()["scene_pictures"] == [True, False, True]
+    assert resp.json()["status"] == "generating"
+    assert client.enqueued["reel_render"] == [reel["id"]]
+
+    db_session.get(Reel, reel["id"]).status = "ready"
+    db_session.commit()
+    assert client.post(f"/reels/{reel['id']}/scenes/9/new-picture").status_code == 404
+
+
+def test_video_files_and_delete(client, db_session):
+    reel = _create(client)
+    rid = reel["id"]
+    assert client.get(f"/reels/{rid}/video").status_code == 404
+    assert client.get(f"/reels/{rid}/thumbnail").status_code == 404
+
+    folder = reel_render.reel_dir(rid)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "reel.mp4").write_bytes(b"mp4")
+    (folder / "thumb.jpg").write_bytes(b"jpg")
+    r = _with_script(db_session, rid, status="ready")
+    r.file_path = str(folder / "reel.mp4")
+    r.thumbnail_path = str(folder / "thumb.jpg")
+    db_session.commit()
+
+    body = client.get(f"/reels/{rid}").json()
+    assert body["has_video"] is True and body["video_version"]
+    assert client.get(f"/reels/{rid}/video").status_code == 200
+    download = client.get(f"/reels/{rid}/video?download=1")
+    assert 'filename="Morning_habits.mp4"' in download.headers["content-disposition"]
+    assert client.get(f"/reels/{rid}/thumbnail").status_code == 200
+
+    (folder / "reel.mp4").write_bytes(b"")  # emptied by a crash
+    assert client.get(f"/reels/{rid}").json()["has_video"] is False
+    assert client.get(f"/reels/{rid}/video").status_code == 404
+
+    assert client.delete(f"/reels/{rid}").status_code == 204
+    assert client.get(f"/reels/{rid}").status_code == 404
+    assert not folder.exists()
+
+
+def test_reel_cut_off_by_a_restart_can_be_started_again(client, db_session):
+    reel = _create(client)
+    r = _with_script(db_session, reel["id"], status="generating")
+    assert client.get(f"/reels/{reel['id']}").json()["stalled"] is False
+    assert client.post(f"/reels/{reel['id']}/generate", json={}).status_code == 409
+
+    r.updated_at = datetime.now(UTC) - timedelta(minutes=30)  # no progress for 30 min
+    db_session.commit()
+    assert client.get(f"/reels/{reel['id']}").json()["stalled"] is True
+    resp = client.post(f"/reels/{reel['id']}/generate", json={})
+    assert resp.status_code == 202
+    assert resp.json()["stalled"] is False and resp.json()["status"] == "generating"
+
+
+def test_deleting_music_used_by_a_reel(client, db_session):
+    reel = _create(client)
+    r = _with_script(db_session, reel["id"], status="generating")
+    track = AudioTrack(user_id=r.user_id, filename="song.m4a", path="/tmp/x.m4a", status="ready")
+    db_session.add(track)
+    db_session.commit()
+    r.music_id = track.id
+    db_session.commit()
+
+    # Not while a reel is being made with it.
+    resp = client.delete(f"/audio/{track.id}")
+    assert resp.status_code == 409 and "being made" in resp.json()["error"]["message"]
+
+    # Afterwards: the reel keeps its video, its next render has no music.
+    r.status = "ready"
+    db_session.commit()
+    assert client.delete(f"/audio/{track.id}").status_code == 204
+    assert client.get(f"/reels/{reel['id']}").json()["music_id"] is None
+
+
+MUSIC = {
+    "mood": "calm", "genre": "lo-fi", "tempo": "slow, 80 BPM", "instruments": "piano",
+    "search": "calm lo-fi piano no copyright background music",
+}  # fmt: skip
+
+
+def test_music_suggestion_is_saved_in_the_script(client, db_session, monkeypatch):
+    from app.services import reel_script
+
+    reel = _create(client)
+    assert client.post(f"/reels/{reel['id']}/music-suggestion").status_code == 409  # busy
+
+    _with_script(db_session, reel["id"], status="ready")
+    monkeypatch.setattr(reel_script, "suggest_music", lambda script, platform: MUSIC)
+    body = client.post(f"/reels/{reel['id']}/music-suggestion").json()
+    assert body["script"]["music"] == MUSIC
+    assert body["script"]["scenes"] == SCRIPT["scenes"]  # the rest is untouched
+    assert body["status"] == "ready"  # the video still matches the script
+
+    # Saving the edited script keeps the suggestion.
+    saved = client.put(f"/reels/{reel['id']}/script", json=body["script"]).json()
+    assert saved["script"]["music"] == MUSIC and saved["status"] == "ready"
+
+    def down(script, platform):
+        raise reel_script.ScriptError("Ollama isn't running on this Mac.")
+
+    monkeypatch.setattr(reel_script, "suggest_music", down)
+    resp = client.post(f"/reels/{reel['id']}/music-suggestion")
+    assert resp.status_code == 502 and "Ollama" in resp.json()["error"]["message"]
+
+
+def test_saving_a_script_without_music_adds_no_empty_music(client, db_session):
+    reel = _create(client)
+    _with_script(db_session, reel["id"], status="ready")
+    body = client.put(f"/reels/{reel['id']}/script", json=SCRIPT).json()
+    assert "music" not in body["script"]
+    assert body["status"] == "ready"  # unchanged script: still matches the video
+
+
+def test_rewrite_asks_for_a_new_script(client, db_session):
+    reel = _create(client)
+    _with_script(db_session, reel["id"])
+    body = client.post(f"/reels/{reel['id']}/rewrite").json()
+    assert body["status"] == "scripting"
+    assert client.enqueued["reel_script"] == [reel["id"], reel["id"]]

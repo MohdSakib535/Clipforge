@@ -74,7 +74,15 @@ def client(db_session, monkeypatch):
         "download": [],
         "music": [],
         "audio_link": [],
+        "reel_script": [],
+        "reel_render": [],
     }
+    monkeypatch.setattr(
+        "app.tasks.dispatch.enqueue_reel_script", lambda rid: calls["reel_script"].append(rid)
+    )
+    monkeypatch.setattr(
+        "app.tasks.dispatch.enqueue_reel_render", lambda rid: calls["reel_render"].append(rid)
+    )
     monkeypatch.setattr(
         "app.tasks.dispatch.enqueue_ingest", lambda vid: calls["ingest"].append(vid)
     )

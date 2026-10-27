@@ -10,7 +10,7 @@ celery_app = Celery(
     "clipforge",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks.pipeline", "app.tasks.downloads", "app.tasks.audio"],
+    include=["app.tasks.pipeline", "app.tasks.downloads", "app.tasks.audio", "app.tasks.reels"],
 )
 
 celery_app.conf.update(
@@ -33,5 +33,8 @@ celery_app.conf.update(
         "download_audio_track": {"queue": "downloads"},
         "mix_background_audio": {"queue": "audio"},
         "render_single_clip": {"queue": "renders"},
+        # "Create a reel" ("reelmaker" in compose): one reel at a time.
+        "write_reel_script": {"queue": "reels"},
+        "render_reel": {"queue": "reels"},
     },
 )

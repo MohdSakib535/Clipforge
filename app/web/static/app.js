@@ -2,6 +2,7 @@ function clipforge() {
   return {
     steps: ["Upload", "Rights", "Settings", "Processing", "Review"],
     step: "upload",
+    mode: "clip", // "clip" (upload -> clips) | "reel" (Create a reel, see reels.js)
     source: "file", // "file" | "link"
     link: { url: "", checking: false, importing: false, info: null, quality: "best" },
     file: null,
