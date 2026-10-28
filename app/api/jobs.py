@@ -14,11 +14,12 @@ from starlette.background import BackgroundTask
 
 from app.api.deps import get_current_user
 from app.api.errors import AppError, NotFoundError
+from app.config.platforms import get_preset
 from app.config.settings import ConfigError, get_settings
 from app.db.session import SessionLocal, get_db
-from app.models import Clip, ClipStatus, Job, JobStatus, User, Video, VideoStatus
+from app.models import Clip, ClipStatus, Job, JobStage, JobStatus, User, Video, VideoStatus
 from app.schemas.clip import ClipOut, ColorGradeApply, ColorGradeResult
-from app.schemas.job import JobCreate, JobOut
+from app.schemas.job import MAX_TRIMS, JobCreate, JobOut, Trim, TrimsAdd
 from app.services.discard import discard_job
 from app.services.naming import clip_basename, video_stem
 from app.tasks import dispatch
@@ -34,6 +35,41 @@ def _get_job(db: Session, user: User, job_id: str) -> Job:
     if video is None or video.user_id != user.id:
         raise NotFoundError("Job not found")
     return job
+
+
+def _trim_settings(
+    video: Video, trims: list[Trim], platforms: list[str], transcribe: bool
+) -> list[dict]:
+    """Check hand-picked parts against the video and each platform's allowed
+    length; return them as stored in ``job.settings["trims"]``."""
+    out = []
+    for n, trim in enumerate(trims, start=1):
+        end = trim.end_s
+        if video.duration_s:
+            if end > video.duration_s + 0.5:
+                raise AppError(
+                    f"Clip {n} ends after the video ({video.duration_s:.1f} s).",
+                    code="out_of_range",
+                )
+            end = min(end, video.duration_s)  # the player can overshoot a little
+        length = end - trim.start_s
+        for platform in platforms:
+            preset = get_preset(platform)
+            if not preset.length_min_s <= round(length, 1) <= preset.length_max_s:
+                raise AppError(
+                    f"Clip {n} is {length:.1f} s long, but {preset.label} allows "
+                    f"{preset.length_min_s}-{preset.length_max_s} s.",
+                    code="bad_length",
+                )
+        out.append(
+            {
+                "start_s": trim.start_s,
+                "end_s": end,
+                "platforms": platforms,
+                "transcribe": transcribe,
+            }
+        )
+    return out
 
 
 def _check_transcriber() -> None:
@@ -78,13 +114,56 @@ def create_job(
         )
     _check_transcriber()
 
+    settings = body.model_dump(mode="json")
+    if body.trims:
+        settings["trims"] = _trim_settings(video, body.trims, body.platforms, body.transcribe)
     job = Job(
         video_id=video.id,
         platforms=body.platforms,
-        settings=body.model_dump(mode="json"),
+        settings=settings,
         status=JobStatus.queued,
     )
     db.add(job)
+    db.commit()
+    db.refresh(job)
+    dispatch.enqueue_job(job.id)
+    return job
+
+
+@router.post("/jobs/{job_id}/trims", response_model=JobOut)
+def add_trims(
+    job_id: str,
+    body: TrimsAdd,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Job:
+    """Make more hand-picked parts in a job made from trims, so every reel of
+    the video stays in one list. The job runs again for the new parts only."""
+    job = _get_job(db, user, job_id)
+    if (job.settings or {}).get("trims") is None:
+        raise AppError(
+            "This job cuts the whole video; it has no trims.",
+            code="not_a_trim_job",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    if job.status in (JobStatus.queued, JobStatus.running):
+        raise AppError(
+            "The reels before these are still being made. Add more when they are done.",
+            code="job_busy",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    _check_transcriber()
+    added = _trim_settings(job.video, body.trims, body.platforms, body.transcribe)
+    trims = job.settings["trims"] + added
+    if len(trims) > MAX_TRIMS * 5:
+        raise AppError("Too many clips in one job. Start over for more.", code="too_many")
+    # New dicts: the JSON columns only notice a reassignment.
+    job.settings = {**job.settings, "trims": trims}
+    job.platforms = list(dict.fromkeys([*job.platforms, *body.platforms]))
+    job.status = JobStatus.queued
+    job.stage = JobStage.queued
+    job.progress = 0
+    job.error = None
     db.commit()
     db.refresh(job)
     dispatch.enqueue_job(job.id)
@@ -224,9 +303,16 @@ def export_zip(
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
     tmp.close()
     # MP4 is already compressed: store, don't deflate (much faster, same size).
+    names: set[str] = set()
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as zf:
         for c in ready:
-            zf.write(c.file_path, f"{c.platform}/{clip_basename(c.rank)}.mp4")
+            stem = f"{c.platform}/{clip_basename(c.rank, c.dub_language)}"
+            name, n = f"{stem}.mp4", 1
+            while name in names:  # e.g. a reel dubbed twice (two voices)
+                n += 1
+                name = f"{stem}-{n}.mp4"
+            names.add(name)
+            zf.write(c.file_path, name)
 
     return FileResponse(
         tmp.name,

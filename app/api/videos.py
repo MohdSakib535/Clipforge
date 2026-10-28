@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, Request, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -280,3 +282,22 @@ def get_video(
     user: User = Depends(get_current_user),
 ) -> Video:
     return _get_video(db, user, video_id)
+
+
+@router.get("/{video_id}/source")
+def video_source(
+    video_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> FileResponse:
+    """The original file, for the trim player (supports range requests, so
+    seeking in a long film doesn't load all of it)."""
+    video = _get_video(db, user, video_id)
+    if video.status != VideoStatus.ready or not video.path or not Path(video.path).exists():
+        raise AppError(
+            "The video is not ready yet.",
+            code="video_not_ready",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    media_type = mimetypes.guess_type(video.path)[0] or "video/mp4"
+    return FileResponse(video.path, media_type=media_type, content_disposition_type="inline")

@@ -4,7 +4,17 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import ClipStatus
 
-__all__ = ["ClipOut", "ClipUpdate", "ColorGrade", "ColorGradeApply", "ColorGradeResult"]
+__all__ = [
+    "ClipOut",
+    "ClipUpdate",
+    "ColorGrade",
+    "ColorGradeApply",
+    "ColorGradeResult",
+    "DubLine",
+    "DubRequest",
+    "TranslateRequest",
+    "TranslationOut",
+]
 
 
 class ColorGrade(BaseModel):
@@ -42,6 +52,11 @@ class ClipOut(BaseModel):
     has_thumbnail: bool = False
     has_srt: bool = False
     has_speech: bool | None = None
+    transcript: str | None = None  # clips made from a trim with transcription on
+    # Its sentences translated with POST /clips/{id}/translate:
+    # {"language", "lines": [{"start_s", "end_s", "text", "translation"}]}.
+    translation: dict | None = None
+    dub_language: str | None = None  # a dubbed copy: the language of its voice
     bg_audio_id: str | None = None
     bg_audio_volume: int = 40
     bg_audio_mute_original: bool = False
@@ -84,3 +99,44 @@ class ColorGradeResult(BaseModel):
     queued: int
     skipped: int  # still rendering / failed / unchanged
     clips: list[ClipOut]  # the queued clips, now "rendering"
+
+
+class TranslateRequest(BaseModel):
+    language: str = "hi"
+
+
+class TranslationLine(BaseModel):
+    start_s: float
+    end_s: float
+    text: str  # as said in the clip
+    translation: str
+    roman: str | None = None  # the translation in Roman letters (Hindi)
+
+
+class VoiceOption(BaseModel):
+    key: str
+    label: str
+
+
+class TranslationOut(BaseModel):
+    language: str
+    label: str
+    voices: list[VoiceOption]  # for the dub
+    lines: list[TranslationLine]
+
+
+class DubLine(BaseModel):
+    """One sentence of the dubbed voice: said from ``start_s`` (seconds in the
+    video), as long as it fits before the next one."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    start_s: float = Field(ge=0)
+    end_s: float = Field(gt=0)
+    text: str = Field(min_length=1, max_length=500)
+
+
+class DubRequest(BaseModel):
+    language: str = "hi"
+    voice: str | None = Field(default=None, description="Kokoro voice; omit for the first one.")
+    lines: list[DubLine] = Field(min_length=1, max_length=80)

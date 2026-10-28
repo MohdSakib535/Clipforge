@@ -54,6 +54,15 @@ def build_srt(words: list[dict]) -> str:
     return "\n".join(cues)
 
 
+def build_cue_srt(cues: list[tuple[float, float, str]]) -> str:
+    """SubRip from whole lines that are already timed: (start, end, text),
+    seconds relative to the clip (a dubbed reel's sentences)."""
+    return "\n".join(
+        f"{n}\n{_fmt_srt_time(start)} --> {_fmt_srt_time(end)}\n{text}\n"
+        for n, (start, end, text) in enumerate(cues, start=1)
+    )
+
+
 def write_srt(path: str, words: list[dict]) -> str:
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(build_srt(words))

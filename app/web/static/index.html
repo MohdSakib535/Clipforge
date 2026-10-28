@@ -431,8 +431,16 @@
       </section>
       </div>
 
+      <!-- Create a reel from a topic (AI) or from parts of a video you trim. -->
+      <div x-show="mode==='reel'" x-cloak class="flex text-sm bg-slate-800 rounded-lg p-1 w-fit mb-5">
+        <button @click="reelSource='topic'" class="px-3 py-1 rounded"
+          :class="reelSource==='topic' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">From a topic (AI)</button>
+        <button @click="reelSource='video'" class="px-3 py-1 rounded"
+          :class="reelSource==='video' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">From a video (trim)</button>
+      </div>
+
       <!-- CREATE A REEL: Ollama writes the script, FLUX.2 draws the pictures, Kokoro reads it out (reels.js). -->
-      <section x-show="mode==='reel'" x-cloak x-data="reelMaker()" x-init="initReels()" class="grid md:grid-cols-3 gap-5">
+      <section x-show="mode==='reel' && reelSource==='topic'" x-cloak x-data="reelMaker()" x-init="initReels()" class="grid md:grid-cols-3 gap-5">
         <div class="space-y-5">
           <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
             <h2 class="text-lg font-medium mb-4">New reel</h2>
@@ -719,11 +727,437 @@
         </div>
       </section>
 
+      <!-- REEL FROM A VIDEO: paste a link or upload, trim the parts you want, get 9:16 reels for
+           YouTube Shorts / Facebook Reel with an optional transcript, colour and music (reel_video.js). -->
+      <section x-show="mode==='reel' && reelSource==='video'" x-cloak x-data="reelFromVideo()">
+        <!-- 1) Add a video -->
+        <div x-show="step==='upload'" class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-medium">Add a video to trim</h2>
+            <div class="flex text-xs bg-slate-800 rounded-lg p-1">
+              <button @click="source='link'" class="px-3 py-1 rounded"
+                :class="source==='link' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Paste link</button>
+              <button @click="source='file'" class="px-3 py-1 rounded"
+                :class="source==='file' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Upload file</button>
+            </div>
+          </div>
+
+          <div x-show="source==='link'">
+            <div class="flex gap-2">
+              <input type="url" x-model.trim="link.url" @keydown.enter="checkLink()" @input="link.info=null"
+                placeholder="https://www.youtube.com/watch?v=…  (YouTube, Facebook, Instagram, Vimeo, direct .mp4 …)"
+                class="flex-1 bg-slate-800 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+              <button @click="checkLink()" :disabled="!link.url || link.checking"
+                class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm"
+                x-text="link.checking ? 'Checking…' : 'Check link'"></button>
+            </div>
+            <template x-if="link.info">
+              <div class="mt-4 flex gap-4 bg-slate-800/60 rounded-lg p-4">
+                <img x-show="link.info.thumbnail" :src="link.info.thumbnail" referrerpolicy="no-referrer"
+                  class="w-40 aspect-video object-cover rounded bg-slate-900" />
+                <div class="flex-1 min-w-0">
+                  <div class="font-medium truncate" x-text="link.info.title"></div>
+                  <div class="text-xs text-slate-400 mt-1">
+                    <span x-text="link.info.site"></span><span x-show="link.info.duration_s" x-text="` · ${fmtDur(link.info.duration_s)}`"></span>
+                  </div>
+                  <label class="block text-sm mt-3">Download quality
+                    <select x-model="link.quality" class="block mt-1 bg-slate-900 rounded px-2 py-1.5 text-sm">
+                      <template x-for="q in link.info.qualities" :key="q.id">
+                        <option :value="q.id" x-text="q.approx_size_bytes ? `${q.label}  (~${fmtSize(q.approx_size_bytes)})` : q.label"></option>
+                      </template>
+                    </select>
+                  </label>
+                </div>
+              </div>
+            </template>
+            <button @click="importLink()" :disabled="!link.info || link.importing"
+              class="mt-5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Download</button>
+            <p class="text-xs text-slate-500 mt-3">Downloads in the background on the server. Only import videos you own or are licensed to use.</p>
+          </div>
+
+          <div x-show="source==='file'" x-cloak>
+            <label class="block border-2 border-dashed border-slate-700 rounded-lg p-10 text-center cursor-pointer hover:border-indigo-500 transition">
+              <input type="file" class="hidden" accept="video/mp4,video/x-matroska,video/quicktime,.mp4,.mkv,.mov" @change="pickFile($event)" />
+              <div class="text-slate-400">
+                <div class="text-4xl mb-2">⬆</div>
+                <div x-text="file ? file.name : 'Click to choose an MP4 / MKV / MOV (up to ~5 GB)'"></div>
+              </div>
+            </label>
+            <div x-show="uploading" class="mt-4">
+              <div class="h-2 bg-slate-800 rounded"><div class="h-2 bg-indigo-500 rounded" :style="`width:${uploadPct}%`"></div></div>
+              <div class="text-xs text-slate-400 mt-1" x-text="`Uploading ${uploadPct}%`"></div>
+            </div>
+            <button @click="startUpload()" :disabled="!file || uploading"
+              class="mt-5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Upload</button>
+          </div>
+        </div>
+
+        <!-- 2) Trim the parts, then make the reels -->
+        <div x-show="step!=='upload'" x-cloak class="space-y-5">
+          <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+            <div class="flex items-start justify-between gap-3 mb-4">
+              <div class="min-w-0">
+                <h2 class="text-lg font-medium">Trim your reels</h2>
+                <div class="text-xs text-slate-400 truncate"
+                  x-text="video ? video.filename + (video.duration_s ? ` · ${fmtTime(video.duration_s)}` : '') : ''"></div>
+              </div>
+              <button @click="startOver()" class="text-sm text-slate-400 hover:text-slate-200 flex-none">Start over</button>
+            </div>
+
+            <div x-show="video && video.status==='downloading'">
+              <div class="text-sm text-amber-300 mb-2" x-text="`Downloading from link… ${video?.download_progress || 0}%`"></div>
+              <div class="h-2 bg-slate-800 rounded"><div class="h-2 bg-indigo-500 rounded transition-all" :style="`width:${video?.download_progress || 0}%`"></div></div>
+            </div>
+            <div x-show="video && video.status==='failed'" class="text-rose-300 text-sm">
+              Failed: <span x-text="video?.error"></span>
+              <button @click="startOver()" class="ml-2 underline text-slate-300">Try again</button>
+            </div>
+            <div x-show="video && !['ready','downloading','failed'].includes(video.status)" class="text-amber-300 text-sm">
+              Preparing video (<span x-text="video?.status"></span>)… <span class="animate-pulse">●</span>
+            </div>
+
+            <template x-if="video?.status==='ready'">
+              <div x-init="ensureCut()" class="grid md:grid-cols-5 gap-5">
+                <div class="md:col-span-3">
+                  <video x-ref="srcPlayer" controls preload="metadata" :src="`/videos/${video.id}/source`"
+                    @loadedmetadata="playerError=false" @timeupdate="onTime()" @pause="_stopAt=null" @error="playerError=true"
+                    class="w-full rounded-lg bg-black max-h-[420px]"></video>
+                  <p x-show="playerError" class="text-xs text-amber-300 mt-2">This browser can't play this file. You can still type the start and end times.</p>
+                  <!-- Timeline: parts added (green) and the part picked now (blue). -->
+                  <div class="relative h-2 bg-slate-800 rounded mt-3" title="Green: parts added · Blue: the part picked now">
+                    <template x-for="(t, i) in trims" :key="i">
+                      <div class="absolute h-2 bg-emerald-600/80 rounded" :style="barStyle(t.start_s, t.end_s)"></div>
+                    </template>
+                    <div class="absolute h-2 bg-indigo-500 rounded" :style="barStyle(cut.start, cut.end)"></div>
+                  </div>
+                </div>
+
+                <div class="md:col-span-2 space-y-3 text-sm">
+                  <div class="grid grid-cols-2 gap-3">
+                    <div class="text-xs text-slate-400">Start
+                      <input :value="fmtTime(cut.start)" @change="setCut('start', $event)" @keydown.enter="$event.target.blur()"
+                        class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 font-mono" />
+                      <button @click="markStart()" :disabled="playerError"
+                        class="mt-1 w-full px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Set to player time</button>
+                    </div>
+                    <div class="text-xs text-slate-400">End
+                      <input :value="fmtTime(cut.end)" @change="setCut('end', $event)" @keydown.enter="$event.target.blur()"
+                        class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 font-mono" />
+                      <button @click="markEnd()" :disabled="playerError"
+                        class="mt-1 w-full px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Set to player time</button>
+                    </div>
+                  </div>
+                  <div class="flex items-center justify-between gap-2 text-xs">
+                    <span :class="cutProblem() ? 'text-amber-300' : 'text-slate-300'"
+                      x-text="cutProblem() || `Length ${cutLen().toFixed(1)} s`"></span>
+                    <button @click="playPart(cut.start, cut.end)" :disabled="playerError || cutLen() <= 0"
+                      class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 flex-none">▶ Play this part</button>
+                  </div>
+                  <button @click="addTrim()" :disabled="!!cutProblem()"
+                    class="w-full px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40">+ Add this part</button>
+
+                  <div x-show="trims.length" class="space-y-1.5">
+                    <div class="text-xs text-slate-400">Parts to make</div>
+                    <template x-for="(t, i) in trims" :key="i">
+                      <div class="flex items-center gap-2 text-xs bg-slate-800/60 rounded px-2 py-1.5">
+                        <span class="text-slate-400 w-5" x-text="`${i + 1}.`"></span>
+                        <span class="font-mono flex-1" x-text="`${fmtTime(t.start_s)} → ${fmtTime(t.end_s)}`"></span>
+                        <span :class="partProblem(t.start_s, t.end_s) ? 'text-amber-300' : 'text-slate-400'"
+                          :title="partProblem(t.start_s, t.end_s)" x-text="`${(t.end_s - t.start_s).toFixed(1)} s`"></span>
+                        <button @click="playPart(t.start_s, t.end_s)" :disabled="playerError" class="px-1.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">▶</button>
+                        <button @click="trims.splice(i, 1)" class="text-slate-500 hover:text-rose-300">remove</button>
+                      </div>
+                    </template>
+                  </div>
+                  <p class="text-xs text-slate-500">Play the video and press <b>Set to player time</b> where the part starts and where it ends (or type the times, e.g. 1:23.5). Click <b>+ Add this part</b> for each reel you want.</p>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <!-- Make the reels -->
+          <div x-show="video?.status==='ready'" class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+            <div class="text-xs text-slate-400 mb-1">Make reels for</div>
+            <div class="flex flex-wrap gap-2 mb-4">
+              <template x-for="p in reelPresets()" :key="p.key">
+                <button @click="toggleReelPlatform(p.key)" class="px-3 py-2 rounded-lg text-sm"
+                  :class="reelPlatforms.includes(p.key) ? 'bg-indigo-600' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'">
+                  <span x-text="p.label"></span> <span class="text-xs opacity-70" x-text="`${p.length_min_s}-${p.length_max_s} s`"></span>
+                </button>
+              </template>
+            </div>
+            <label class="flex items-start gap-3 text-sm bg-slate-800/60 rounded-lg p-3 mb-3 cursor-pointer">
+              <input type="checkbox" x-model="withTranscript" class="mt-1" />
+              <span><span class="font-medium">Transcript of each part</span> (speech to text)
+                <span x-show="withTranscript" class="block text-xs text-slate-400 mt-0.5">Only the trimmed seconds are transcribed, so it's quick even for a long video. Each reel also gets a caption file (.srt).</span>
+                <span x-show="!withTranscript" class="block text-xs text-slate-400 mt-0.5">Off: no transcript and no caption file.</span>
+              </span>
+            </label>
+            <label x-show="!video?.rights_confirmed_at" class="flex items-start gap-3 text-sm bg-slate-800/60 rounded-lg p-3 mb-4 cursor-pointer">
+              <input type="checkbox" x-model="rightsChecked" class="mt-1" />
+              <span>I own this video or have the rights/licence to edit and publish it.</span>
+            </label>
+            <div class="flex flex-wrap items-center gap-3">
+              <button @click="makeReels()" :disabled="making || !!makeProblem()"
+                class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40"
+                x-text="making ? 'Starting…' : `Make ${reelCount()} reel${reelCount() === 1 ? '' : 's'}`"></button>
+              <span class="text-xs" :class="makeProblem() ? 'text-amber-300' : 'text-slate-400'"
+                x-text="makeProblem() || (trims.length ? '' : 'Makes the part picked above.')"></span>
+            </div>
+            <div x-show="jobBusy()" class="mt-4">
+              <div class="h-2 bg-slate-800 rounded"><div class="h-2 bg-gradient-to-r from-indigo-500 to-fuchsia-500 rounded transition-all" :style="`width:${job?.progress || 0}%`"></div></div>
+              <div class="flex justify-between text-xs text-slate-400 mt-1">
+                <span x-text="stageLabel(job?.stage)"></span><span x-text="`${job?.progress || 0}%`"></span>
+              </div>
+            </div>
+            <p x-show="job?.status==='failed'" class="mt-3 text-sm text-rose-300" x-text="job?.error"></p>
+          </div>
+
+          <!-- 3) The reels: colour, music, transcript, download -->
+          <div x-show="clips.length" class="space-y-5">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <h2 class="text-lg font-medium">Your reels (<span x-text="clips.length"></span>)</h2>
+              <a x-show="readyCount() > 0" :href="`/jobs/${job?.id}/export.zip`"
+                class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download all (ZIP)</a>
+            </div>
+
+            <!-- Background music: add a track to the library, then put it on all reels or one. -->
+            <div class="bg-slate-900/60 rounded-xl border border-slate-800 p-4">
+              <div class="flex flex-wrap items-center gap-2 mb-3">
+                <h3 class="text-sm font-medium mr-auto">Background music</h3>
+                <label class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs cursor-pointer"
+                       :class="music.uploading ? 'opacity-40 pointer-events-none' : ''">
+                  <input type="file" class="hidden" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.opus,.flac" @change="uploadMusic($event)" />
+                  <span x-text="music.uploading ? 'Uploading…' : '+ Upload audio'"></span>
+                </label>
+              </div>
+              <div class="flex gap-2 mb-3">
+                <input type="url" x-model.trim="music.link" @keydown.enter="grabMusicLink()"
+                  placeholder="…or paste a link to grab its audio (YouTube, SoundCloud, …)"
+                  class="flex-1 bg-slate-800 rounded-lg px-3 py-1.5 text-xs outline-none focus:ring-2 focus:ring-indigo-500" />
+                <button @click="grabMusicLink()" :disabled="!music.link || music.grabbing"
+                  class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs"
+                  x-text="music.grabbing ? 'Starting…' : 'Get audio'"></button>
+              </div>
+              <template x-for="t in tracks.filter(t => t.status !== 'ready')" :key="t.id">
+                <div class="flex items-center gap-2 text-xs mb-2">
+                  <span class="truncate max-w-xs" x-text="t.filename"></span>
+                  <template x-if="t.status==='processing'">
+                    <span class="flex items-center gap-2 text-amber-300">
+                      <span class="w-24 h-1.5 bg-slate-800 rounded"><span class="block h-1.5 bg-indigo-500 rounded" :style="`width:${t.progress||0}%`"></span></span>
+                      <span x-text="(t.progress||0) >= 99 ? 'Converting…' : `Downloading ${t.progress||0}%`"></span>
+                    </span>
+                  </template>
+                  <span x-show="t.status==='failed'" class="text-rose-300 truncate max-w-md" x-text="`Failed: ${t.error||''}`"></span>
+                  <button x-show="t.status==='failed'" @click="removeTrack(t)" class="text-slate-400 hover:text-slate-200 underline">remove</button>
+                </div>
+              </template>
+              <p x-show="!readyTracks().length" class="text-xs text-slate-500">Upload an MP3 / M4A / WAV or grab the audio of a link, then add it to all reels here or tick "Background music" on a reel.</p>
+              <div x-show="readyTracks().length" class="flex flex-wrap items-end gap-4">
+                <label class="text-xs">Track
+                  <select x-model="music.trackId" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm max-w-xs">
+                    <template x-for="t in readyTracks()" :key="t.id">
+                      <option :value="t.id" :selected="t.id===music.trackId" x-text="`${t.filename} (${fmtDur(t.duration_s)})`"></option>
+                    </template>
+                  </select>
+                </label>
+                <label class="text-xs">Volume <span class="text-slate-400" x-text="`${music.volume}%`"></span>
+                  <input type="range" min="0" max="100" step="5" x-model.number="music.volume" class="block mt-2 w-40" />
+                </label>
+                <label class="flex items-center gap-2 text-xs pb-1" title="Drop the reel's own sound so only the music plays">
+                  <input type="checkbox" x-model="music.muteOriginal" /> Mute original audio
+                </label>
+                <template x-if="music.trackId">
+                  <audio controls preload="none" :src="`/audio/${music.trackId}/file`" class="h-8"></audio>
+                </template>
+                <div class="flex flex-wrap gap-2">
+                  <button @click="setMusic(music.trackId, music.volume, null, music.muteOriginal)" :disabled="!music.trackId || music.busy"
+                    class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs">Add to all reels</button>
+                  <button @click="setMusic(null, music.volume, null)" :disabled="music.busy || !clips.some(c => c.bg_audio_id)"
+                    class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">Remove from all</button>
+                  <button @click="deleteTrack()" :disabled="!music.trackId || music.busy"
+                    class="px-3 py-1.5 rounded-lg bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40 text-xs">Delete track</button>
+                </div>
+              </div>
+              <p x-show="readyTracks().length" class="text-xs text-slate-500 mt-3">100% = as loud as the speech; 40% is a clearly audible background. The music loops if it is shorter than the reel and fades out at the end. Only use music you're allowed to use.</p>
+            </div>
+
+            <!-- Colour for every reel at once (each reel also has its own below). -->
+            <div class="bg-slate-900/60 rounded-xl border border-slate-800 p-4">
+              <h3 class="text-sm font-medium mb-3">Colour adjustment — all reels</h3>
+              <div class="flex flex-wrap items-end gap-4">
+                <label class="text-xs">Contrast <span class="text-slate-400" x-text="colorAll.contrast"></span>
+                  <input type="range" min="-50" max="50" step="1" x-model.number="colorAll.contrast" class="block mt-2 w-36" />
+                </label>
+                <label class="text-xs">Brightness <span class="text-slate-400" x-text="colorAll.brightness"></span>
+                  <input type="range" min="-50" max="50" step="1" x-model.number="colorAll.brightness" class="block mt-2 w-36" />
+                </label>
+                <label class="text-xs">Saturation <span class="text-slate-400" x-text="colorAll.saturation"></span>
+                  <input type="range" min="-50" max="50" step="1" x-model.number="colorAll.saturation" class="block mt-2 w-36" />
+                </label>
+                <div class="flex flex-wrap gap-2">
+                  <button @click="applyColorAll()" :disabled="colorAll.busy || !clips.some(c => isPlayable(c))"
+                    class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs">Apply to all reels</button>
+                  <button @click="resetColorAll()" :disabled="colorAll.busy || !clips.some(c => colorOn(c))"
+                    class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">Reset all</button>
+                </div>
+              </div>
+              <p class="text-xs text-slate-500 mt-3">Each reel re-renders with the new colour and keeps its music. Small values look most natural.</p>
+            </div>
+
+            <div class="grid lg:grid-cols-2 gap-5">
+              <template x-for="c in reelCards()" :key="c.id">
+                <div class="bg-slate-900/60 rounded-xl border border-slate-800 p-4 flex flex-col sm:flex-row gap-4">
+                  <div class="flex-none mx-auto sm:mx-0">
+                    <!-- Same player rules as the clip cards: only once the file is ready, ?v= busts the cache. -->
+                    <template x-if="isPlayable(c)">
+                      <div class="relative">
+                        <video controls preload="metadata" :src="previewUrl(c)" class="h-[360px] aspect-[9/16] rounded-lg bg-black"
+                          :poster="c.has_thumbnail ? `/clips/${c.id}/thumbnail?v=${c.file_version || 0}` : ''"
+                          :style="colorChanged(c) ? `filter: url(#rf-${c.id})` : ''"></video>
+                        <span x-show="colorChanged(c)" class="absolute top-2 left-2 text-[10px] px-1.5 py-0.5 rounded bg-amber-600/90 text-white pointer-events-none">
+                          Colour preview · not applied yet</span>
+                        <svg width="0" height="0" class="absolute" aria-hidden="true">
+                          <filter :id="`rf-${c.id}`" color-interpolation-filters="sRGB">
+                            <feColorMatrix type="matrix" :values="colorPreviewMatrix(c)" />
+                          </filter>
+                        </svg>
+                      </div>
+                    </template>
+                    <div x-show="!isPlayable(c)" class="h-[360px] aspect-[9/16] rounded-lg bg-slate-800 flex items-center justify-center text-slate-500 text-sm"
+                      x-text="c.status==='failed' ? 'Failed' : 'Making…'"></div>
+                  </div>
+
+                  <div class="flex-1 min-w-0 text-xs space-y-3">
+                    <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                      <span class="px-2 py-0.5 rounded bg-slate-800 whitespace-nowrap" x-text="`${platformLabel(c.platform)} · Reel ${c.rank}${c.dub_language ? ' · Hindi' : ''}`"></span>
+                      <span class="text-slate-400 font-mono whitespace-nowrap" x-text="`${fmtTime(c.start_s)} → ${fmtTime(c.end_s)}`"></span>
+                    </div>
+                    <input x-model="c.title" class="w-full bg-slate-800 rounded px-2 py-1 text-sm" placeholder="Title" />
+
+                    <template x-if="typeof c.transcript === 'string'">
+                      <div class="bg-slate-800/50 rounded p-2">
+                        <div class="flex items-center justify-between text-slate-400 mb-1">
+                          <span x-text="c.dub_language ? 'Transcript (Hindi voice)' : 'Transcript'"></span>
+                          <button x-show="c.transcript" @click="copyTranscript(c)" class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-200">Copy</button>
+                        </div>
+                        <p class="text-slate-200 max-h-32 overflow-y-auto whitespace-pre-line" x-text="c.transcript || 'No speech in this part.'"></p>
+
+                        <!-- Translate & dub: the local LLM translates each sentence, Kokoro reads it out. -->
+                        <button x-show="c.transcript && !c.dub_language && !c._tr?.lines" @click="translateClip(c)" :disabled="!!c._tr?.busy"
+                          class="mt-2 px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40"
+                          x-text="c._tr?.busy ? 'Translating… (~10–20 s)' : 'Translate to Hindi'"></button>
+                        <template x-if="c._tr?.lines && !c.dub_language">
+                          <div class="mt-2 pt-2 border-t border-slate-700 space-y-2">
+                            <div class="flex items-center justify-between text-slate-400">
+                              <span>Hindi</span>
+                              <button @click="copyTranslation(c)" class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-200">Copy</button>
+                            </div>
+                            <template x-for="(l, i) in c._tr.lines" :key="i">
+                              <div>
+                                <div class="text-[10px] text-slate-500 truncate" :title="l.text" x-text="`${fmtTime(l.start_s)} · ${l.text}`"></div>
+                                <textarea x-model="l.translation" rows="2" class="w-full mt-0.5 bg-slate-900 rounded px-2 py-1 text-sm text-slate-100"></textarea>
+                                <div x-show="l.roman && l.translation === l._orig" class="text-[10px] text-slate-400" x-text="l.roman"></div>
+                              </div>
+                            </template>
+                            <div class="flex flex-wrap items-center gap-2">
+                              <label class="flex items-center gap-1.5 text-slate-400">Voice
+                                <select x-model="c._tr.voice" class="bg-slate-900 rounded px-1.5 py-1 text-slate-100">
+                                  <template x-for="v in c._tr.voices" :key="v.key">
+                                    <option :value="v.key" :selected="v.key===c._tr.voice" x-text="v.label"></option>
+                                  </template>
+                                </select>
+                              </label>
+                              <button @click="makeDub(c)" :disabled="c._tr.making || c._tr.busy || c._tr.lines.some(l => !l.translation.trim())"
+                                class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40"
+                                x-text="c._tr.making ? 'Starting…' : 'Make Hindi reel'"></button>
+                              <button @click="translateClip(c)" :disabled="c._tr.busy || c._tr.making"
+                                class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
+                                x-text="c._tr.busy ? 'Translating…' : 'Translate again'"></button>
+                            </div>
+                            <p class="text-slate-500">Fix the Hindi if needed. <b>Make Hindi reel</b> adds a new reel next to this one: the original sound is replaced by a Hindi voice (it won't match lip movements), with Hindi captions. Colour and music carry over; this reel stays as it is.</p>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- Background music for this reel: tick to add, untick to remove. -->
+                    <div x-show="readyTracks().length || c.bg_audio_id" class="flex flex-wrap items-center gap-2 bg-slate-800/50 rounded px-2 py-1.5">
+                      <label class="flex items-center gap-1.5 mr-1" :class="c.bg_audio_id ? 'text-indigo-200' : 'text-slate-300'">
+                        <input type="checkbox" :checked="!!c.bg_audio_id" @change="toggleClipMusic(c, $event.target.checked)"
+                          :disabled="!isPlayable(c) || music.busy" />
+                        Background music
+                      </label>
+                      <select x-model="c._musicId" class="bg-slate-800 rounded px-1.5 py-1 max-w-[9rem]">
+                        <template x-for="t in readyTracks()" :key="t.id">
+                          <option :value="t.id" :selected="t.id===c._musicId" x-text="t.filename"></option>
+                        </template>
+                      </select>
+                      <input type="range" min="0" max="100" step="5" x-model.number="c._musicVol" class="w-20" />
+                      <span class="w-9 text-slate-400" x-text="`${c._musicVol}%`"></span>
+                      <label class="flex items-center gap-1.5" title="Drop this reel's own sound so only the music plays">
+                        <input type="checkbox" x-model="c._musicMute" /> mute original
+                      </label>
+                      <button x-show="musicChanged(c)" @click="setMusic(c._musicId, c._musicVol, [c.id], c._musicMute)" :disabled="!isPlayable(c) || music.busy"
+                        class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Apply</button>
+                      <span x-show="c.status==='rendering' && c.has_file" class="text-amber-300">mixing…</span>
+                    </div>
+
+                    <!-- Colour for this reel. Applying re-renders it (keeps its music). -->
+                    <details>
+                      <summary class="cursor-pointer select-none text-slate-400 hover:text-slate-200">
+                        Colour adjustment
+                        <span x-show="colorOn(c)" class="text-indigo-300">· on</span>
+                        <span x-show="colorChanged(c)" class="text-amber-300">· not applied</span>
+                      </summary>
+                      <div class="mt-2 bg-slate-800/50 rounded px-2 py-2 space-y-1.5">
+                        <label class="flex items-center gap-2">
+                          <span class="w-20 text-slate-400">Contrast</span>
+                          <input type="range" min="-50" max="50" step="1" x-model.number="c.color_contrast" class="flex-1" />
+                          <span class="w-7 text-right text-slate-400" x-text="c.color_contrast||0"></span>
+                        </label>
+                        <label class="flex items-center gap-2">
+                          <span class="w-20 text-slate-400">Brightness</span>
+                          <input type="range" min="-50" max="50" step="1" x-model.number="c.color_brightness" class="flex-1" />
+                          <span class="w-7 text-right text-slate-400" x-text="c.color_brightness||0"></span>
+                        </label>
+                        <label class="flex items-center gap-2">
+                          <span class="w-20 text-slate-400">Saturation</span>
+                          <input type="range" min="-50" max="50" step="1" x-model.number="c.color_saturation" class="flex-1" />
+                          <span class="w-7 text-right text-slate-400" x-text="c.color_saturation||0"></span>
+                        </label>
+                        <div class="flex items-center gap-2 pt-1">
+                          <button @click="rerender(c)" :disabled="!isPlayable(c) || !colorChanged(c)"
+                            class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Apply colour</button>
+                          <button @click="resetColor(c)" :disabled="!(c.color_contrast||c.color_brightness||c.color_saturation)"
+                            class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Reset</button>
+                        </div>
+                      </div>
+                    </details>
+
+                    <p x-show="c.error" class="text-amber-300" x-text="c.error"></p>
+
+                    <div class="flex flex-wrap gap-2">
+                      <button @click="saveClip(c)" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Save title</button>
+                      <a :href="downloadUrl(c)" x-show="isPlayable(c)" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500">Download</a>
+                      <a :href="`/clips/${c.id}/captions.srt`" x-show="c.has_srt" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Captions (.srt)</a>
+                      <button x-show="c.status==='failed'" @click="rerender(c)" class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500">Try again</button>
+                      <button @click="del(c)" class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600">Delete</button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <div x-show="error" x-cloak class="fixed bottom-4 right-4 bg-rose-700 text-white px-4 py-2 rounded-lg text-sm" x-text="error" @click="error=''"></div>
       <div x-show="notice && !error" x-cloak class="fixed bottom-4 right-4 bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm" x-text="notice" @click="notice=''"></div>
     </div>
 
     <script src="/ui/app.js"></script>
     <script src="/ui/reels.js"></script>
+    <script src="/ui/reel_video.js"></script>
   </body>
 </html>

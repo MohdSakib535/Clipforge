@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -25,7 +26,7 @@ from app.models import (
     Video,
     VideoStatus,
 )
-from app.services import analysis, bgaudio, ffmpeg
+from app.services import analysis, bgaudio, dub, ffmpeg
 from app.services.cost import CostCapExceeded, CostTracker
 from app.services.discard import discard_job
 from app.services.filehash import file_fingerprint
@@ -138,7 +139,7 @@ def _clip_length(job: Job, preset: PlatformPreset) -> int:
     return max(preset.length_min_s, min(preset.length_max_s, want))
 
 
-def _part_text(part: Candidate, rank: int) -> tuple[str, str]:
+def _part_text(part: Candidate, rank: int, label: str = "Part") -> tuple[str, str]:
     """(title, description) for a clip, taken from its own transcript:
     "Part 12 - <first 9 words>" and the part's text. Hindi (Devanagari) is
     written in Roman letters, the way it is typed on social media."""
@@ -146,7 +147,7 @@ def _part_text(part: Candidate, rank: int) -> tuple[str, str]:
     if is_mostly_devanagari(text):
         text = romanize(text)
     snippet = " ".join(text.split()[:9])
-    title = f"Part {rank}" + (f" - {snippet}" if snippet else "")
+    title = f"{label} {rank}" + (f" - {snippet}" if snippet else "")
     return title[:120], text[:800]
 
 
@@ -343,95 +344,10 @@ def run_job(job_id: str) -> None:
             return
 
         try:
-
-            # Transcription can be switched off per job (Settings step): then
-            # parts are cut on time at scene changes, with no titles from speech.
-            transcribe = bool((job.settings or {}).get("transcribe", True))
-            if transcribe:
-                # Fail at once, not after minutes of work, if transcription can't
-                # run (unknown TRANSCRIBER, or OpenAI chosen without a key).
-                settings.check_transcriber_config()
-
-            # 1+2) Transcribe and detect scenes CONCURRENTLY: transcription waits
-            # on the network, scene detection runs in an ffmpeg subprocess, so
-            # they overlap almost for free.
-            _set_stage(db, job, JobStage.transcribing if transcribe else JobStage.analyzing, 5)
-
-            def _tx_progress(fraction: float) -> None:
-                # Runs on this thread (the transcriber collects results here),
-                # so a Start over stops transcription within a chunk/segment.
-                _check_cancel(db, job)
-                job.progress = max(job.progress, 5 + int(20 * fraction))
-                db.commit()
-
-            # Also, once per video: loudness-normalise the audio for copy cuts
-            # (horizontal clips) so they don't run loudnorm one by one. Scene
-            # cuts are cached too; a re-run of a video skips both.
-            source = _source_path(video)
-            needs_norm = (
-                (video.audio_tracks or 0) > 0
-                and any(not get_preset(p).is_vertical for p in (job.platforms or []))
-                and _stream_copy_ok(db, video)
-            )
-            scene_cuts = _cached_scene_cuts(video)
-            bg = ThreadPoolExecutor(max_workers=2)
-            try:
-                scene_future = (
-                    bg.submit(analysis.detect_scenes, source) if scene_cuts is None else None
-                )
-                norm_future = (
-                    bg.submit(_ensure_normalized_audio, _normalized_audio_path(video), source)
-                    if needs_norm
-                    else None
-                )
-                if transcribe:
-                    transcript = _transcribe(db, video, cost, on_progress=_tx_progress)
-                    sentences, words = transcript.segments or [], transcript.words or []
-                else:
-                    sentences, words = [], []
-                _save_cost(db, job, cost)
-                _check_cancel(db, job)
-                _set_stage(db, job, JobStage.analyzing, 25)
-                if scene_future is not None:
-                    scene_cuts = scene_future.result()
-                    _save_scene_cuts(db, video, scene_cuts)
-                if norm_future is not None:
-                    norm_future.result()  # copy cuts use it
-            finally:
-                # A cancel or failure doesn't wait for these ffmpeg runs: scene
-                # detection ends on its own, and the normalised audio is a
-                # cache for this video, which is kept.
-                bg.shutdown(wait=False, cancel_futures=True)
-
-            platforms: list[str] = job.platforms or []
-            caption_cfg = (job.settings or {}).get("captions", {})
-
-            total_platforms = max(1, len(platforms))
-            for p_idx, platform in enumerate(platforms):
-                preset = get_preset(platform)
-                base = 35 + int(55 * p_idx / total_platforms)
-                span = int(55 / total_platforms)
-                render_range = (base + max(1, span // 2), base + span)
-
-                _check_cancel(db, job)
-                _set_stage(db, job, JobStage.planning_clips, base)
-
-                # Tile the entire video into ~target-second parts; each part is a clip.
-                target = _clip_length(job, preset)
-                parts = build_coverage_segments(
-                    sentences, scene_cuts, target, duration_s=video.duration_s, words=words
-                )
-                log.info(
-                    "coverage_segments",
-                    extra={"platform": platform, "count": len(parts), "target_s": target},
-                )
-                if not parts:
-                    continue
-                _set_stage(db, job, JobStage.rendering, render_range[0])
-                _render_parts(
-                    db, job, video, preset, parts, words, caption_cfg, settings,
-                    progress=render_range, transcribed=transcribe,
-                )  # fmt: skip
+            if (job.settings or {}).get("trims") is not None:
+                _make_trim_clips(db, job, video, cost, settings)
+            else:
+                _make_coverage_clips(db, job, video, cost, settings)
 
             _check_cancel(db, job)
             _set_stage(db, job, JobStage.finalizing, 98)
@@ -467,6 +383,209 @@ def run_job(job_id: str) -> None:
             raise
         finally:
             bind_job_id(None)
+
+
+def _make_coverage_clips(
+    db: Session, job: Job, video: Video, cost: CostTracker, settings: Settings
+) -> None:
+    """Transcribe, find scene cuts, cut the whole video into ~N-second parts
+    per platform and render them."""
+    # Transcription can be switched off per job (Settings step): then
+    # parts are cut on time at scene changes, with no titles from speech.
+    transcribe = bool((job.settings or {}).get("transcribe", True))
+    if transcribe:
+        # Fail at once, not after minutes of work, if transcription can't
+        # run (unknown TRANSCRIBER, or OpenAI chosen without a key).
+        settings.check_transcriber_config()
+
+    # 1+2) Transcribe and detect scenes CONCURRENTLY: transcription waits
+    # on the network, scene detection runs in an ffmpeg subprocess, so
+    # they overlap almost for free.
+    _set_stage(db, job, JobStage.transcribing if transcribe else JobStage.analyzing, 5)
+
+    def _tx_progress(fraction: float) -> None:
+        # Runs on this thread (the transcriber collects results here),
+        # so a Start over stops transcription within a chunk/segment.
+        _check_cancel(db, job)
+        job.progress = max(job.progress, 5 + int(20 * fraction))
+        db.commit()
+
+    # Also, once per video: loudness-normalise the audio for copy cuts
+    # (horizontal clips) so they don't run loudnorm one by one. Scene
+    # cuts are cached too; a re-run of a video skips both.
+    source = _source_path(video)
+    needs_norm = (
+        (video.audio_tracks or 0) > 0
+        and any(not get_preset(p).is_vertical for p in (job.platforms or []))
+        and _stream_copy_ok(db, video)
+    )
+    scene_cuts = _cached_scene_cuts(video)
+    bg = ThreadPoolExecutor(max_workers=2)
+    try:
+        scene_future = bg.submit(analysis.detect_scenes, source) if scene_cuts is None else None
+        norm_future = (
+            bg.submit(_ensure_normalized_audio, _normalized_audio_path(video), source)
+            if needs_norm
+            else None
+        )
+        if transcribe:
+            transcript = _transcribe(db, video, cost, on_progress=_tx_progress)
+            sentences, words = transcript.segments or [], transcript.words or []
+        else:
+            sentences, words = [], []
+        _save_cost(db, job, cost)
+        _check_cancel(db, job)
+        _set_stage(db, job, JobStage.analyzing, 25)
+        if scene_future is not None:
+            scene_cuts = scene_future.result()
+            _save_scene_cuts(db, video, scene_cuts)
+        if norm_future is not None:
+            norm_future.result()  # copy cuts use it
+    finally:
+        # A cancel or failure doesn't wait for these ffmpeg runs: scene
+        # detection ends on its own, and the normalised audio is a
+        # cache for this video, which is kept.
+        bg.shutdown(wait=False, cancel_futures=True)
+
+    platforms: list[str] = job.platforms or []
+    caption_cfg = (job.settings or {}).get("captions", {})
+
+    total_platforms = max(1, len(platforms))
+    for p_idx, platform in enumerate(platforms):
+        preset = get_preset(platform)
+        base = 35 + int(55 * p_idx / total_platforms)
+        span = int(55 / total_platforms)
+        render_range = (base + max(1, span // 2), base + span)
+
+        _check_cancel(db, job)
+        _set_stage(db, job, JobStage.planning_clips, base)
+
+        # Tile the entire video into ~target-second parts; each part is a clip.
+        target = _clip_length(job, preset)
+        parts = build_coverage_segments(
+            sentences, scene_cuts, target, duration_s=video.duration_s, words=words
+        )
+        log.info(
+            "coverage_segments",
+            extra={"platform": platform, "count": len(parts), "target_s": target},
+        )
+        if not parts:
+            continue
+        _set_stage(db, job, JobStage.rendering, render_range[0])
+        _render_parts(
+            db, job, video, preset, parts, words, caption_cfg, settings,
+            progress=render_range, transcribed=transcribe,
+        )  # fmt: skip
+
+
+# ---------------------------------------------------------------------------
+# Trims: parts picked by hand ("Reel from a video")
+# ---------------------------------------------------------------------------
+_TRIM_CONTEXT_S = 1.5  # heard on each side of a trim (see _trim_words)
+
+
+def _full_transcript_words(db: Session, video: Video) -> list[dict] | None:
+    """Timed words of the whole video if it (or the same file uploaded
+    before) was already transcribed, else None."""
+    own = db.query(Transcript).filter(Transcript.video_id == video.id).one_or_none()
+    if own and own.words:
+        return own.words
+    donor = _same_file_transcript(db, video)
+    return donor.words if donor else None
+
+
+def _trim_words(
+    video: Video,
+    start: float,
+    end: float,
+    full: list[dict] | None,
+    cost: CostTracker,
+    settings: Settings,
+) -> list[dict]:
+    """Timed words (seconds in the video) said between ``start`` and ``end``:
+    from the whole-video transcript when there is one, else by transcribing
+    just these seconds, which takes moments even in a 3-hour film."""
+    if full is not None:
+        return [w for w in full if w["end"] > start and w["start"] < end]
+    if video.audio_tracks == 0:
+        return []  # a silent video: nothing to transcribe
+    # A little before and after is heard too: a word cut at the edge of the
+    # trim is recognised from its context instead of guessed from a fragment.
+    lo, hi = max(0.0, start - _TRIM_CONTEXT_S), end + _TRIM_CONTEXT_S
+    with tempfile.TemporaryDirectory() as tmp:
+        audio = str(Path(tmp) / "trim.mp3")
+        ffmpeg.run(ffmpeg.build_audio_chunk_cmd(_source_path(video), audio, lo, hi - lo))
+        result = get_transcriber(settings).transcribe(audio)
+    cost.add_transcription(
+        settings.transcribe_model, result.audio_minutes, free=settings.transcribe_is_local
+    )
+    words = [w.shifted(lo).as_dict() for w in result.words]
+    return [w for w in words if w["end"] > start and w["start"] < end]
+
+
+def _make_trim_clips(
+    db: Session, job: Job, video: Video, cost: CostTracker, settings: Settings
+) -> None:
+    """One clip per trim and platform, titled "Reel N". No scene detection
+    and no whole-video transcript: only the trims' own seconds are
+    transcribed, for trims that asked for it. Trims added later (POST
+    /jobs/{id}/trims) run the job again; trims that have clips are skipped."""
+    trims: list[dict] = job.settings["trims"]
+    made = {(extra or {}).get("trim") for (extra,) in db.query(Clip.extra).filter_by(job_id=job.id)}
+    todo = [(n, trim) for n, trim in enumerate(trims) if n not in made]
+    transcribe = any(trim["transcribe"] for _, trim in todo)
+    if transcribe:
+        settings.check_transcriber_config()
+
+    # 1) What is said in each trim.
+    _set_stage(db, job, JobStage.transcribing if transcribe else JobStage.rendering, 5)
+    full = _full_transcript_words(db, video) if transcribe else None
+    said: dict[int, list[dict]] = {}
+    for i, (n, trim) in enumerate(todo, start=1):
+        if not trim["transcribe"]:
+            continue
+        _check_cancel(db, job)
+        said[n] = _trim_words(video, trim["start_s"], trim["end_s"], full, cost, settings)
+        _save_cost(db, job, cost)
+        job.progress = max(job.progress, 5 + int(25 * i / len(todo)))
+        db.commit()
+
+    # 2) Create the clips, then render them all together.
+    _check_cancel(db, job)
+    _set_stage(db, job, JobStage.rendering, 30)
+    language = ((job.settings or {}).get("captions") or {}).get("language")
+    specs: list[tuple[str, RenderSpec]] = []
+    for n, trim in todo:
+        start, end = trim["start_s"], trim["end_s"]
+        words = said.get(n)  # None: not transcribed
+        text = "".join(w["word"] for w in words or []).strip()
+        title, description = _part_text(Candidate(start, end, text), n + 1, label="Reel")
+        extra: dict = {"trim": n, "has_speech": None}
+        if words is not None:
+            extra.update(has_speech=has_words(text), words=words, transcript=text)
+        for platform in trim["platforms"]:
+            preset = get_preset(platform)
+            clip = Clip(
+                job_id=job.id,
+                platform=platform,
+                start_s=start,
+                end_s=end,
+                extra=dict(extra),
+                title=title,
+                description=description,
+                hashtags=[],
+                captions_enabled=words is not None,  # captions come from the transcript
+                language=language,
+                rank=n + 1,
+                status=ClipStatus.rendering,
+                duration_s=round(end - start, 3),
+            )
+            db.add(clip)
+            db.commit()
+            copy_ok = not preset.is_vertical and _stream_copy_ok(db, video)
+            spec = _render_spec(clip, video, preset, words or [], settings, stream_copy_ok=copy_ok)
+            specs.append((clip.id, spec))
+    _render_specs(db, job, specs, settings.render_concurrency, (30, 95))
 
 
 def _render_spec(
@@ -561,6 +680,18 @@ def _render_parts(
     # Copy cuts are mostly single-threaded audio work, so many can run at once;
     # full encodes already use every core, so more parallelism barely helps.
     limit = settings.copy_concurrency if copy_ok else settings.render_concurrency
+    _render_specs(db, job, specs, limit, progress)
+
+
+def _render_specs(
+    db: Session,
+    job: Job,
+    specs: list[tuple[str, RenderSpec]],
+    limit: int,
+    progress: tuple[int, int],
+) -> None:
+    """Render ``specs`` (clip_id, spec) with up to ``limit`` at once and mark
+    each clip ready (or failed) the moment it finishes."""
     workers = max(1, min(limit, len(specs)))
     lo, hi = progress
     done = 0
@@ -601,8 +732,14 @@ def render_single_clip(clip_id: str, keep_approved: bool = False) -> None:
         bind_job_id(clip.job_id)
         job = db.get(Job, clip.job_id)
         video = db.get(Video, job.video_id)
-        transcript = db.query(Transcript).filter(Transcript.video_id == video.id).one_or_none()
-        words = transcript.words if transcript else []
+        # A clip made from a trim keeps the words of its own seconds; the
+        # others use the video's transcript. A dubbed copy brings its own
+        # voice and captions instead (services/dub.py).
+        dubbed = clip.dub
+        words = [] if dubbed else (clip.extra or {}).get("words")
+        if words is None:
+            transcript = db.query(Transcript).filter(Transcript.video_id == video.id).one_or_none()
+            words = transcript.words if transcript else None
         preset = get_preset(clip.platform)
         settings = get_settings()
 
@@ -611,13 +748,15 @@ def render_single_clip(clip_id: str, keep_approved: bool = False) -> None:
         db.commit()
 
         copy_ok = not preset.is_vertical and _stream_copy_ok(db, video)
-        spec = _render_spec(clip, video, preset, words, settings, stream_copy_ok=copy_ok)
+        spec = _render_spec(clip, video, preset, words or [], settings, stream_copy_ok=copy_ok)
         track = db.get(AudioTrack, clip.bg_audio_id) if clip.bg_audio_id else None
         try:
             # Locked so a music change can't touch the files mid-render; the
             # clip's background music (if any) is mixed in again afterwards.
             with bgaudio.clip_lock(spec.out_path):
                 render_clip(spec)
+                if dubbed:
+                    dub.apply(dubbed, spec.out_path, clip.start_s, clip.end_s - clip.start_s)
                 bgaudio.after_render(
                     spec.out_path,
                     track.path if track else None,
@@ -628,12 +767,15 @@ def render_single_clip(clip_id: str, keep_approved: bool = False) -> None:
             clip.thumbnail_path = spec.thumb_path
             clip.duration_s = round(clip.end_s - clip.start_s, 3)
             # Start/end may have been edited: does the clip still have speech?
+            # Never transcribed: can't tell.
             spoken = " ".join(
-                w["word"] for w in words if w["start"] < clip.end_s and w["end"] > clip.start_s
+                w["word"]
+                for w in words or []
+                if w["start"] < clip.end_s and w["end"] > clip.start_s
             )
             clip.extra = {
                 **(clip.extra or {}),
-                "has_speech": has_words(spoken),
+                "has_speech": (clip.has_speech if dubbed or words is None else has_words(spoken)),
                 # What this render used: the sliders may have moved meanwhile.
                 "color_rendered": _spec_grade(spec),
             }

@@ -108,13 +108,42 @@ def _get_kokoro():
         return _kokoro
 
 
-def synthesize(text: str, language: str, voice: str):
-    """Speak ``text``. Returns (mono float32 samples, sample rate)."""
+_espeak_lock = threading.Lock()  # espeak-ng keeps global state: one text at a time
+
+
+def _phonemes(kokoro, text: str, espeak_lang: str) -> str:
+    """The sounds Kokoro reads for ``text``. Kokoro's own conversion keeps
+    espeak's language-switch marks, so an English word in a Hindi line
+    ("Garden Show में") becomes "(en)ɡˈɑːdən ʃˈəʊ(hi)" and the marks are read
+    out ("in ... hee"). Dropping them reads the word with English sounds."""
+    import phonemizer
+
+    with _espeak_lock:
+        phonemes = phonemizer.phonemize(
+            text.strip(),
+            espeak_lang,
+            preserve_punctuation=True,
+            with_stress=True,
+            language_switch="remove-flags",
+        )
+    return "".join(p for p in phonemes if p in kokoro.tokenizer.vocab).strip()
+
+
+def synthesize(text: str, language: str, voice: str, speed: float = 1.0):
+    """Speak ``text`` (``speed`` > 1 reads faster). Returns (mono float32
+    samples, sample rate)."""
     lang = LANGUAGES.get(language)
     if lang is None or voice not in lang.voices:
         raise TTSError(f"Unknown voice {voice!r} for language {language!r}")
     try:
-        return _get_kokoro().create(text, voice=voice, speed=1.0, lang=lang.kokoro_lang)
+        kokoro = _get_kokoro()  # also points espeak-ng at its library
+        return kokoro.create(
+            _phonemes(kokoro, text, lang.kokoro_lang),
+            voice=voice,
+            speed=speed,
+            lang=lang.kokoro_lang,
+            is_phonemes=True,
+        )
     except TTSError:
         raise
     except Exception as exc:

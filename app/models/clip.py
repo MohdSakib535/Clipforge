@@ -73,6 +73,27 @@ class Clip(Base, TimestampMixin):
         return (self.extra or {}).get("has_speech")
 
     @property
+    def transcript(self) -> str | None:
+        """What is said in a clip made from a trim with transcription on, as
+        spoken (not romanized). Its timed words are in ``extra["words"]``."""
+        return (self.extra or {}).get("transcript")
+
+    @property
+    def translation(self) -> dict | None:
+        """The transcript's sentences translated (POST /clips/{id}/translate)."""
+        return (self.extra or {}).get("translation")
+
+    @property
+    def dub(self) -> dict | None:
+        """Set on a dubbed copy: {"language", "voice", "lines", "source_clip"};
+        its own audio is replaced by this voice (services/dub.py)."""
+        return (self.extra or {}).get("dub")
+
+    @property
+    def dub_language(self) -> str | None:
+        return (self.dub or {}).get("language")
+
+    @property
     def color_rendered(self) -> dict[str, int] | None:
         """The colour grade the clip's FILE was last rendered with. The
         ``color_*`` columns are what the sliders were last saved as, which may

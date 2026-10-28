@@ -18,8 +18,9 @@ def video_stem(video_filename: str) -> str:
     return stem.strip("_-")[:60] or "video"
 
 
-def clip_basename(rank: int | None) -> str:
+def clip_basename(rank: int | None, language: str | None = None) -> str:
     """File name (no extension) for a downloaded clip: just the part number,
     e.g. ``part-041``. Zero-padded so parts sort in video order. The source
-    video's name is left out on purpose (it is in the ZIP's .txt/.json)."""
-    return f"part-{rank or 0:03d}"
+    video's name is left out on purpose (it is in the ZIP's .txt/.json).
+    A dubbed copy gets its language: ``part-041-hi``."""
+    return f"part-{rank or 0:03d}" + (f"-{language}" if language else "")
