@@ -30,6 +30,10 @@ class Trim(BaseModel):
         return self
 
 
+class SourceRange(Trim):
+    """The stretch of the video "Clip a video" cuts into clips (its Trim step)."""
+
+
 def _known_platforms(v: list[str]) -> list[str]:
     for p in v:
         try:
@@ -64,11 +68,21 @@ class JobCreate(BaseModel):
     # cutting the whole video. With transcription on, only these seconds are
     # transcribed. More can be added later with POST /jobs/{id}/trims.
     trims: list[Trim] | None = Field(default=None, min_length=1, max_length=MAX_TRIMS)
+    # Given: only this stretch of the video is cut into clips; with
+    # transcription on, only it is transcribed (unless the whole video already
+    # was). Omitted: the whole video.
+    source_range: SourceRange | None = None
 
     @model_validator(mode="after")
     def _no_captions_without_transcript(self):
         if not self.transcribe:
             self.captions.enabled = False  # captions come from the transcript
+        return self
+
+    @model_validator(mode="after")
+    def _range_or_trims(self):
+        if self.trims and self.source_range:
+            raise ValueError("give trims or source_range, not both")
         return self
 
     @field_validator("coverage_lengths")

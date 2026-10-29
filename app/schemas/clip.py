@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import ClipStatus
+from app.schemas.bucket import BucketCopy
 
 __all__ = [
     "ClipOut",
@@ -57,6 +58,7 @@ class ClipOut(BaseModel):
     # {"language", "lines": [{"start_s", "end_s", "text", "translation"}]}.
     translation: dict | None = None
     dub_language: str | None = None  # a dubbed copy: the language of its voice
+    bucket: BucketCopy | None = None  # its copy in the bucket, once uploaded
     bg_audio_id: str | None = None
     bg_audio_volume: int = 40
     bg_audio_mute_original: bool = False

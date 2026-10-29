@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.api.errors import AppError, NotFoundError
 from app.config.settings import get_settings
+from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models import User, Video, VideoStatus
 from app.schemas.video import (
@@ -24,11 +25,12 @@ from app.schemas.video import (
     UrlProbeOut,
     VideoOut,
 )
-from app.services import downloader
+from app.services import downloader, filmstrip
 from app.services.storage import get_storage
 from app.tasks import dispatch
 
 router = APIRouter(prefix="/videos", tags=["videos"])
+log = get_logger(__name__)
 
 CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
 _ALLOWED_EXT = {".mp4", ".mkv", ".mov", ".m4v", ".webm"}
@@ -287,11 +289,13 @@ def get_video(
 @router.get("/{video_id}/source")
 def video_source(
     video_id: str,
+    download: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> FileResponse:
     """The original file, for the trim player (supports range requests, so
-    seeking in a long film doesn't load all of it)."""
+    seeking in a long film doesn't load all of it); ``download`` saves it
+    under its own name ("Local videos")."""
     video = _get_video(db, user, video_id)
     if video.status != VideoStatus.ready or not video.path or not Path(video.path).exists():
         raise AppError(
@@ -300,4 +304,36 @@ def video_source(
             status_code=status.HTTP_409_CONFLICT,
         )
     media_type = mimetypes.guess_type(video.path)[0] or "video/mp4"
+    if download:
+        name = (
+            video.filename
+            if Path(video.filename).suffix
+            else f"{video.filename}{Path(video.path).suffix}"
+        )
+        return FileResponse(video.path, media_type=media_type, filename=name)
     return FileResponse(video.path, media_type=media_type, content_disposition_type="inline")
+
+
+@router.get("/{video_id}/filmstrip.jpg")
+def video_filmstrip(
+    video_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> FileResponse:
+    """Frames spread over the video, side by side: the strip behind the trim
+    bar. Made on first use (a few seconds), then kept with the video."""
+    video = _get_video(db, user, video_id)
+    if video.status != VideoStatus.ready or not video.path or not video.duration_s:
+        raise AppError(
+            "The video is not ready yet.",
+            code="video_not_ready",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    path = get_storage().path_for(f"videos/{video.id}/filmstrip.jpg")
+    if not path.exists():
+        try:
+            filmstrip.make(video.path, path, video.duration_s)
+        except Exception:  # the bar works without it
+            log.warning("filmstrip_failed", extra={"video_id": video.id}, exc_info=True)
+            raise NotFoundError("No filmstrip for this video") from None
+    return FileResponse(path, media_type="image/jpeg")

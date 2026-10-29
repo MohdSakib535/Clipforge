@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, uuid_str
 from app.models.enums import ClipStatus
+from app.services.bucket import copy_out
 
 if TYPE_CHECKING:
     from app.models.job import Job
@@ -127,6 +128,12 @@ class Clip(Base, TimestampMixin):
             return Path(self.file_path).stat().st_mtime_ns
         except OSError:
             return None
+
+    @property
+    def bucket(self) -> dict | None:
+        """Its copy in the bucket ("Upload to bucket"): {"key", "uploaded_at",
+        "current"}; "current" is False once the file changed after the upload."""
+        return copy_out((self.extra or {}).get("bucket"), self.file_version)
 
     @property
     def has_thumbnail(self) -> bool:

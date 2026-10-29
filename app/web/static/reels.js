@@ -13,6 +13,7 @@ function reelMaker() {
     // pendingId: a link import still downloading; picked once it is ready.
     reelMusic: { uploading: false, link: "", grabbing: false, deleting: false, pendingId: null, suggesting: false },
     saving: false,
+    bucketUploading: null, // id of the reel being copied to the bucket
     _reelPoll: null,
 
     async initReels() {
@@ -26,6 +27,7 @@ function reelMaker() {
       }
       // The music library (tracks) is loaded and polled by clipforge().
       this.$watch("tracks", () => this.pickPendingTrack());
+      window.addEventListener("clipforge:reels-changed", () => this.loadReels());
       await this.loadReels();
     },
 
@@ -205,7 +207,8 @@ function reelMaker() {
     },
 
     async deleteReel() {
-      if (!confirm("Delete this reel and its video?")) return;
+      const kept = this.reel.bucket ? "\n\nIts copy in the bucket is kept." : "";
+      if (!confirm("Delete this reel and its video?" + kept)) return;
       try {
         await this.removeReel(this.reel.id);
       } catch (e) {
@@ -249,6 +252,28 @@ function reelMaker() {
         this.error = e.message;
       } finally {
         this.saving = false;
+      }
+    },
+
+    // Its copy was deleted in the Bucket tab: not in the bucket any more.
+    forgetBucketCopy(key) {
+      for (const r of [this.reel, ...this.reels]) if (r?.bucket?.key === key) r.bucket = null;
+    },
+
+    // Copy the video to the bucket (BUCKET_* in .env); the server answers once
+    // the upload has finished. Uploading again replaces the copy.
+    async uploadReelToBucket() {
+      const id = this.reel.id;
+      this.bucketUploading = id;
+      try {
+        const fresh = await this.postJSON(`/reels/${id}/upload-to-bucket`, {});
+        if (this.reel?.id === id) this.reel = fresh;
+        this.updateListItem(fresh);
+        this.notice = "Uploaded to the bucket.";
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.bucketUploading = null;
       }
     },
 

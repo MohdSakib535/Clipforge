@@ -1,5 +1,6 @@
-"""Reel from a video: parts picked by hand (trims), each made for every chosen
-platform, with only the trims' own seconds transcribed."""
+"""Part of a video only. Reel from a video: parts picked by hand (trims), each
+made for every chosen platform. Clip a video's Trim step: only the stretch
+picked is cut into clips. Either way only those seconds are transcribed."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import pytest
 from sqlalchemy.orm import sessionmaker
 
 from app.models import Clip, ClipStatus, Job, JobStatus, Transcript, Video, VideoStatus
+from app.services import analysis
 from app.services.transcriber import TranscriptResult, Word
 from app.tasks import pipeline
 from tests.synthetic_media import make_media
@@ -134,6 +136,37 @@ def test_source_video_is_served_for_the_trim_player(client, db_session, tmp_path
     video.status = VideoStatus.downloading
     db_session.commit()
     assert client.get(f"/videos/{vid}/source").status_code == 409
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_filmstrip_shows_frames_spread_over_the_video(client, db_session, tmp_path):
+    from app.services import ffmpeg, filmstrip
+
+    vid = _ready_video(client, db_session, duration=20.0)
+    video = db_session.get(Video, vid)
+    video.path = str(make_media(tmp_path / "film.mp4", seed=3, seconds=20))
+    db_session.commit()
+
+    resp = client.get(f"/videos/{vid}/filmstrip.jpg")
+    assert resp.status_code == 200 and resp.headers["content-type"] == "image/jpeg"
+    strip = tmp_path / "strip.jpg"
+    strip.write_bytes(resp.content)
+    meta = ffmpeg.ffprobe_metadata(str(strip))
+    assert (meta.width, meta.height) == (filmstrip.FRAMES * filmstrip.WIDTH, filmstrip.HEIGHT)
+    # Kept with the video: the second time it is not made again.
+    Path(video.path).unlink()
+    assert client.get(f"/videos/{vid}/filmstrip.jpg").content == resp.content
+
+
+def test_no_filmstrip_for_a_broken_or_unready_video(client, db_session, tmp_path):
+    vid = _ready_video(client, db_session, duration=20.0)
+    video = db_session.get(Video, vid)
+    video.path = str(tmp_path / "missing.mp4")
+    db_session.commit()
+    assert client.get(f"/videos/{vid}/filmstrip.jpg").status_code == 404  # the bar works without
+    video.status = VideoStatus.downloading
+    db_session.commit()
+    assert client.get(f"/videos/{vid}/filmstrip.jpg").status_code == 409
 
 
 # --- Pipeline ----------------------------------------------------------------
@@ -299,3 +332,130 @@ def test_rerender_keeps_the_trims_own_words(db_session, tmp_path, worker):
     assert db_session.get(Clip, said.id).has_speech is True
     # Never transcribed: a colour change mustn't make it look silent.
     assert db_session.get(Clip, silent.id).has_speech is None
+
+
+# --- Clip a video: the Trim step (source_range) ------------------------------
+def _range_job_request(client, vid, start, end, platforms=("youtube_shorts",)):
+    return client.post(
+        f"/videos/{vid}/jobs",
+        json={
+            "platforms": list(platforms),
+            "coverage_lengths": {p: 30 for p in platforms},
+            "source_range": {"start_s": start, "end_s": end},
+        },
+    )
+
+
+def test_range_job_keeps_the_picked_stretch(client, db_session):
+    vid = _ready_video(client, db_session, duration=120.0)
+    resp = _range_job_request(client, vid, 20, 80.5)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["settings"]["source_range"] == {"start_s": 20, "end_s": 80.5}
+    # The player can overshoot the end a little: kept to the video's length.
+    resp = _range_job_request(client, vid, 100, 120.3)
+    assert resp.json()["settings"]["source_range"] == {"start_s": 100, "end_s": 120.0}
+    # Without one, the whole video is used, as before.
+    resp = client.post(f"/videos/{vid}/jobs", json={"platforms": ["youtube_shorts"]})
+    assert resp.json()["settings"]["source_range"] is None
+
+
+def test_range_must_be_inside_the_video_and_long_enough(client, db_session):
+    vid = _ready_video(client, db_session, duration=120.0)
+
+    def error(start, end):
+        resp = _range_job_request(client, vid, start, end)
+        return resp.status_code, resp.json()["error"].get("code")
+
+    assert error(130, 140) == (400, "out_of_range")
+    assert error(100, 125) == (400, "out_of_range")
+    assert error(10, 13) == (400, "bad_length")  # YouTube Shorts: at least 5 s
+    assert _range_job_request(client, vid, 10, 15).status_code == 201  # exactly 5 s
+    assert _range_job_request(client, vid, 30, 30).status_code == 422
+    both = client.post(
+        f"/videos/{vid}/jobs",
+        json={
+            "platforms": ["youtube_shorts"],
+            "trims": [{"start_s": 0, "end_s": 30}],
+            "source_range": {"start_s": 0, "end_s": 60},
+        },
+    )
+    assert both.status_code == 422
+
+
+def _range_job(db_session, video, start, end, transcribe=True) -> Job:
+    job = Job(
+        video_id=video.id, platforms=["youtube_shorts"], status=JobStatus.queued,
+        settings={
+            "coverage_lengths": {"youtube_shorts": 10}, "transcribe": transcribe,
+            "captions": {"enabled": transcribe},
+            "source_range": {"start_s": start, "end_s": end},
+        },
+    )  # fmt: skip
+    db_session.add(job)
+    db_session.commit()
+    return job
+
+
+def _assert_tiles(clips, start, end):
+    """Clips cover exactly start-end: no gaps, no overlap, nothing outside."""
+    assert clips[0].start_s == start and clips[-1].end_s == end
+    for a, b in zip(clips, clips[1:], strict=False):
+        assert b.start_s == a.end_s
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_only_the_picked_stretch_is_cut_and_transcribed(db_session, tmp_path, monkeypatch, worker):
+    fake = _FakeTranscriber()
+    monkeypatch.setattr(pipeline, "get_transcriber", lambda settings=None: fake)
+    video = _video(db_session, make_media(tmp_path / "film.mp4", seed=7, seconds=60))
+    job = _range_job(db_session, video, 20.0, 45.0)
+
+    pipeline.run_job.apply(args=[job.id])
+
+    db_session.expire_all()
+    job = db_session.get(Job, job.id)
+    assert job.status == JobStatus.completed, job.error
+    # Once: the 25 s picked and 1.5 s on each side, not the 60 s video.
+    assert len(fake.durations) == 1 and abs(fake.durations[0] - 28) < 0.5
+    assert abs(job.audio_minutes - 28 / 60) < 0.01
+    # Only part of the video was heard: not kept as the video's transcript.
+    assert db_session.query(Transcript).filter(Transcript.video_id == video.id).count() == 0
+    clips = _clips(db_session, job)
+    assert len(clips) >= 2
+    _assert_tiles(clips, 20.0, 45.0)
+    # Each render gets the job's words (it picks its own): seconds in the
+    # video, and "before" (19.0 s) was only heard for context.
+    assert all(spec.words == worker[0].words for spec in worker)
+    assert [(w["word"], w["start"]) for w in worker[0].words] == [
+        (" hello", 20.5),
+        (" world", 21.5),
+    ]
+
+
+def test_the_stretch_reuses_a_whole_video_transcript(db_session, tmp_path, monkeypatch, worker):
+    def no_whisper(settings=None):
+        raise AssertionError("the transcript already exists")
+
+    monkeypatch.setattr(pipeline, "get_transcriber", no_whisper)
+    video = _video(db_session, tmp_path / "film.mp4")
+    # Scene cuts found by an earlier job: no ffmpeg needed for this test.
+    video.ff_metadata = {"scene_cuts": {"threshold": analysis.SCENE_THRESHOLD, "cuts": []}}
+    said = [(" one", 5, 6), (" two", 12, 13), (" three", 25, 26), (" four", 40, 41)]
+    words = [{"word": w, "start": s, "end": e} for w, s, e in said]
+    db_session.add(
+        Transcript(
+            video_id=video.id, text="one two three four", words=words,
+            segments=[{"text": w.strip(), "start": s, "end": e} for w, s, e in said],
+        )
+    )  # fmt: skip
+    job = _range_job(db_session, video, 10.0, 30.0)
+
+    pipeline.run_job.apply(args=[job.id])
+
+    db_session.expire_all()
+    assert db_session.get(Job, job.id).status == JobStatus.completed
+    clips = _clips(db_session, job)
+    _assert_tiles(clips, 10.0, 30.0)
+    # Only what is said inside the stretch: not "one" (5 s) or "four" (40 s).
+    assert [c.title for c in clips] == ["Part 1 - two", "Part 2 - three"]
+    assert [w["word"] for w in worker[0].words] == [" two", " three"]

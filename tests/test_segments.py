@@ -52,6 +52,18 @@ def test_coverage_clip_count_scales_with_target():
     assert len(long) == 2
 
 
+def test_coverage_of_a_picked_stretch_starts_and_ends_there():
+    # Clip a video's Trim step: only 15-42 s of the 60 s video.
+    covers = build_coverage_segments(_sentences(), [], target_s=10, start_s=15.0, duration_s=42.0)
+    assert covers[0].start == 15.0 and covers[-1].end == 42.0
+    for k in range(len(covers) - 1):
+        assert covers[k + 1].start == covers[k].end  # no gaps, no overlap
+    # 25 s falls inside "Sentence 2" (20-30 s): the first clip runs on to its end.
+    assert covers[0].end == 30.0
+    # "Sentence 1" (10-20 s) started before the stretch: not in its text.
+    assert covers[0].text == "Sentence 2."
+
+
 def test_coverage_empty_transcript():
     assert build_coverage_segments([], [], target_s=20) == []
 

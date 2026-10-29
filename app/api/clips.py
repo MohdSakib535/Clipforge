@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -20,9 +20,10 @@ from app.schemas.clip import (
     TranslationOut,
     VoiceOption,
 )
-from app.services import dub, tts
-from app.services.naming import clip_basename
+from app.services import bucket, dub, tts
+from app.services.naming import clip_basename, video_stem
 from app.services.romanize import contains_devanagari, is_mostly_devanagari, romanize
+from app.services.storage import get_storage
 from app.tasks import dispatch
 
 router = APIRouter(prefix="/clips", tags=["clips"])
@@ -53,6 +54,8 @@ def update_clip(
 ) -> Clip:
     clip = _get_clip(db, user, clip_id)
     data = body.model_dump(exclude_unset=True)
+    if data.get("status") == ClipStatus.deleted:
+        return _delete_clip(db, clip)
 
     # Bound trim edits to the source video duration.
     video = db.get(Video, db.get(Job, clip.job_id).video_id)
@@ -67,6 +70,19 @@ def update_clip(
         setattr(clip, field, value)
     if "start_s" in data or "end_s" in data:
         clip.duration_s = round(new_end - new_start, 3)
+    db.commit()
+    db.refresh(clip)
+    return clip
+
+
+def _delete_clip(db: Session, clip: Clip) -> Clip:
+    """The clip leaves the review screen and its files leave the disk. The
+    row stays (marked deleted), so the other parts keep their numbers."""
+    if clip.status == ClipStatus.rendering:
+        raise ConflictError("This clip is being re-made. Delete it when it is ready.")
+    get_storage().delete(f"clips/{clip.id}")
+    clip.status = ClipStatus.deleted
+    clip.file_path = clip.thumbnail_path = None
     db.commit()
     db.refresh(clip)
     return clip
@@ -230,6 +246,48 @@ def download_clip(
         )
     filename = f"{_download_name(clip)}.mp4"
     return FileResponse(clip.file_path, media_type="video/mp4", filename=filename)
+
+
+@router.post("/{clip_id}/upload-to-bucket", response_model=ClipOut)
+def upload_clip_to_bucket(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Clip:
+    """Copy the clip and its .srt (if any) to the bucket (BUCKET_* settings);
+    waits for the upload. Uploading again replaces the copy."""
+    clip = _get_clip(db, user, clip_id)
+    ready = clip.status in (ClipStatus.ready, ClipStatus.approved)
+    if not ready or not clip.file_path or not Path(clip.file_path).exists():
+        raise AppError(
+            "This reel isn't ready yet", code="not_rendered", status_code=status.HTTP_409_CONFLICT
+        )
+    key = ((clip.extra or {}).get("bucket") or {}).get("key")
+    if key is None:
+        video = db.get(Video, db.get(Job, clip.job_id).video_id)
+        name = f"{_download_name(clip)}-{clip.id[:8]}.mp4"  # two dubs share a part number
+        key = bucket.key_for("clips", video_stem(video.filename), clip.platform, name)
+    if clip.srt_path:
+        bucket.upload(Path(clip.srt_path), key.removesuffix(".mp4") + ".srt")
+    saved = bucket.upload(Path(clip.file_path), key)
+    db.refresh(clip)  # the upload took a while: build on what is saved now
+    clip.extra = {**(clip.extra or {}), "bucket": saved}
+    db.commit()
+    db.refresh(clip)
+    return clip
+
+
+@router.get("/{clip_id}/bucket")
+def clip_bucket_link(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> RedirectResponse:
+    """Opens the clip's copy in the bucket."""
+    saved = (_get_clip(db, user, clip_id).extra or {}).get("bucket")
+    if not saved:
+        raise NotFoundError("This reel is not in the bucket")
+    return RedirectResponse(bucket.link(saved["key"]))
 
 
 @router.get("/{clip_id}/preview")

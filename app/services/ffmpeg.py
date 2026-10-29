@@ -495,6 +495,34 @@ def build_thumbnail_cmd(src: str, dst: str, at_s: float = 0.0) -> list[str]:
     ]  # fmt: skip
 
 
+def build_strip_frame_cmd(src: str, dst: str, at_s: float, width: int, height: int) -> list[str]:
+    """One JPEG frame at ``at_s``, cropped to fill width x height (the Trim
+    step's filmstrip)."""
+    fit = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"
+    return [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{at_s:.3f}",
+        "-i", src,
+        "-an", "-sn", "-dn",
+        "-frames:v", "1",
+        "-vf", f"{fit},setsar=1",
+        "-q:v", "4",
+        dst,
+    ]  # fmt: skip
+
+
+def build_hstack_cmd(images: list[str], dst: str) -> list[str]:
+    """Same-sized images side by side, left to right, in one JPEG."""
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    for image in images:
+        cmd += ["-i", image]
+    return cmd + [
+        "-filter_complex", f"hstack=inputs={len(images)}",
+        "-frames:v", "1", "-q:v", "4",
+        dst,
+    ]  # fmt: skip
+
+
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------

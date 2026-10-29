@@ -43,8 +43,11 @@ def build_coverage_segments(
     duration_s: float | None = None,
     words: list[dict] | None = None,
     snap_tol: float = 1.0,
+    start_s: float = 0.0,
 ) -> list[Candidate]:
-    """Tile the WHOLE video, 0 to ``duration_s``, into contiguous ~``target_s`` clips.
+    """Tile the WHOLE video, ``start_s`` (0) to ``duration_s``, into contiguous
+    ~``target_s`` clips. A trimmed video ("Clip a video", Trim step) passes its
+    start and end; the first clip starts and the last one ends exactly there.
 
     The output clips reconstruct the full video: no gaps, no overlap.
     Parts with no speech (intros, music, nature footage) are covered too — they
@@ -57,12 +60,12 @@ def build_coverage_segments(
     words = words or []
     scene_cuts = sorted(scene_cuts or [])
     video_end = duration_s or (sentences[-1]["end"] if sentences else 0.0)
-    if video_end <= 0 or target_s <= 0:
+    if video_end <= start_s or target_s <= 0:
         return []
     min_tail = target_s * 0.25
 
     out: list[Candidate] = []
-    start = 0.0
+    start = start_s
     while video_end - start > 1e-6:
         cut = _next_safe_cut(start + target_s, sentences, scene_cuts, words, snap_tol)
         if cut <= start:  # pathological snap; always make progress

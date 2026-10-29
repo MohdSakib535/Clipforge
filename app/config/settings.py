@@ -111,6 +111,24 @@ class Settings(BaseSettings):
         "model-files-v1.0/voices-v1.0.bin"
     )
 
+    # --- "Upload to bucket" (Create a reel): AWS S3 or any S3-compatible storage
+    # (Cloudflare R2, MinIO, DigitalOcean Spaces, Backblaze B2, Google Cloud
+    # Storage). Set in .env (BUCKET_*). Empty BUCKET_NAME = not set up; the
+    # upload buttons say so.
+    bucket_name: str = ""
+    # Empty for AWS S3. Otherwise the provider's S3 address, e.g.
+    # https://<account-id>.r2.cloudflarestorage.com, or
+    # http://host.docker.internal:9000 for MinIO on this Mac.
+    bucket_endpoint_url: str = ""
+    bucket_region: str = ""  # e.g. ap-south-1 (AWS); "auto" for R2
+    # Empty = boto3's usual places (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, ~/.aws).
+    bucket_access_key_id: str = Field(default="", repr=False)
+    bucket_secret_access_key: str = Field(default="", repr=False)
+    bucket_prefix: str = "clipforge"  # folder in the bucket the reels go under
+    # The bucket's public address (public bucket or CDN), used for "Open"
+    # links. Empty = signed links that work for 7 days.
+    bucket_public_url: str = ""
+
     # Path to the platform presets YAML (overridable for tests).
     platforms_config_path: str = str(REPO_ROOT / "app" / "config" / "platforms.yaml")
 

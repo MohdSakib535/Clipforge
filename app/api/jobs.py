@@ -19,7 +19,7 @@ from app.config.settings import ConfigError, get_settings
 from app.db.session import SessionLocal, get_db
 from app.models import Clip, ClipStatus, Job, JobStage, JobStatus, User, Video, VideoStatus
 from app.schemas.clip import ClipOut, ColorGradeApply, ColorGradeResult
-from app.schemas.job import MAX_TRIMS, JobCreate, JobOut, Trim, TrimsAdd
+from app.schemas.job import MAX_TRIMS, JobCreate, JobOut, SourceRange, Trim, TrimsAdd
 from app.services.discard import discard_job
 from app.services.naming import clip_basename, video_stem
 from app.tasks import dispatch
@@ -72,6 +72,29 @@ def _trim_settings(
     return out
 
 
+def _range_settings(video: Video, rng: SourceRange, platforms: list[str]) -> dict:
+    """Check the stretch picked in the Trim step against the video and each
+    platform's shortest clip; return it as stored in ``job.settings``."""
+    end = rng.end_s
+    if video.duration_s:
+        if rng.start_s >= video.duration_s or end > video.duration_s + 0.5:
+            raise AppError(
+                f"The part you picked is outside the video ({video.duration_s:.1f} s).",
+                code="out_of_range",
+            )
+        end = min(end, video.duration_s)  # the player can overshoot a little
+    length = end - rng.start_s
+    for platform in platforms:
+        preset = get_preset(platform)
+        if round(length, 1) < preset.length_min_s:
+            raise AppError(
+                f"The part you picked is {length:.1f} s long, but {preset.label} clips "
+                f"need at least {preset.length_min_s} s.",
+                code="bad_length",
+            )
+    return {"start_s": rng.start_s, "end_s": end}
+
+
 def _check_transcriber() -> None:
     """Refuse to queue a job the worker could not run (a bad TRANSCRIBER, or
     OpenAI chosen without a key). Tells the user at once instead of after a
@@ -117,6 +140,8 @@ def create_job(
     settings = body.model_dump(mode="json")
     if body.trims:
         settings["trims"] = _trim_settings(video, body.trims, body.platforms, body.transcribe)
+    if body.source_range:
+        settings["source_range"] = _range_settings(video, body.source_range, body.platforms)
     job = Job(
         video_id=video.id,
         platforms=body.platforms,

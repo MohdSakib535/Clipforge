@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from sqlalchemy import Float, ForeignKey, Integer, String
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin, uuid_str
+from app.services.bucket import copy_out
 
 
 class AudioTrack(Base, TimestampMixin):
@@ -26,7 +30,24 @@ class AudioTrack(Base, TimestampMixin):
     error: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     progress: Mapped[int | None] = mapped_column(Integer, nullable=True)  # link imports
+    # The bucket file it was brought in from (POST /audio/from-bucket):
+    # {"key", "version", "uploaded_at"}; "version" is the track's mtime then.
+    bucket_copy: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # A link imported from the Bucket tab: once downloaded, its audio goes to
+    # the bucket and this row and its files are deleted (nothing kept here).
+    to_bucket: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
 
     @property
     def is_ready(self) -> bool:
         return self.status == "ready" and bool(self.path)
+
+    @property
+    def bucket(self) -> dict | None:
+        """Its copy in the bucket: {"key", "uploaded_at", "current"}."""
+        try:
+            version = Path(self.path).stat().st_mtime_ns if self.path else None
+        except OSError:
+            version = None
+        return copy_out(self.bucket_copy, version)

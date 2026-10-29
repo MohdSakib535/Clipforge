@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.bucket import BucketCopy
 from app.services.reel_script import MAX_DURATION_S, MAX_SCENES, MIN_DURATION_S
 
 
@@ -76,5 +77,6 @@ class ReelOut(BaseModel):
     video_version: int | None = None  # changes whenever the file does (cache-busting)
     video_duration_s: float | None = None
     scene_pictures: list[bool]  # per scene: is its picture made yet?
+    bucket: BucketCopy | None = None  # its copy in the bucket, once uploaded
     created_at: datetime
     updated_at: datetime

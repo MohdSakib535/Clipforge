@@ -24,6 +24,10 @@
               :class="mode==='clip' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Clip a video</button>
             <button @click="mode='reel'" class="px-3 py-1 rounded"
               :class="mode==='reel' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Create a reel</button>
+            <button @click="mode='bucket'" class="px-3 py-1 rounded"
+              :class="mode==='bucket' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Bucket</button>
+            <button @click="mode='local'" class="px-3 py-1 rounded"
+              :class="mode==='local' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Local videos</button>
           </div>
           <button x-show="mode==='clip'" @click="reset()" class="text-sm text-slate-400 hover:text-slate-200">Start over</button>
         </div>
@@ -130,10 +134,94 @@
           class="mt-5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Continue</button>
       </section>
 
-      <!-- STEP 3: Settings -->
+      <!-- STEP 3: Trim (optional): the stretch of the video cut into clips -->
+      <section x-show="step==='trim'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
+        <div class="flex flex-wrap items-baseline justify-between gap-2 mb-1">
+          <h2 class="text-lg font-medium">Trim the video <span class="text-sm font-normal text-slate-400">(optional)</span></h2>
+          <span class="text-xs text-slate-400" x-text="video ? `${video.filename} · ${fmtTime(video.duration_s)}` : ''"></span>
+        </div>
+        <p class="text-sm text-slate-400 mb-4">Drag the yellow handles under the video to the part you want: only that part is cut into clips (and transcribed). Leave them at the ends to use the whole video.</p>
+        <template x-if="step==='trim' && video">
+          <div>
+            <video x-ref="trimPlayer" controls preload="metadata" :src="`/videos/${video.id}/source`"
+              @loadedmetadata="rangePlayerError=false" @timeupdate="onRangeTime()" @play="followPlayer()" @seeked="playhead=$event.target.currentTime"
+              @pause="_rangeStopAt=null" @error="rangePlayerError=true"
+              class="w-full rounded-lg bg-black max-h-[420px]"></video>
+            <p x-show="rangePlayerError" class="text-xs text-amber-300 mt-2">This browser can't play this file. You can still drag the handles or type the times.</p>
+
+            <!-- The trim bar: frames of the video; drag the handles to pick the part, click or drag elsewhere to move the white line (the player). -->
+            <div class="mt-4 px-4 select-none" @pointermove.window="dragBar($event)" @pointerup.window="dropBar()">
+              <div class="relative h-5 text-xs font-mono text-amber-300">
+                <span class="absolute -translate-x-1/2 whitespace-nowrap" :style="`left:${labelPct(range.start)}%`" x-text="fmtTime(range.start)"></span>
+                <span class="absolute -translate-x-1/2 whitespace-nowrap" :style="`left:${labelPct(range.end)}%`" x-text="fmtTime(range.end)"></span>
+              </div>
+              <div x-ref="trimBar" class="relative h-14 rounded-md bg-slate-800 cursor-pointer touch-none" @pointerdown="grabBar('playhead', $event)">
+                <img x-show="stripOk" :src="`/videos/${video.id}/filmstrip.jpg`" @error="stripOk=false" draggable="false"
+                  class="absolute inset-0 w-full h-full rounded-md object-fill pointer-events-none" />
+                <!-- Left out: dimmed -->
+                <div class="absolute inset-y-0 left-0 bg-slate-950/75 rounded-l-md pointer-events-none" :style="`width:${pct(range.start)}%`"></div>
+                <div class="absolute inset-y-0 right-0 bg-slate-950/75 rounded-r-md pointer-events-none" :style="`width:${100 - pct(range.end)}%`"></div>
+                <!-- The part: a yellow frame -->
+                <div class="absolute inset-y-0 border-y-4 border-amber-400 pointer-events-none" :style="`left:${pct(range.start)}%;width:${pct(range.end) - pct(range.start)}%`"></div>
+                <!-- Handles (also: focus one and press ← → to move it 0.1 s, with Shift 1 s) -->
+                <div role="slider" tabindex="0" aria-label="Start of the part" :aria-valuetext="fmtTime(range.start)"
+                  class="absolute inset-y-0 w-4 -ml-4 rounded-l-md bg-amber-400 hover:bg-amber-300 cursor-ew-resize flex items-center justify-center outline-none focus:ring-2 focus:ring-white"
+                  :style="`left:${pct(range.start)}%`" @pointerdown.stop.prevent="grabBar('start', $event)"
+                  @keydown.left.prevent="nudge('start', $event.shiftKey ? -1 : -0.1)" @keydown.right.prevent="nudge('start', $event.shiftKey ? 1 : 0.1)">
+                  <div class="w-0.5 h-5 rounded bg-slate-900/60"></div>
+                </div>
+                <div role="slider" tabindex="0" aria-label="End of the part" :aria-valuetext="fmtTime(range.end)"
+                  class="absolute inset-y-0 w-4 rounded-r-md bg-amber-400 hover:bg-amber-300 cursor-ew-resize flex items-center justify-center outline-none focus:ring-2 focus:ring-white"
+                  :style="`left:${pct(range.end)}%`" @pointerdown.stop.prevent="grabBar('end', $event)"
+                  @keydown.left.prevent="nudge('end', $event.shiftKey ? -1 : -0.1)" @keydown.right.prevent="nudge('end', $event.shiftKey ? 1 : 0.1)">
+                  <div class="w-0.5 h-5 rounded bg-slate-900/60"></div>
+                </div>
+                <!-- Where the player is -->
+                <div class="absolute -top-1 -bottom-1 w-0.5 -ml-px bg-white rounded shadow pointer-events-none" :style="`left:${pct(playhead)}%`"></div>
+              </div>
+              <div class="flex justify-between text-xs text-slate-500 mt-1">
+                <span>0:00.0</span>
+                <span :class="rangeProblem() ? 'text-amber-300' : 'text-slate-300'" x-text="rangeProblem() || `Part: ${fmtTime(rangeLen())} long`"></span>
+                <span x-text="fmtTime(video.duration_s)"></span>
+              </div>
+            </div>
+
+            <div class="flex flex-wrap items-end gap-2 mt-4 text-xs">
+              <label class="text-slate-400">Start
+                <input :value="fmtTime(range.start)" @change="setRange('start', $event)" @keydown.enter="$event.target.blur()"
+                  class="block w-24 mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 font-mono" />
+              </label>
+              <label class="text-slate-400">End
+                <input :value="fmtTime(range.end)" @change="setRange('end', $event)" @keydown.enter="$event.target.blur()"
+                  class="block w-24 mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 font-mono" />
+              </label>
+              <button @click="markRange('start')" :disabled="rangePlayerError" title="Start the part where the white line is"
+                class="px-2 py-1.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">⇤ Start here</button>
+              <button @click="markRange('end')" :disabled="rangePlayerError" title="End the part where the white line is"
+                class="px-2 py-1.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">End here ⇥</button>
+              <button @click="playRange('start')" :disabled="rangePlayerError || !!rangeProblem()"
+                class="px-2 py-1.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">▶ Play the part</button>
+              <button @click="playRange('end')" :disabled="rangePlayerError || !!rangeProblem()"
+                class="px-2 py-1.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">▶ Play the end</button>
+              <button @click="wholeVideo()" :disabled="!isTrimmed()"
+                class="px-2 py-1.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Use the whole video</button>
+            </div>
+            <p class="text-sm mt-3" :class="rangeProblem() ? 'text-amber-300' : 'text-slate-300'"
+              x-text="rangeProblem() || (isTrimmed() ? `Clips will be made from ${fmtDur(rangeLen())} of the ${fmtDur(video.duration_s)} video.` : `The whole video (${fmtDur(video.duration_s)}) will be cut into clips.`)"></p>
+          </div>
+        </template>
+        <button @click="step='settings'" :disabled="!!rangeProblem()"
+          class="mt-5 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Continue</button>
+      </section>
+
+      <!-- STEP 4: Settings -->
       <section x-show="step==='settings'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
         <h2 class="text-lg font-medium mb-4">Choose platforms & settings</h2>
-        <p class="text-sm text-slate-400 mb-3">Pick each platform and how long each clip should be. The whole video is cut into clips of about that length.</p>
+        <p class="text-sm text-slate-400 mb-3">
+          Pick each platform and how long each clip should be.
+          <span x-text="isTrimmed() ? `The part you picked (${fmtTime(range.start)} → ${fmtTime(range.end)}) is cut into clips of about that length.` : 'The whole video is cut into clips of about that length.'"></span>
+          <button @click="step='trim'" class="underline text-slate-300 hover:text-white">Change</button>
+        </p>
         <div class="grid sm:grid-cols-2 gap-3 mb-6">
           <template x-for="p in platforms" :key="p.key">
             <div class="bg-slate-800/60 rounded-lg p-3"
@@ -180,7 +268,7 @@
           class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Generate clips</button>
       </section>
 
-      <!-- STEP 4: Processing -->
+      <!-- STEP 5: Processing -->
       <section x-show="step==='processing'" x-cloak class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
         <h2 class="text-lg font-medium mb-4">Processing</h2>
         <div class="h-3 bg-slate-800 rounded"><div class="h-3 bg-gradient-to-r from-indigo-500 to-fuchsia-500 rounded transition-all" :style="`width:${job?.progress||0}%`"></div></div>
@@ -200,7 +288,7 @@
         <div x-show="job?.status==='failed'" class="mt-4 text-rose-400 text-sm" x-text="job?.error"></div>
       </section>
 
-      <!-- STEP 5: Review -->
+      <!-- STEP 6: Review -->
       <section x-show="step==='review'" x-cloak>
         <div class="flex items-center justify-between mb-4">
           <h2 class="text-lg font-medium">Review clips (<span x-text="clips.length"></span>)</h2>
@@ -240,7 +328,7 @@
               class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs"
               x-text="music.grabbing ? 'Starting…' : 'Get audio'"></button>
           </div>
-          <template x-for="t in tracks.filter(t => t.status !== 'ready')" :key="t.id">
+          <template x-for="t in tracks.filter(t => t.status !== 'ready' && !t.to_bucket)" :key="t.id">
             <div class="flex items-center gap-2 text-xs mb-2">
               <span class="truncate max-w-xs" x-text="t.filename"></span>
               <template x-if="t.status==='processing'">
@@ -254,12 +342,13 @@
             </div>
           </template>
 
-          <p x-show="!readyTracks().length" class="text-xs text-slate-500">Upload an MP3 / M4A / WAV or grab the audio of a link, then add it to all clips here, or tick "Background music" on a clip.</p>
-          <div x-show="readyTracks().length" class="flex flex-wrap items-end gap-4">
+          <p x-show="!musicChoices().length" class="text-xs text-slate-500">Upload an MP3 / M4A / WAV or grab the audio of a link, then add it to all clips here, or tick "Background music" on a clip.</p>
+          <div x-show="musicChoices().length" class="flex flex-wrap items-end gap-4">
             <label class="text-xs">Track
-              <select x-model="music.trackId" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm max-w-xs">
-                <template x-for="t in readyTracks()" :key="t.id">
-                  <option :value="t.id" :selected="t.id===music.trackId" x-text="`${t.filename} (${fmtDur(t.duration_s)})`"></option>
+              <select x-model="music.trackId" @change="music.trackId = await pickMusic($event.target.value)" :disabled="fetchingMusic"
+                class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm max-w-xs">
+                <template x-for="m in musicChoices()" :key="m.value">
+                  <option :value="m.value" :selected="m.value===music.trackId" x-text="m.duration_s ? `${m.label} (${fmtDur(m.duration_s)})` : m.label"></option>
                 </template>
               </select>
             </label>
@@ -269,19 +358,20 @@
             <label class="flex items-center gap-2 text-xs pb-1" title="Drop the clip's own sound so only the music plays">
               <input type="checkbox" x-model="music.muteOriginal" /> Mute original audio (music only)
             </label>
-            <template x-if="music.trackId">
+            <template x-if="isTrack(music.trackId)">
               <audio controls preload="none" :src="`/audio/${music.trackId}/file`" class="h-8"></audio>
             </template>
             <div class="flex flex-wrap gap-2">
-              <button @click="setMusic(music.trackId, music.volume, null, music.muteOriginal)" :disabled="!music.trackId || music.busy"
+              <button @click="setMusic(music.trackId, music.volume, null, music.muteOriginal)" :disabled="!isTrack(music.trackId) || music.busy"
                 class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs">Add to all clips</button>
               <button @click="setMusic(null, music.volume, null)" :disabled="music.busy || !clips.some(c => c.bg_audio_id)"
                 class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">Remove from all</button>
-              <button @click="deleteTrack()" :disabled="!music.trackId || music.busy"
+              <button @click="deleteTrack()" :disabled="!isTrack(music.trackId) || music.busy"
                 class="px-3 py-1.5 rounded-lg bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40 text-xs">Delete track</button>
             </div>
           </div>
-          <p x-show="readyTracks().length" class="text-xs text-slate-500 mt-3">100% = as loud as the speech; 40% is a clearly audible background. Tick <b>Mute original audio</b> to drop the clip's own sound and play only the music (turn the volume up for those). The music loops if it is shorter than the clip and fades out at the end. Only the audio is redone, so this takes a second or two per clip. Only use music you're allowed to use.</p>
+          <p x-show="fetchingMusic" class="text-xs text-amber-300 mt-3">Getting it from the bucket…</p>
+          <p x-show="musicChoices().length" class="text-xs text-slate-500 mt-3">100% = as loud as the speech; 40% is a clearly audible background. Tick <b>Mute original audio</b> to drop the clip's own sound and play only the music (turn the volume up for those). The music loops if it is shorter than the clip and fades out at the end. Only the audio is redone, so this takes a second or two per clip. Only use music you're allowed to use.</p>
         </div>
 
         <!-- Colour adjustment for every clip at once. Each clip also has its own grade on its card. -->
@@ -356,15 +446,16 @@
               </label>
 
               <!-- Background music for this clip: tick to add, untick to remove. -->
-              <div x-show="readyTracks().length || c.bg_audio_id" class="flex flex-wrap items-center gap-2 text-xs mb-3 bg-slate-800/50 rounded px-2 py-1.5">
+              <div x-show="musicChoices().length || c.bg_audio_id" class="flex flex-wrap items-center gap-2 text-xs mb-3 bg-slate-800/50 rounded px-2 py-1.5">
                 <label class="flex items-center gap-1.5 mr-1" :class="c.bg_audio_id ? 'text-indigo-200' : 'text-slate-300'">
                   <input type="checkbox" :checked="!!c.bg_audio_id" @change="toggleClipMusic(c, $event.target.checked)"
-                    :disabled="!isPlayable(c) || music.busy" />
+                    :disabled="!isPlayable(c) || music.busy || fetchingMusic" />
                   Background music
                 </label>
-                <select x-model="c._musicId" class="bg-slate-800 rounded px-1.5 py-1 max-w-[10rem]">
-                  <template x-for="t in readyTracks()" :key="t.id">
-                    <option :value="t.id" :selected="t.id===c._musicId" x-text="t.filename"></option>
+                <select x-model="c._musicId" @change="c._musicId = await pickMusic($event.target.value)" :disabled="fetchingMusic"
+                  class="bg-slate-800 rounded px-1.5 py-1 max-w-[10rem]">
+                  <template x-for="m in musicChoices()" :key="m.value">
+                    <option :value="m.value" :selected="m.value===c._musicId" x-text="m.label"></option>
                   </template>
                 </select>
                 <input type="range" min="0" max="100" step="5" x-model.number="c._musicVol" class="w-24" />
@@ -372,7 +463,7 @@
                 <label class="flex items-center gap-1.5" title="Drop this clip's own sound so only the music plays">
                   <input type="checkbox" x-model="c._musicMute" /> mute original
                 </label>
-                <button x-show="musicChanged(c)" @click="setMusic(c._musicId, c._musicVol, [c.id], c._musicMute)" :disabled="!isPlayable(c) || music.busy"
+                <button x-show="musicChanged(c)" @click="setMusic(c._musicId, c._musicVol, [c.id], c._musicMute)" :disabled="!isPlayable(c) || music.busy || !isTrack(c._musicId)"
                   class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Apply</button>
                 <span x-show="c.status==='rendering' && c.has_file" class="text-amber-300">mixing…</span>
               </div>
@@ -440,7 +531,8 @@
       </div>
 
       <!-- CREATE A REEL: Ollama writes the script, FLUX.2 draws the pictures, Kokoro reads it out (reels.js). -->
-      <section x-show="mode==='reel' && reelSource==='topic'" x-cloak x-data="reelMaker()" x-init="initReels()" class="grid md:grid-cols-3 gap-5">
+      <section x-show="mode==='reel' && reelSource==='topic'" x-cloak x-data="reelMaker()" x-init="initReels()" class="grid md:grid-cols-3 gap-5"
+        @clipforge:bucket-deleted.window="forgetBucketCopy($event.detail.key)">
         <div class="space-y-5">
           <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
             <h2 class="text-lg font-medium mb-4">New reel</h2>
@@ -500,6 +592,7 @@
                       <span x-text="`${reelPlatformLabel(r.platform)} · ${languageLabel(r.language)} · `"></span>
                       <span :class="r.status==='failed' ? 'text-rose-300' : (busy(r) ? 'text-amber-300' : '')" x-text="statusLabel(r)"></span>
                     </div>
+                    <div x-show="r.bucket?.current" class="text-xs text-sky-300">✓ In bucket</div>
                   </div>
                 </button>
               </template>
@@ -549,10 +642,20 @@
                     <p x-show="reel.status==='script_ready'" class="text-xs text-amber-300">The script changed since this video was made. Click <b>Generate video</b> to update it.</p>
                     <div class="flex flex-wrap gap-2">
                       <a :href="`/reels/${reel.id}/video?download=1`" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download video</a>
+                      <button @click="uploadReelToBucket()" :disabled="!!bucketUploading || saving || busy(reel)"
+                        title="Copies the video to your bucket (set up with BUCKET_* in .env)"
+                        class="px-3 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-sm"
+                        x-text="bucketUploading===reel.id ? 'Uploading…' : (reel.bucket?.current ? 'Upload again' : 'Upload to bucket')"></button>
                       <button @click="downloadAndDelete()" :disabled="saving || busy(reel)"
                         title="Saves the video on this computer, then deletes this reel and its files from the server"
                         class="px-3 py-1.5 rounded-lg bg-rose-700/80 hover:bg-rose-600 disabled:opacity-40 text-sm">Download &amp; delete reel</button>
                     </div>
+                    <p x-show="reel.bucket" class="text-xs">
+                      <span x-show="reel.bucket?.current" class="text-emerald-300">✓ In the bucket.</span>
+                      <span x-show="!reel.bucket?.current" class="text-amber-300">The video changed after it was uploaded. Upload again to replace the copy in the bucket.</span>
+                      <a :href="`/reels/${reel.id}/bucket`" target="_blank" rel="noopener" class="underline text-slate-300 hover:text-white">Open</a>
+                      <span class="block text-slate-500 break-all" x-text="reel.bucket?.key"></span>
+                    </p>
                     <p class="text-xs text-slate-500">"Download &amp; delete" frees the server's disk: once the video is saved on this computer, the reel and its pictures, voice and video are deleted. Your music is kept.</p>
                     <button x-show="draft" @click="copyCaption()" class="block px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Copy caption + hashtags</button>
                   </div>
@@ -660,17 +763,19 @@
                         </select>
                       </label>
                       <label class="text-xs text-slate-400">Background music
-                        <select x-model="gen.musicId" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 max-w-[14rem]">
+                        <select x-model="gen.musicId" @change="gen.musicId = await pickMusic($event.target.value)" :disabled="fetchingMusic"
+                          class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 max-w-[14rem]">
                           <option value="">No music</option>
-                          <template x-for="t in readyTracks()" :key="t.id">
-                            <option :value="t.id" :selected="t.id===gen.musicId" x-text="t.filename"></option>
+                          <template x-for="m in musicChoices()" :key="m.value">
+                            <option :value="m.value" :selected="m.value===gen.musicId" x-text="m.label"></option>
                           </template>
                         </select>
                       </label>
-                      <label x-show="gen.musicId" class="text-xs text-slate-400">Music volume <span class="text-slate-200" x-text="`${gen.musicVolume}%`"></span>
+                      <span x-show="fetchingMusic" class="text-xs text-amber-300 pb-2">Getting it from the bucket…</span>
+                      <label x-show="isTrack(gen.musicId)" class="text-xs text-slate-400">Music volume <span class="text-slate-200" x-text="`${gen.musicVolume}%`"></span>
                         <input type="range" min="0" max="100" step="5" x-model.number="gen.musicVolume" class="block mt-2 w-32" />
                       </label>
-                      <template x-if="gen.musicId">
+                      <template x-if="isTrack(gen.musicId)">
                         <audio controls preload="none" :src="`/audio/${gen.musicId}/file`" class="h-8"></audio>
                       </template>
                     </div>
@@ -690,7 +795,7 @@
                         x-text="reelMusic.grabbing ? 'Starting…' : 'Get audio'"></button>
                     </div>
                     <!-- Link imports still downloading, or failed -->
-                    <template x-for="t in tracks.filter(t => t.status !== 'ready')" :key="t.id">
+                    <template x-for="t in tracks.filter(t => t.status !== 'ready' && !t.to_bucket)" :key="t.id">
                       <div class="flex items-center gap-2 text-xs">
                         <span class="truncate max-w-xs" x-text="t.filename"></span>
                         <template x-if="t.status==='processing'">
@@ -705,13 +810,13 @@
                     </template>
                     <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
                       <p class="text-slate-500">Added music is saved in your music list (also used in Clip a video). Only use music you're allowed to use.</p>
-                      <button x-show="gen.musicId" @click="deleteReelMusic()" :disabled="reelMusic.deleting"
+                      <button x-show="isTrack(gen.musicId)" @click="deleteReelMusic()" :disabled="reelMusic.deleting"
                         class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40">Delete this track</button>
                     </div>
                   </div>
 
                   <div class="flex flex-wrap items-center gap-2">
-                    <button @click="generate()" :disabled="saving || busy(reel)"
+                    <button @click="generate()" :disabled="saving || busy(reel) || fetchingMusic"
                       class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-sm">Generate video</button>
                     <button @click="saveScript()" :disabled="saving || !dirty()"
                       class="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm">Save script</button>
@@ -729,7 +834,8 @@
 
       <!-- REEL FROM A VIDEO: paste a link or upload, trim the parts you want, get 9:16 reels for
            YouTube Shorts / Facebook Reel with an optional transcript, colour and music (reel_video.js). -->
-      <section x-show="mode==='reel' && reelSource==='video'" x-cloak x-data="reelFromVideo()">
+      <section x-show="mode==='reel' && reelSource==='video'" x-cloak x-data="reelFromVideo()"
+        @clipforge:bucket-deleted.window="forgetBucketCopy($event.detail.key)">
         <!-- 1) Add a video -->
         <div x-show="step==='upload'" class="bg-slate-900/60 rounded-xl p-6 border border-slate-800">
           <div class="flex items-center justify-between mb-4">
@@ -917,8 +1023,14 @@
           <div x-show="clips.length" class="space-y-5">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <h2 class="text-lg font-medium">Your reels (<span x-text="clips.length"></span>)</h2>
-              <a x-show="readyCount() > 0" :href="`/jobs/${job?.id}/export.zip`"
-                class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download all (ZIP)</a>
+              <div x-show="readyCount() > 0" class="flex flex-wrap gap-2">
+                <button @click="uploadAllToBucket()" :disabled="bucketAll.busy"
+                  title="Copies every finished reel not in your bucket yet (set up with BUCKET_* in .env)"
+                  class="px-3 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-sm"
+                  x-text="bucketAll.busy ? `Uploading ${bucketAll.done + 1}/${bucketAll.total}…` : 'Upload all to bucket'"></button>
+                <a :href="`/jobs/${job?.id}/export.zip`"
+                  class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download all (ZIP)</a>
+              </div>
             </div>
 
             <!-- Background music: add a track to the library, then put it on all reels or one. -->
@@ -939,7 +1051,7 @@
                   class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs"
                   x-text="music.grabbing ? 'Starting…' : 'Get audio'"></button>
               </div>
-              <template x-for="t in tracks.filter(t => t.status !== 'ready')" :key="t.id">
+              <template x-for="t in tracks.filter(t => t.status !== 'ready' && !t.to_bucket)" :key="t.id">
                 <div class="flex items-center gap-2 text-xs mb-2">
                   <span class="truncate max-w-xs" x-text="t.filename"></span>
                   <template x-if="t.status==='processing'">
@@ -952,12 +1064,13 @@
                   <button x-show="t.status==='failed'" @click="removeTrack(t)" class="text-slate-400 hover:text-slate-200 underline">remove</button>
                 </div>
               </template>
-              <p x-show="!readyTracks().length" class="text-xs text-slate-500">Upload an MP3 / M4A / WAV or grab the audio of a link, then add it to all reels here or tick "Background music" on a reel.</p>
-              <div x-show="readyTracks().length" class="flex flex-wrap items-end gap-4">
+              <p x-show="!musicChoices().length" class="text-xs text-slate-500">Upload an MP3 / M4A / WAV or grab the audio of a link, then add it to all reels here or tick "Background music" on a reel.</p>
+              <div x-show="musicChoices().length" class="flex flex-wrap items-end gap-4">
                 <label class="text-xs">Track
-                  <select x-model="music.trackId" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm max-w-xs">
-                    <template x-for="t in readyTracks()" :key="t.id">
-                      <option :value="t.id" :selected="t.id===music.trackId" x-text="`${t.filename} (${fmtDur(t.duration_s)})`"></option>
+                  <select x-model="music.trackId" @change="music.trackId = await pickMusic($event.target.value)" :disabled="fetchingMusic"
+                    class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm max-w-xs">
+                    <template x-for="m in musicChoices()" :key="m.value">
+                      <option :value="m.value" :selected="m.value===music.trackId" x-text="m.duration_s ? `${m.label} (${fmtDur(m.duration_s)})` : m.label"></option>
                     </template>
                   </select>
                 </label>
@@ -967,19 +1080,20 @@
                 <label class="flex items-center gap-2 text-xs pb-1" title="Drop the reel's own sound so only the music plays">
                   <input type="checkbox" x-model="music.muteOriginal" /> Mute original audio
                 </label>
-                <template x-if="music.trackId">
+                <template x-if="isTrack(music.trackId)">
                   <audio controls preload="none" :src="`/audio/${music.trackId}/file`" class="h-8"></audio>
                 </template>
                 <div class="flex flex-wrap gap-2">
-                  <button @click="setMusic(music.trackId, music.volume, null, music.muteOriginal)" :disabled="!music.trackId || music.busy"
+                  <button @click="setMusic(music.trackId, music.volume, null, music.muteOriginal)" :disabled="!isTrack(music.trackId) || music.busy"
                     class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs">Add to all reels</button>
                   <button @click="setMusic(null, music.volume, null)" :disabled="music.busy || !clips.some(c => c.bg_audio_id)"
                     class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">Remove from all</button>
-                  <button @click="deleteTrack()" :disabled="!music.trackId || music.busy"
+                  <button @click="deleteTrack()" :disabled="!isTrack(music.trackId) || music.busy"
                     class="px-3 py-1.5 rounded-lg bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40 text-xs">Delete track</button>
                 </div>
               </div>
-              <p x-show="readyTracks().length" class="text-xs text-slate-500 mt-3">100% = as loud as the speech; 40% is a clearly audible background. The music loops if it is shorter than the reel and fades out at the end. Only use music you're allowed to use.</p>
+              <p x-show="fetchingMusic" class="text-xs text-amber-300 mt-3">Getting it from the bucket…</p>
+          <p x-show="musicChoices().length" class="text-xs text-slate-500 mt-3">100% = as loud as the speech; 40% is a clearly audible background. The music loops if it is shorter than the reel and fades out at the end. Only use music you're allowed to use.</p>
             </div>
 
             <!-- Colour for every reel at once (each reel also has its own below). -->
@@ -1082,15 +1196,16 @@
                     </template>
 
                     <!-- Background music for this reel: tick to add, untick to remove. -->
-                    <div x-show="readyTracks().length || c.bg_audio_id" class="flex flex-wrap items-center gap-2 bg-slate-800/50 rounded px-2 py-1.5">
+                    <div x-show="musicChoices().length || c.bg_audio_id" class="flex flex-wrap items-center gap-2 bg-slate-800/50 rounded px-2 py-1.5">
                       <label class="flex items-center gap-1.5 mr-1" :class="c.bg_audio_id ? 'text-indigo-200' : 'text-slate-300'">
                         <input type="checkbox" :checked="!!c.bg_audio_id" @change="toggleClipMusic(c, $event.target.checked)"
-                          :disabled="!isPlayable(c) || music.busy" />
+                          :disabled="!isPlayable(c) || music.busy || fetchingMusic" />
                         Background music
                       </label>
-                      <select x-model="c._musicId" class="bg-slate-800 rounded px-1.5 py-1 max-w-[9rem]">
-                        <template x-for="t in readyTracks()" :key="t.id">
-                          <option :value="t.id" :selected="t.id===c._musicId" x-text="t.filename"></option>
+                      <select x-model="c._musicId" @change="c._musicId = await pickMusic($event.target.value)" :disabled="fetchingMusic"
+                        class="bg-slate-800 rounded px-1.5 py-1 max-w-[9rem]">
+                        <template x-for="m in musicChoices()" :key="m.value">
+                          <option :value="m.value" :selected="m.value===c._musicId" x-text="m.label"></option>
                         </template>
                       </select>
                       <input type="range" min="0" max="100" step="5" x-model.number="c._musicVol" class="w-20" />
@@ -1098,7 +1213,7 @@
                       <label class="flex items-center gap-1.5" title="Drop this reel's own sound so only the music plays">
                         <input type="checkbox" x-model="c._musicMute" /> mute original
                       </label>
-                      <button x-show="musicChanged(c)" @click="setMusic(c._musicId, c._musicVol, [c.id], c._musicMute)" :disabled="!isPlayable(c) || music.busy"
+                      <button x-show="musicChanged(c)" @click="setMusic(c._musicId, c._musicVol, [c.id], c._musicMute)" :disabled="!isPlayable(c) || music.busy || !isTrack(c._musicId)"
                         class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">Apply</button>
                       <span x-show="c.status==='rendering' && c.has_file" class="text-amber-300">mixing…</span>
                     </div>
@@ -1137,9 +1252,19 @@
 
                     <p x-show="c.error" class="text-amber-300" x-text="c.error"></p>
 
+                    <p x-show="c.bucket">
+                      <span x-show="c.bucket?.current" class="text-emerald-300">✓ In the bucket.</span>
+                      <span x-show="!c.bucket?.current" class="text-amber-300">Changed after it was uploaded. Upload again to replace the copy in the bucket.</span>
+                      <a :href="`/clips/${c.id}/bucket`" target="_blank" rel="noopener" class="underline text-slate-300 hover:text-white">Open</a>
+                      <span class="block text-slate-500 break-all" x-text="c.bucket?.key"></span>
+                    </p>
+
                     <div class="flex flex-wrap gap-2">
                       <button @click="saveClip(c)" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Save title</button>
                       <a :href="downloadUrl(c)" x-show="isPlayable(c)" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500">Download</a>
+                      <button x-show="isPlayable(c)" @click="uploadReel(c)" :disabled="!!c._uploading || bucketAll.busy"
+                        class="px-2.5 py-1 rounded bg-sky-700 hover:bg-sky-600 disabled:opacity-40"
+                        x-text="c._uploading ? 'Uploading…' : (c.bucket?.current ? 'Upload again' : 'Upload to bucket')"></button>
                       <a :href="`/clips/${c.id}/captions.srt`" x-show="c.has_srt" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Captions (.srt)</a>
                       <button x-show="c.status==='failed'" @click="rerender(c)" class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500">Try again</button>
                       <button @click="del(c)" class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600">Delete</button>
@@ -1152,12 +1277,368 @@
         </div>
       </section>
 
-      <div x-show="error" x-cloak class="fixed bottom-4 right-4 bg-rose-700 text-white px-4 py-2 rounded-lg text-sm" x-text="error" @click="error=''"></div>
-      <div x-show="notice && !error" x-cloak class="fixed bottom-4 right-4 bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm" x-text="notice" @click="notice=''"></div>
+      <!-- BUCKET: send videos from this computer straight to the bucket, in their own folder (bucket.js). -->
+      <section x-show="mode==='bucket'" x-cloak x-data="bucketUploads()" x-init="initBucket()" class="space-y-5">
+        <div x-show="!status" class="text-sm text-slate-500">Loading…</div>
+
+        <!-- Not set up yet: what to add to .env -->
+        <div x-show="status && !status.set_up" class="bg-slate-900/60 rounded-xl p-5 border border-amber-700/50">
+          <h2 class="text-lg font-medium mb-2">Set up your bucket</h2>
+          <p class="text-sm text-slate-300 mb-3">
+            Add these lines to the <code class="text-amber-200">.env</code> file in the ClipForge folder (fill in your values),
+            then run <code class="text-amber-200">docker compose up -d api</code> and reload this page.
+          </p>
+          <pre class="text-xs bg-slate-950 rounded-lg p-3 overflow-x-auto text-slate-300">BUCKET_NAME=my-bucket
+# Your bucket's region ("auto" for Cloudflare R2)
+BUCKET_REGION=ap-south-1
+BUCKET_ACCESS_KEY_ID=your-access-key
+BUCKET_SECRET_ACCESS_KEY=your-secret-key
+# Leave empty for AWS S3. Cloudflare R2: https://&lt;account-id&gt;.r2.cloudflarestorage.com
+BUCKET_ENDPOINT_URL=
+# Optional: the folder everything goes under
+BUCKET_PREFIX=clipforge</pre>
+          <p class="text-xs text-slate-500 mt-2">Keep each # note on its own line: after a value it becomes part of the value.
+            Works with AWS S3 and S3-compatible storage (Cloudflare R2, DigitalOcean Spaces, Backblaze B2, Google Cloud Storage). The keys need permission to read, write and list the bucket (and delete, for Delete).</p>
+        </div>
+
+        <template x-if="status?.set_up">
+          <div class="space-y-5">
+            <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+              <h2 class="text-lg font-medium">Upload videos to your bucket</h2>
+              <p class="text-xs text-slate-400 mt-1 mb-4">
+                Bucket <b class="text-slate-200" x-text="status.bucket"></b> (<span x-text="status.endpoint"></span>).
+                Videos go to <code class="text-sky-300" x-text="status.uploads_folder"></code>, a folder of their own:
+                reels go to <span x-text="status.reels_folders.join(' and ')"></span>.
+              </p>
+              <label class="inline-block px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm cursor-pointer"
+                     :class="sending ? 'opacity-40 pointer-events-none' : ''">
+                <input type="file" multiple class="hidden" accept="video/*,.mp4,.m4v,.mov,.mkv,.webm,.avi" @change="pickBucketFiles($event)" />
+                Choose videos…
+              </label>
+
+              <div x-show="queue.length" class="mt-4 space-y-2">
+                <template x-for="q in queue" :key="q.id">
+                  <div class="bg-slate-800/60 rounded-lg px-3 py-2 text-sm">
+                    <div class="flex items-center gap-3">
+                      <span class="truncate flex-1" x-text="q.file.name"></span>
+                      <span class="text-xs text-slate-400 flex-none" x-text="fmtBytes(q.file.size)"></span>
+                      <span class="text-xs flex-none w-28 text-right"
+                        :class="{ 'text-emerald-300': q.state==='done', 'text-rose-300': q.state==='failed', 'text-amber-300': q.state==='uploading' }"
+                        x-text="queueLabel(q)"></span>
+                      <button x-show="!sending && q.state!=='done'" @click="removeQueued(q)" class="text-xs text-slate-400 hover:text-slate-200 flex-none" title="Remove from the list">✕</button>
+                    </div>
+                    <div x-show="q.state==='uploading'" class="h-1.5 bg-slate-700 rounded mt-2">
+                      <div class="h-1.5 bg-sky-500 rounded transition-all" :style="`width:${q.pct}%`"></div>
+                    </div>
+                    <div x-show="q.state==='done'" class="text-xs text-slate-500 mt-1 break-all" x-text="q.key"></div>
+                    <div x-show="q.error" class="text-xs text-rose-300 mt-1" x-text="q.error"></div>
+                  </div>
+                </template>
+              </div>
+
+              <div x-show="queue.length" class="flex flex-wrap gap-2 mt-4">
+                <button x-show="!sending && toSend().length" @click="sendToBucket()"
+                  class="px-4 py-2 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-sm"
+                  x-text="`Upload ${toSend().length} video${toSend().length === 1 ? '' : 's'}`"></button>
+                <button x-show="sending" @click="cancelBucket()" class="px-4 py-2 rounded-lg bg-rose-700/80 hover:bg-rose-600 text-sm">Cancel</button>
+                <button x-show="!sending && queue.some(q => q.state!=='waiting')" @click="clearFinished()"
+                  class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Clear finished</button>
+              </div>
+              <p class="text-xs text-slate-500 mt-3">A file keeps its name; if that name is taken it becomes name-2, name-3… so nothing in the bucket is replaced. Keep this tab open until it finishes.</p>
+            </div>
+
+            <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+              <div class="flex items-center justify-between gap-2 mb-3">
+                <div>
+                  <h2 class="text-lg font-medium">Videos in your bucket (<span x-text="files.length"></span>)</h2>
+                  <p class="text-xs text-slate-400 mt-1">Every video in <b x-text="status.bucket"></b>, in any folder: your uploads, your reels and anything else. <b>Download</b> saves one on this computer, straight from the bucket; <b>Delete</b> removes it from the bucket for good.</p>
+                </div>
+                <button @click="loadFiles()" :disabled="listing" class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs flex-none"
+                  x-text="listing ? 'Loading…' : 'Refresh'"></button>
+              </div>
+              <div x-show="files.length" class="flex flex-wrap gap-2 mb-2">
+                <select x-model="filter.area" @change="shown = 100" class="bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                  <template x-for="a in areas()" :key="a.key">
+                    <option :value="a.key" :selected="a.key===filter.area" x-text="`${a.label} (${a.count})`"></option>
+                  </template>
+                </select>
+                <input type="search" x-model="filter.text" @input="shown = 100" placeholder="Search by name or folder"
+                  class="flex-1 min-w-[12rem] bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500" />
+              </div>
+              <p x-show="listError" class="text-sm text-rose-300" x-text="listError"></p>
+              <p x-show="truncated" class="text-xs text-amber-300">This bucket is very big: only the newest part of it is listed.</p>
+              <p x-show="!files.length && !listing && !listError" class="text-xs text-slate-500">No videos in the bucket yet.</p>
+              <p x-show="files.length && !filtered().length" class="text-xs text-slate-500">No video matches.</p>
+              <div class="divide-y divide-slate-800">
+                <template x-for="f in filtered().slice(0, shown)" :key="f.key">
+                  <div class="flex items-center gap-3 py-2 text-sm">
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate" x-text="f.name"></div>
+                      <div class="text-xs text-slate-500 truncate" x-text="f.folder || '(top of the bucket)'"></div>
+                    </div>
+                    <span class="text-xs text-slate-400 flex-none" x-text="fmtBytes(f.size_bytes)"></span>
+                    <span class="text-xs text-slate-500 flex-none hidden sm:inline" x-text="fmtWhen(f.uploaded_at)"></span>
+                    <a :href="fileLink(f)" target="_blank" rel="noopener" class="text-xs underline text-slate-300 hover:text-white flex-none">Open</a>
+                    <a :href="downloadLink(f)" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs flex-none">Download</a>
+                    <button @click="deleteFile(f)" :disabled="!!deleting"
+                      class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40 text-xs flex-none"
+                      x-text="deleting===f.key ? 'Deleting…' : 'Delete'"></button>
+                  </div>
+                </template>
+              </div>
+              <button x-show="filtered().length > shown" @click="shown += 100"
+                class="mt-3 px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-xs"
+                x-text="`Show more (${filtered().length - shown} left)`"></button>
+            </div>
+
+            <!-- Music in the bucket: add a file or the audio of a link straight to <prefix>/audio/
+                 (nothing kept on this computer); every audio file: open, download, rename, delete -->
+            <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+              <div class="flex items-center justify-between gap-2 mb-3">
+                <div>
+                  <h2 class="text-lg font-medium">Music in your bucket (<span x-text="bucketMusic.length"></span>)</h2>
+                  <p class="text-xs text-slate-400 mt-1">
+                    Background music goes straight to <code class="text-sky-300" x-text="status.audio_folder"></code>: nothing is kept on this computer.
+                    The music pickers in "Clip a video" and "Create a reel" list every audio file here (☁); the one you pick is brought to this computer to be mixed in.
+                    <b>Rename</b> gives one a new name in the same folder; <b>Delete</b> removes it from the bucket for good.
+                  </p>
+                </div>
+                <button @click="loadAudio()" :disabled="audioListing" class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs flex-none"
+                  x-text="audioListing ? 'Loading…' : 'Refresh'"></button>
+              </div>
+              <!-- Add music: a file or the audio of a link, as inside the app, but to the bucket -->
+              <div class="flex flex-wrap items-center gap-2 text-xs mb-3">
+                <label class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 cursor-pointer"
+                       :class="musicAdd.file ? 'opacity-40 pointer-events-none' : ''">
+                  <input type="file" multiple class="hidden" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.opus,.flac" @change="addMusicFiles($event)" />
+                  <span x-text="musicAdd.file ? `Uploading ${musicAdd.file.pct}%…` : '+ Upload audio'"></span>
+                </label>
+                <input type="url" x-model.trim="musicAdd.link" @keydown.enter="addMusicLink()"
+                  placeholder="…or paste a link to grab its audio (YouTube, SoundCloud, …)"
+                  class="flex-1 min-w-[14rem] bg-slate-800 rounded-lg px-3 py-1.5 outline-none focus:ring-2 focus:ring-indigo-500" />
+                <button @click="addMusicLink()" :disabled="!musicAdd.link || musicAdd.grabbing"
+                  class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
+                  x-text="musicAdd.grabbing ? 'Starting…' : 'Get audio'"></button>
+              </div>
+              <p x-show="musicAdd.file" class="text-xs text-slate-400 mb-2 truncate" x-text="`Sending ${musicAdd.file?.file.name} to the bucket…`"></p>
+              <!-- Links still downloading (then sent to the bucket), or failed -->
+              <template x-for="t in bucketImports()" :key="t.id">
+                <div class="flex items-center gap-2 text-xs mb-2">
+                  <span class="truncate max-w-xs" x-text="t.filename"></span>
+                  <template x-if="t.status==='processing'">
+                    <span class="flex items-center gap-2 text-amber-300">
+                      <span class="w-24 h-1.5 bg-slate-800 rounded"><span class="block h-1.5 bg-indigo-500 rounded" :style="`width:${t.progress||0}%`"></span></span>
+                      <span x-text="(t.progress||0) >= 99 ? 'Saving to the bucket…' : `Downloading ${t.progress||0}%`"></span>
+                    </span>
+                  </template>
+                  <span x-show="t.status==='failed'" class="text-rose-300 truncate max-w-md" x-text="`Failed: ${t.error||''}`"></span>
+                  <button x-show="t.status==='failed'" @click="removeTrack(t)" class="text-slate-400 hover:text-slate-200 underline">remove</button>
+                </div>
+              </template>
+              <input x-show="bucketMusic.length" type="search" x-model="audioText" placeholder="Search by name or folder"
+                class="w-full mb-2 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500" />
+              <p x-show="audioError" class="text-sm text-rose-300" x-text="audioError"></p>
+              <p x-show="audioTruncated" class="text-xs text-amber-300">This bucket is very big: only the newest part of it is listed.</p>
+              <p x-show="!bucketMusic.length && !audioListing && !audioError" class="text-xs text-slate-500">No music in the bucket yet. Upload a file or paste a link above.</p>
+              <p x-show="bucketMusic.length && !filteredAudio().length" class="text-xs text-slate-500">No audio matches.</p>
+              <div class="divide-y divide-slate-800">
+                <template x-for="f in filteredAudio()" :key="f.key">
+                  <div class="flex flex-wrap items-center gap-x-3 gap-y-1 py-2 text-sm">
+                    <div class="min-w-0 flex-1">
+                      <div x-show="renaming.key !== f.key" class="truncate" x-text="f.name"></div>
+                      <!-- x-if, not x-show: the box exists at once, so it can take the focus (text selected: typing replaces it) -->
+                      <template x-if="renaming.key === f.key">
+                        <div class="flex items-center gap-1">
+                          <input type="text" x-model="renaming.name" :readonly="renaming.busy" aria-label="New name"
+                            x-init="$nextTick(() => { $el.focus(); $el.select(); })"
+                            @keydown.enter="saveRename(f)" @keydown.escape="cancelRename()"
+                            class="min-w-0 flex-1 bg-slate-800 rounded px-2 py-1 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500" />
+                          <span class="text-xs text-slate-400 flex-none" x-text="extOf(f.name)"></span>
+                        </div>
+                      </template>
+                      <div class="text-xs text-slate-500 truncate" x-text="f.folder || '(top of the bucket)'"></div>
+                    </div>
+                    <span class="text-xs text-slate-400 flex-none" x-text="fmtBytes(f.size_bytes)"></span>
+                    <span class="text-xs text-slate-500 flex-none hidden sm:inline" x-text="fmtWhen(f.uploaded_at)"></span>
+                    <template x-if="renaming.key !== f.key">
+                      <div class="flex flex-wrap items-center gap-3 flex-none">
+                        <a :href="fileLink(f, 'audio')" target="_blank" rel="noopener" class="text-xs underline text-slate-300 hover:text-white">Open</a>
+                        <a :href="downloadLink(f, 'audio')" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs">Download</a>
+                        <button @click="startRename(f)" :disabled="!!deleting || renaming.busy" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">Rename</button>
+                        <button @click="deleteFile(f, 'audio')" :disabled="!!deleting"
+                          class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40 text-xs"
+                          x-text="deleting===f.key ? 'Deleting…' : 'Delete'"></button>
+                      </div>
+                    </template>
+                    <template x-if="renaming.key === f.key">
+                      <div class="flex items-center gap-2 flex-none">
+                        <button @click="saveRename(f)" :disabled="renaming.busy || !renaming.name.trim()"
+                          class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs"
+                          x-text="renaming.busy ? 'Saving…' : 'Save'"></button>
+                        <button @click="cancelRename()" :disabled="renaming.busy" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">Cancel</button>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </template>
+      </section>
+
+      <!-- LOCAL VIDEOS: everything kept on this computer, to free disk space (local.js). -->
+      <section x-show="mode==='local'" x-cloak x-data="localData()" x-init="initLocal()" class="space-y-5">
+        <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h2 class="text-lg font-medium">Local videos</h2>
+              <p class="text-xs text-slate-400 mt-1">Everything ClipForge keeps on this computer (in Docker's storage), with the space it uses. Delete what you don't need to free disk space. Copies in your bucket are never touched.</p>
+            </div>
+            <button @click="loadLocal()" :disabled="localLoading" class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs flex-none"
+              x-text="localLoading ? 'Loading…' : 'Refresh'"></button>
+          </div>
+          <p x-show="localError" class="text-sm text-rose-300 mt-3" x-text="localError"></p>
+          <div x-show="!local && localLoading" class="text-sm text-slate-500 mt-4">Measuring…</div>
+          <template x-if="local">
+            <div>
+              <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-4">
+                <template x-for="t in [
+                  ['Total', usage().total],
+                  ['Videos', usage().videos],
+                  ['Clips & reels from videos', usage().clips],
+                  ['Reels from a topic', usage().reels],
+                  ['Music', usage().music],
+                ]" :key="t[0]">
+                  <div class="bg-slate-800/60 rounded-lg px-3 py-2" :class="t[0]==='Total' ? 'ring-1 ring-indigo-500' : ''">
+                    <div class="text-xs text-slate-400" x-text="t[0]"></div>
+                    <div class="text-lg font-medium" x-text="fmtBytes(t[1])"></div>
+                  </div>
+                </template>
+              </div>
+              <p class="text-xs text-slate-500 mt-2">Not counted: the speech and voice models (<span x-text="fmtBytes(modelsBytes())"></span>), which every video needs, so they are kept.</p>
+            </div>
+          </template>
+        </div>
+
+        <template x-if="local">
+          <div class="space-y-5">
+            <!-- Videos, with the clips and reels made from them -->
+            <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+              <div class="flex flex-wrap items-center gap-2 mb-3">
+                <h2 class="text-sm font-medium mr-auto">Videos (<span x-text="local.videos.length"></span>)</h2>
+                <input type="search" x-model="localFilter.text" placeholder="Search by name"
+                  class="w-48 bg-slate-800 rounded px-2 py-1 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500" />
+                <select x-model="localFilter.sort" class="bg-slate-800 rounded px-2 py-1 text-sm text-slate-100">
+                  <option value="newest">Newest first</option>
+                  <option value="biggest">Biggest first</option>
+                </select>
+              </div>
+              <p x-show="!local.videos.length" class="text-xs text-slate-500">No videos on this computer.</p>
+              <div class="divide-y divide-slate-800">
+                <template x-for="v in shownVideos()" :key="v.id">
+                  <div class="py-3 flex flex-wrap items-center gap-3 text-sm">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex flex-wrap items-center gap-1.5">
+                        <span class="truncate font-medium" x-text="v.filename"></span>
+                        <span class="text-xs px-1.5 rounded" :class="v.from_link ? 'bg-sky-900/70 text-sky-200' : 'bg-slate-700 text-slate-300'"
+                          :title="v.source_url || 'Uploaded from this computer'" x-text="v.from_link ? 'From a link' : 'Uploaded'"></span>
+                        <span x-show="copies(v) > 1" class="text-xs px-1.5 rounded bg-amber-900/60 text-amber-200"
+                          :title="'The same name appears ' + copies(v) + ' times'" x-text="`${copies(v)} copies`"></span>
+                        <span x-show="v.status!=='ready'" class="text-xs px-1.5 rounded bg-rose-900/60 text-rose-200" x-text="v.status"></span>
+                      </div>
+                      <div class="text-xs text-slate-400 mt-0.5">
+                        <span x-text="[fmtDur(v.duration_s), fmtWhen(v.created_at), v.transcribed ? 'transcribed' : ''].filter(Boolean).join(' · ')"></span>
+                      </div>
+                      <div class="text-xs mt-0.5">
+                        <span class="text-slate-300">Video <b x-text="fmtBytes(v.video_bytes)"></b></span>
+                        <span class="text-slate-500"> · </span>
+                        <span class="text-slate-300" x-text="v.clips ? `${v.clips} clip${v.clips === 1 ? '' : 's'} & reels ` : 'No clips '"></span><b x-show="v.clips_bytes" x-text="fmtBytes(v.clips_bytes)"></b>
+                        <span class="text-slate-500"> · total </span><b class="text-indigo-300" x-text="fmtBytes(videoBytes(v))"></b>
+                      </div>
+                      <p x-show="v.busy" class="text-xs text-amber-300 mt-1" x-text="v.busy"></p>
+                    </div>
+                    <div class="flex flex-wrap gap-2 text-xs">
+                      <a x-show="v.status==='ready'" :href="videoLink(v)" target="_blank" rel="noopener" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Play</a>
+                      <a x-show="v.status==='ready'" :href="videoLink(v, true)" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500">Download</a>
+                      <button x-show="v.clips_bytes" @click="deleteVideoClips(v)" :disabled="!!v.busy || deleting===v.id"
+                        class="px-2.5 py-1 rounded bg-rose-900/80 hover:bg-rose-800 disabled:opacity-40">Delete clips</button>
+                      <button @click="deleteVideo(v)" :disabled="!!v.busy || deleting===v.id"
+                        class="px-2.5 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-40"
+                        x-text="deleting===v.id ? 'Deleting…' : 'Delete'"></button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- Reels made from a topic -->
+            <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+              <h2 class="text-sm font-medium mb-3">Reels from a topic (<span x-text="local.reels.length"></span>)</h2>
+              <p x-show="!local.reels.length" class="text-xs text-slate-500">None.</p>
+              <div class="divide-y divide-slate-800">
+                <template x-for="r in local.reels" :key="r.id">
+                  <div class="py-2 flex flex-wrap items-center gap-3 text-sm">
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate" x-text="r.title"></div>
+                      <div class="text-xs text-slate-400" x-text="[r.duration_s ? `${r.duration_s.toFixed(0)} s` : 'no video yet', fmtWhen(r.created_at), fmtBytes(r.bytes)].join(' · ')"></div>
+                    </div>
+                    <div class="flex gap-2 text-xs">
+                      <a x-show="r.duration_s" :href="`/reels/${r.id}/video`" target="_blank" rel="noopener" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Play</a>
+                      <a x-show="r.duration_s" :href="`/reels/${r.id}/video?download=1`" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500">Download</a>
+                      <button @click="deleteLocalReel(r)" :disabled="deleting===r.id" class="px-2.5 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-40">Delete</button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- Music library -->
+            <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+              <h2 class="text-sm font-medium mb-3">Music (<span x-text="local.music.length"></span>)</h2>
+              <p x-show="!local.music.length" class="text-xs text-slate-500">None.</p>
+              <div class="divide-y divide-slate-800">
+                <template x-for="t in local.music" :key="t.id">
+                  <div class="py-2 flex flex-wrap items-center gap-3 text-sm">
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate" x-text="t.filename"></div>
+                      <div class="text-xs text-slate-400" x-text="[fmtDur(t.duration_s), fmtWhen(t.created_at), fmtBytes(t.bytes)].filter(Boolean).join(' · ')"></div>
+                    </div>
+                    <div class="flex gap-2 text-xs">
+                      <a x-show="t.status==='ready'" :href="`/audio/${t.id}/file`" target="_blank" rel="noopener" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Play</a>
+                      <button @click="deleteLocalMusic(t)" :disabled="deleting===t.id" class="px-2.5 py-1 rounded bg-rose-700 hover:bg-rose-600 disabled:opacity-40">Delete</button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <div class="bg-slate-900/60 rounded-xl p-5 border border-rose-900/60 flex flex-wrap items-center gap-3">
+              <p class="text-sm text-slate-300 flex-1">Delete <b>every</b> video with its clips and transcripts at once. Music and reels from a topic are kept.</p>
+              <button @click="deleteEverything()" :disabled="wiping" class="px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-sm"
+                x-text="wiping ? 'Deleting…' : 'Delete all data'"></button>
+            </div>
+          </div>
+        </template>
+      </section>
+
+      <!-- Toasts: a notice goes away after 3 s (not while the mouse is on it); an error stays until closed. -->
+      <div x-show="error" x-cloak role="alert"
+        class="fixed bottom-4 right-4 z-50 max-w-md flex items-start gap-3 bg-rose-700 text-white pl-4 pr-2 py-2 rounded-lg text-sm shadow-lg">
+        <span class="flex-1 min-w-0 break-words py-0.5" x-text="error"></span>
+        <button @click="error=''" class="px-1.5 py-0.5 rounded hover:bg-white/20" title="Close" aria-label="Close">✕</button>
+      </div>
+      <div x-show="notice && !error" x-cloak x-transition.opacity.duration.300ms role="status"
+        @mouseenter="holdNotice()" @mouseleave="releaseNotice()"
+        class="fixed bottom-4 right-4 z-50 max-w-md flex items-start gap-3 bg-indigo-700 text-white pl-4 pr-2 py-2 rounded-lg text-sm shadow-lg">
+        <span class="flex-1 min-w-0 break-words py-0.5" x-text="notice"></span>
+        <button @click="notice=''" class="px-1.5 py-0.5 rounded hover:bg-white/20" title="Close" aria-label="Close">✕</button>
+      </div>
     </div>
 
     <script src="/ui/app.js"></script>
     <script src="/ui/reels.js"></script>
     <script src="/ui/reel_video.js"></script>
+    <script src="/ui/bucket.js"></script>
+    <script src="/ui/local.js"></script>
   </body>
 </html>

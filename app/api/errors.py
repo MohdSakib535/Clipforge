@@ -6,6 +6,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.services.bucket import BucketError, BucketNotSetUp, NameTaken
+
 
 class AppError(Exception):
     """Domain error with an HTTP status and a stable error code."""
@@ -40,6 +42,16 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content=_error_body(exc.code, exc.message))
+
+    @app.exception_handler(BucketError)
+    async def _bucket_error(_: Request, exc: BucketError) -> JSONResponse:
+        if isinstance(exc, BucketNotSetUp):
+            code, status_code = "bucket_not_set_up", status.HTTP_409_CONFLICT
+        elif isinstance(exc, NameTaken):
+            code, status_code = "name_taken", status.HTTP_409_CONFLICT
+        else:  # the bucket refused or could not be reached
+            code, status_code = "bucket_failed", status.HTTP_502_BAD_GATEWAY
+        return JSONResponse(status_code=status_code, content=_error_body(code, str(exc)))
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:

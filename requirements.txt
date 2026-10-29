@@ -20,6 +20,10 @@ openai==1.59.6
 httpx==0.28.1
 tenacity==9.0.0
 
+# "Upload to bucket": AWS S3 or any S3-compatible storage (Cloudflare R2,
+# MinIO, DigitalOcean Spaces, Backblaze B2, Google Cloud Storage).
+boto3==1.43.100
+
 # Import from a link (YouTube & 1000+ sites). [default] adds yt-dlp-ejs, the
 # YouTube challenge solver (runs on Deno, installed in the Dockerfile).
 # Sites change often: if a site stops working, bump this to the latest release.

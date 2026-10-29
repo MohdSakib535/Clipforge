@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Response, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -17,7 +17,7 @@ from app.config.settings import get_settings
 from app.db.session import get_db
 from app.models import AudioTrack, Reel, User
 from app.schemas.reel import ReelCreate, ReelGenerate, ReelOut, ReelScript
-from app.services import reel_render, reel_script, tts
+from app.services import bucket, reel_render, reel_script, tts
 from app.services.naming import video_stem
 from app.services.storage import get_storage
 from app.tasks import dispatch
@@ -89,6 +89,7 @@ def _out(reel: Reel) -> ReelOut:
         video_version=int(video.stat().st_mtime) if has_video else None,
         video_duration_s=reel.video_duration_s,
         scene_pictures=[p.exists() for p in _pictures(reel)],
+        bucket=bucket.copy_out(reel.bucket, video.stat().st_mtime_ns if has_video else None),
         created_at=reel.created_at,
         updated_at=reel.updated_at,
     )
@@ -295,6 +296,40 @@ def reel_video(
     return FileResponse(reel.file_path, media_type="video/mp4", content_disposition_type="inline")
 
 
+@router.post("/{reel_id}/upload-to-bucket", response_model=ReelOut)
+def upload_to_bucket(
+    reel_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> ReelOut:
+    """Copy the reel's video to the bucket (BUCKET_* settings); waits for the
+    upload (a few seconds). Uploading again replaces the copy."""
+    reel = _get(db, user, reel_id)
+    _not_busy(reel)
+    video = _video(reel)
+    if video is None:
+        raise NotFoundError("This reel has no video yet")
+    title = (reel.script or {}).get("title") or reel.topic
+    key = (reel.bucket or {}).get("key") or bucket.key_for(
+        "reels", f"{video_stem(title)}-{reel.id[:8]}.mp4"
+    )
+    saved = bucket.upload(video, key)
+    db.refresh(reel)  # the upload took a while: build on what is saved now
+    reel.bucket = saved
+    db.commit()
+    db.refresh(reel)
+    return _out(reel)
+
+
+@router.get("/{reel_id}/bucket")
+def bucket_link(
+    reel_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> RedirectResponse:
+    """Opens the reel's copy in the bucket."""
+    reel = _get(db, user, reel_id)
+    if not reel.bucket:
+        raise NotFoundError("This reel is not in the bucket")
+    return RedirectResponse(bucket.link(reel.bucket["key"]))
+
+
 @router.get("/{reel_id}/thumbnail")
 def reel_thumbnail(
     reel_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
@@ -319,7 +354,8 @@ def scene_picture(
 def delete_reel(
     reel_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
 ) -> Response:
-    """Also allowed while it's being made: the worker stops at its next step."""
+    """Also allowed while it's being made: the worker stops at its next step.
+    Its copy in the bucket, if any, is kept."""
     reel = _get(db, user, reel_id)
     db.delete(reel)
     db.commit()

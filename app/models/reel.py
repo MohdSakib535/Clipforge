@@ -44,3 +44,7 @@ class Reel(Base, TimestampMixin):
     file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     thumbnail_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     video_duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Its copy in the bucket ("Upload to bucket", services/bucket.py):
+    # {"key", "version", "uploaded_at"}; "version" is the video's mtime then.
+    bucket: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

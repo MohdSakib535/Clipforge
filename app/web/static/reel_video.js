@@ -7,7 +7,8 @@
 // clipforge() methods it calls - upload, link import, music, colour, clip
 // editing - work on whichever component calls them, so here they act on this
 // screen and "Clip a video" is left alone. Toasts (error/notice), the music
-// library (tracks, music) and platforms are shared.
+// library (tracks, music), platforms and the time helpers (fmtTime,
+// parseTime, barStyle) are shared.
 function reelFromVideo() {
   return {
     // ----- State the shared clipforge() methods read and write -----
@@ -22,6 +23,7 @@ function reelFromVideo() {
     job: null, // every reel of this video is in this one job; more trims are added to it
     clips: [],
     colorAll: { contrast: 0, brightness: 0, saturation: 0, busy: false },
+    bucketAll: { busy: false, done: 0, total: 0 }, // "Upload all to bucket"
     _poll: null,
     _watch: null,
     _upload: null,
@@ -287,6 +289,50 @@ function reelFromVideo() {
       }
     },
 
+    // ----- Upload to the bucket (BUCKET_* in .env). The server answers once the
+    // upload has finished; uploading again replaces the copy. -----
+    async uploadToBucket(c) {
+      c._uploading = true;
+      try {
+        c.bucket = (await this.postJSON(`/clips/${c.id}/upload-to-bucket`, {})).bucket;
+      } finally {
+        c._uploading = false;
+      }
+    },
+    async uploadReel(c) {
+      try {
+        await this.uploadToBucket(c);
+        this.notice = "Uploaded to the bucket.";
+      } catch (e) {
+        this.error = e.message;
+      }
+    },
+    // Every finished reel not in the bucket yet (or changed since), one at a
+    // time; stops at the first error.
+    async uploadAllToBucket() {
+      const todo = this.clips.filter((c) => this.isPlayable(c) && !c.bucket?.current);
+      if (!todo.length) {
+        this.notice = "All finished reels are already in the bucket.";
+        return;
+      }
+      this.bucketAll = { busy: true, done: 0, total: todo.length };
+      try {
+        for (const c of todo) {
+          await this.uploadToBucket(c);
+          this.bucketAll.done++;
+        }
+        this.notice = `${todo.length} reel${todo.length > 1 ? "s" : ""} uploaded to the bucket.`;
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        this.bucketAll.busy = false;
+      }
+    },
+    // Its copy was deleted in the Bucket tab: not in the bucket any more.
+    forgetBucketCopy(key) {
+      for (const c of this.clips) if (c.bucket?.key === key) c.bucket = null;
+    },
+
     // Another video. Reels still being made are stopped and deleted (after a
     // confirm); finished reels stay on the server but leave this screen.
     async startOver() {
@@ -297,7 +343,7 @@ function reelFromVideo() {
       }
       if (running && !confirm(running.question)) return;
       if (!running && this.clips.length && !confirm(
-        "Start over with another video?\n\nDownload your reels first: they won't be shown here again."
+        "Start over with another video?\n\nDownload or upload your reels first: they won't be shown here again."
       )) return;
       if (this._poll) clearInterval(this._poll);
       if (this._watch) clearInterval(this._watch);
@@ -311,33 +357,10 @@ function reelFromVideo() {
         link: { url: "", checking: false, importing: false, info: null, quality: "best" },
         video: null, rightsChecked: false, job: null, clips: [],
         colorAll: { contrast: 0, brightness: 0, saturation: 0, busy: false },
+        bucketAll: { busy: false, done: 0, total: 0 },
         cut: { start: 0, end: 0 }, trims: [], making: false, playerError: false,
         _poll: null, _watch: null, _stopAt: null,
       });
-    },
-
-    // Where a part sits on the video's timeline bar.
-    barStyle(start, end) {
-      const dur = this.video?.duration_s || 1;
-      const left = Math.max(0, Math.min(100, (start / dur) * 100));
-      const width = Math.max(0.5, Math.min(100 - left, ((end - start) / dur) * 100));
-      return `left:${left}%;width:${width}%`;
-    },
-    // 83.5 -> "1:23.5"; 3723 -> "1:02:03.0"
-    fmtTime(s) {
-      if (s === null || s === undefined || Number.isNaN(s)) return "";
-      const t = Math.max(0, Math.round(s * 10) / 10);
-      const h = Math.floor(t / 3600);
-      const m = Math.floor((t % 3600) / 60);
-      const sec = (t % 60).toFixed(1).padStart(4, "0");
-      return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
-    },
-    parseTime(text) {
-      const parts = String(text).trim().split(":");
-      if (parts.length > 3 || parts.some((p) => p.trim() === "" || Number.isNaN(Number(p)))) {
-        return NaN;
-      }
-      return parts.reduce((acc, p) => acc * 60 + Number(p), 0);
     },
   };
 }

@@ -13,7 +13,8 @@ from app.config.settings import get_settings
 from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.models import AudioTrack, Video, VideoStatus
-from app.services import bgaudio, downloader
+from app.services import bgaudio, bucket, downloader
+from app.services.naming import video_stem
 from app.services.storage import get_storage
 from app.tasks.celery_app import celery_app
 from app.tasks.pipeline import ingest_video
@@ -122,7 +123,8 @@ def _save_track_progress(track_id: str, pct: int) -> None:
     time_limit=_timeout_s + 60,
 )
 def download_audio_track(track_id: str) -> None:
-    """Grab only the audio of a link, then convert it like an uploaded track."""
+    """Grab only the audio of a link, then convert it like an uploaded track.
+    A link imported from the Bucket tab (``to_bucket``) goes to the bucket."""
     with SessionLocal() as db:
         track = db.get(AudioTrack, track_id)
         if track is None or track.status != "processing":
@@ -152,6 +154,9 @@ def download_audio_track(track_id: str) -> None:
         track_path = dest_dir / "track.m4a"
         title = result.title.replace("/", "_").replace("\\", "_").strip()[:200] or "audio"
         db.refresh(track)
+        if track.to_bucket:
+            _send_to_bucket(db, track, track_path, title)
+            return
         track.filename = f"{title}.m4a"
         track.path = str(track_path)
         track.size_bytes = track_path.stat().st_size
@@ -160,3 +165,24 @@ def download_audio_track(track_id: str) -> None:
         track.status = "ready"
         db.commit()
         log.info("audio_download_done", extra={"track_id": track_id})
+
+
+def _send_to_bucket(db, track: AudioTrack, path: Path, title: str) -> None:
+    """The audio goes to the bucket's audio folder under its title (title-2...
+    if taken); its files here are deleted either way. Done: the row goes too.
+    Failed: the row stays, "failed", saying why."""
+    track_id = track.id
+    try:
+        key = bucket.free_key(bucket.audio_folder(), video_stem(title), ".m4a")
+        bucket.upload(path, key)
+    except Exception as exc:
+        track.status = "failed"
+        track.error = f"Could not save it to the bucket: {exc}"[:2000]
+        db.commit()
+        log.exception("audio_to_bucket_failed", extra={"track_id": track_id})
+        return
+    finally:
+        get_storage().delete(f"audio/{track_id}")
+    db.delete(track)
+    db.commit()
+    log.info("audio_to_bucket_done", extra={"track_id": track_id, "key": key})

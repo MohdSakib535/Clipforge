@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -14,12 +15,13 @@ from app.config.settings import get_settings
 from app.db.session import get_db
 from app.models import AudioTrack, Clip, ClipStatus, Job, Reel, User, Video
 from app.schemas.audio import (
+    AudioFromBucket,
     AudioFromUrl,
     AudioTrackOut,
     BackgroundAudioApply,
     BackgroundAudioResult,
 )
-from app.services import bgaudio, downloader
+from app.services import bgaudio, bucket, downloader
 from app.services.ffmpeg import FFmpegError
 from app.services.storage import get_storage
 from app.tasks import dispatch
@@ -124,6 +126,82 @@ def audio_from_url(
     db.add(track)
     db.commit()
     dispatch.enqueue_audio_download(track.id)
+    db.refresh(track)
+    return track
+
+
+@router.post(
+    "/audio/from-bucket", response_model=AudioTrackOut, status_code=status.HTTP_201_CREATED
+)
+async def audio_from_bucket(
+    body: AudioFromBucket,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> AudioTrack:
+    """Bring an audio file from the bucket into the music library, so it can
+    be picked as background music. Downloaded and converted once, in a thread
+    (as an upload); a file already in the library (brought in, or uploaded
+    from here) is not fetched again."""
+    key = body.key
+    ext = Path(key).suffix.lower()
+    if ext not in bgaudio.AUDIO_EXTS or ".." in key.split("/"):
+        raise AppError("Not an audio file in the bucket", code="bad_key")
+    kept = (
+        db.query(AudioTrack)
+        .filter(
+            AudioTrack.user_id == user.id,
+            AudioTrack.status == "ready",
+            AudioTrack.bucket_copy["key"].as_string() == key,
+        )
+        .first()
+    )
+    if kept is not None:
+        return kept
+    limit = get_settings().max_audio_upload_bytes
+    if await asyncio.to_thread(bucket.size, key) > limit:
+        raise AppError(
+            f"Audio file is larger than {limit // (1024 * 1024)} MB",
+            code="too_large",
+            status_code=413,
+        )
+    storage = get_storage()
+
+    track = AudioTrack(user_id=user.id, filename=key.rsplit("/", 1)[-1], status="processing")
+    db.add(track)
+    db.commit()
+    db.refresh(track)
+
+    raw = storage.path_for(f"audio/{track.id}/upload{ext}")
+    dst = storage.path_for(f"audio/{track.id}/track.m4a")
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        await asyncio.to_thread(bucket.download, key, raw)
+        info = await asyncio.to_thread(bgaudio.prepare_track, raw, dst)
+    except Exception as exc:
+        storage.delete(f"audio/{track.id}")
+        db.delete(track)
+        db.commit()
+        if isinstance(exc, FFmpegError):
+            raise AppError(
+                "Could not read this audio file.", code="bad_audio", status_code=400
+            ) from None
+        raise
+    finally:
+        raw.unlink(missing_ok=True)
+
+    track.path = str(dst)
+    track.size_bytes = dst.stat().st_size
+    track.duration_s = round(info.duration_s, 3)
+    track.status = "ready"
+    # It came from there: it shows as in the bucket, and the pickers don't
+    # offer the bucket file again.
+    version = dst.stat().st_mtime_ns
+    track.bucket_copy = {
+        "key": key,
+        "version": version,
+        "uploaded_at": datetime.now(UTC).isoformat(),
+    }
+    db.commit()
     db.refresh(track)
     return track
 

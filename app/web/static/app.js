@@ -1,8 +1,12 @@
+const NOTICE_MS = 3000; // how long a notice (toast) stays
+
 function clipforge() {
   return {
-    steps: ["Upload", "Rights", "Settings", "Processing", "Review"],
+    steps: ["Upload", "Rights", "Trim", "Settings", "Processing", "Review"],
     step: "upload",
-    mode: "clip", // "clip" (upload -> clips) | "reel" (Create a reel, see reels.js)
+    // "clip" (upload -> clips) | "reel" (Create a reel, reels.js) | "bucket" (bucket.js)
+    // | "local" (Local videos: what is kept on this computer, local.js)
+    mode: "clip",
     reelSource: "topic", // Create a reel: "topic" (reels.js) | "video" (trim a video, reel_video.js)
     source: "file", // "file" | "link"
     link: { url: "", checking: false, importing: false, info: null, quality: "best" },
@@ -11,6 +15,14 @@ function clipforge() {
     uploadPct: 0,
     video: null,
     rightsChecked: false,
+    // Trim step: the stretch of the video cut into clips (seconds); the whole
+    // video unless the user picks a part.
+    range: { start: 0, end: 0 },
+    rangePlayerError: false, // the browser can't play this file: times are typed instead
+    playhead: 0, // where the player is (the white line on the trim bar)
+    stripOk: true, // the frames behind the trim bar loaded
+    _rangeStopAt: null, // a "Play" button pauses here
+    _barDrag: null, // being dragged on the trim bar: "start" | "end" | "playhead"
     platforms: [],
     // { platform_key: { lengthS } } - seconds per clip for each chosen platform
     platformCfg: {},
@@ -21,9 +33,13 @@ function clipforge() {
     busy: false,
     error: "",
     notice: "",
+    _noticeTimer: null, // hides the notice after NOTICE_MS
     // Background music library + the review screen's "all clips" controls.
     tracks: [],
     music: { trackId: "", volume: 40, muteOriginal: false, uploading: false, busy: false, link: "", grabbing: false },
+    // Audio files in the bucket (if one is set up): the pickers offer them too.
+    bucketMusic: [],
+    fetchingMusic: false, // a bucket file is being brought into the library
     wiping: false, // "Delete all data" running
     // Colour grade applied to all clips at once (each clip also has its own).
     colorAll: { contrast: 0, brightness: 0, saturation: 0, busy: false },
@@ -48,8 +64,21 @@ function clipforge() {
         this.error = "Could not load platforms";
       }
       await this.loadTracks();
+      this.loadBucketMusic();
       // Captions come from the transcript: off with it, back on with it.
       this.$watch("transcribe", (on) => (this.captions.enabled = on));
+      this.$watch("notice", (msg) => (msg ? this.releaseNotice() : this.holdNotice()));
+    },
+
+    // A notice goes away by itself; the mouse on it keeps it (long messages).
+    // Errors stay until closed, so they aren't missed.
+    holdNotice() {
+      clearTimeout(this._noticeTimer);
+      this._noticeTimer = null;
+    },
+    releaseNotice() {
+      this.holdNotice();
+      if (this.notice) this._noticeTimer = setTimeout(() => (this.notice = ""), NOTICE_MS);
     },
 
     // Start over. Work still running is stopped and what it made is deleted,
@@ -73,6 +102,8 @@ function clipforge() {
         link: { url: "", checking: false, importing: false, info: null, quality: "best" },
         colorAll: { contrast: 0, brightness: 0, saturation: 0, busy: false },
         video: null, rightsChecked: false, platformCfg: {},
+        range: { start: 0, end: 0 }, rangePlayerError: false, playhead: 0, stripOk: true,
+        _rangeStopAt: null, _barDrag: null,
         captions: { enabled: true, language: "" }, transcribe: true,
         job: null, clips: [], busy: false, error: "", notice: "",
       });
@@ -250,10 +281,118 @@ function clipforge() {
           `/videos/${this.video.id}/confirm-rights`,
           { confirmed: this.rightsChecked }
         );
-        this.step = "settings";
+        this.wholeVideo();
+        Object.assign(this, { playhead: 0, stripOk: true });
+        this.step = "trim";
       } catch (e) {
         this.error = e.message;
       }
+    },
+
+    // ----- Trim step: the stretch of the video to cut into clips -----
+    wholeVideo() {
+      this.range = { start: 0, end: this.video?.duration_s || 0 };
+    },
+    isTrimmed() {
+      const dur = this.video?.duration_s || 0;
+      return this.range.start > 0.05 || this.range.end < dur - 0.05;
+    },
+    rangeLen() {
+      return Math.max(0, this.range.end - this.range.start);
+    },
+    // Why Continue is disabled ("" = it isn't). Each platform's own shortest
+    // clip is checked by the server once platforms are picked.
+    rangeProblem() {
+      const dur = this.video?.duration_s;
+      if (!(this.range.end > this.range.start)) return "The end must be after the start.";
+      if (this.range.start < 0 || (dur && this.range.end > dur + 0.5)) return "This part is outside the video.";
+      const shortest = Math.min(...this.platforms.map((p) => p.length_min_s));
+      if (this.rangeLen() < shortest) return `Pick at least ${shortest} s.`;
+      return "";
+    },
+    markRange(which) {
+      const v = this.$refs.trimPlayer;
+      if (v) this.range[which] = Math.round(v.currentTime * 10) / 10;
+    },
+    // A typed time ("1:23.5", "83.5" or "1:02:03"); the player jumps there.
+    setRange(which, e) {
+      const t = this.parseTime(e.target.value);
+      if (Number.isNaN(t)) {
+        this.error = "Type a time like 1:23.5 (minutes:seconds) or 83.5 (seconds).";
+      } else {
+        this.range[which] = Math.round(t * 10) / 10;
+        const v = this.$refs.trimPlayer;
+        if (v && !this.rangePlayerError) v.currentTime = this.range[which];
+      }
+      e.target.value = this.fmtTime(this.range[which]);
+    },
+    // Play from the start of the part, or its last 5 seconds (to check the end).
+    playRange(which) {
+      const v = this.$refs.trimPlayer;
+      if (!v) return;
+      v.currentTime = which === "end" ? Math.max(this.range.start, this.range.end - 5) : this.range.start;
+      this._rangeStopAt = this.range.end;
+      v.play().catch(() => {});
+    },
+    onRangeTime() {
+      const v = this.$refs.trimPlayer;
+      if (!v) return;
+      if (!this._barDrag) this.playhead = v.currentTime;
+      if (this._rangeStopAt !== null && v.currentTime >= this._rangeStopAt) {
+        v.pause();
+        this._rangeStopAt = null;
+      }
+    },
+    // While playing, the white line follows smoothly (timeupdate comes ~4 times a second).
+    followPlayer() {
+      const v = this.$refs.trimPlayer;
+      if (!v || v.paused) return;
+      this.onRangeTime();
+      requestAnimationFrame(() => this.followPlayer());
+    },
+
+    // ----- The trim bar: drag a handle to move the start or end; press or
+    // drag anywhere else to move the player there -----
+    pct(t) {
+      return Math.max(0, Math.min(100, (t / (this.video?.duration_s || 1)) * 100));
+    },
+    labelPct(t) {
+      return Math.max(5, Math.min(95, this.pct(t))); // keeps the time labels on screen
+    },
+    timeAt(e) {
+      const bar = this.$refs.trimBar.getBoundingClientRect();
+      const x = Math.min(Math.max(e.clientX - bar.left, 0), bar.width);
+      return Math.round((x / bar.width) * (this.video?.duration_s || 0) * 10) / 10;
+    },
+    grabBar(which, e) {
+      this._barDrag = which;
+      if (which !== "playhead") this.$refs.trimPlayer?.pause(); // show the frame at the handle
+      this.dragBar(e);
+    },
+    dragBar(e) {
+      const which = this._barDrag;
+      if (!which) return;
+      const t = this.timeAt(e);
+      if (which === "start") this.range.start = Math.min(t, Math.max(0, this.range.end - 1));
+      if (which === "end") this.range.end = Math.max(t, this.range.start + 1);
+      this.seekTo(which === "playhead" ? t : this.range[which]);
+    },
+    dropBar() {
+      this._barDrag = null;
+    },
+    // A focused handle and ← →: 0.1 s (Shift: 1 s). The handles stay 1 s apart.
+    nudge(which, delta) {
+      const dur = this.video?.duration_s || 0;
+      const t = Math.round((this.range[which] + delta) * 10) / 10;
+      this.range[which] = which === "start"
+        ? Math.max(0, Math.min(t, this.range.end - 1))
+        : Math.min(dur, Math.max(t, this.range.start + 1));
+      this.seekTo(this.range[which]);
+    },
+    seekTo(t) {
+      this.playhead = t;
+      const v = this.$refs.trimPlayer;
+      if (v && !this.rangePlayerError) v.currentTime = t;
     },
 
     togglePlatform(p) {
@@ -269,10 +408,11 @@ function clipforge() {
 
     coverageEstimate(p) {
       const cfg = this.platformCfg[p.key];
-      const dur = this.video?.duration_s;
+      const dur = this.isTrimmed() ? this.rangeLen() : this.video?.duration_s;
       if (!cfg || !dur || !cfg.lengthS) return "";
       const n = Math.max(1, Math.ceil(dur / cfg.lengthS));
-      return `≈ ${n} clips to cover the whole video`;
+      const what = this.isTrimmed() ? "the part you picked" : "the whole video";
+      return `≈ ${n} clip${n === 1 ? "" : "s"} to cover ${what}`;
     },
 
     async createJob() {
@@ -290,6 +430,9 @@ function clipforge() {
             language: this.captions.language || null,
           },
         };
+        if (this.isTrimmed()) {
+          body.source_range = { start_s: this.range.start, end_s: Math.min(this.range.end, this.video.duration_s) };
+        }
         this.job = await this.postJSON(`/videos/${this.video.id}/jobs`, body);
         this.step = "processing";
         this.pollJob();
@@ -347,6 +490,7 @@ function clipforge() {
           bg_audio_volume: f.bg_audio_volume,
           bg_audio_mute_original: f.bg_audio_mute_original,
           color_rendered: f.color_rendered,
+          bucket: f.bucket,
         });
         if (finished) {
           Object.assign(cur, {
@@ -571,13 +715,16 @@ function clipforge() {
       if (r.ok) c.status = next;
     },
 
+    // Its file leaves the disk too, so it can't be undone.
     async del(c) {
+      if (!confirm("Delete this clip? Its file is deleted from this computer.")) return;
       const r = await fetch(`/clips/${c.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "deleted" }),
       });
       if (r.ok) this.clips = this.clips.filter((x) => x.id !== c.id);
+      else this.error = (await r.json().catch(() => ({}))).error?.message || "Delete failed";
     },
 
     // ----- Background music -----
@@ -602,6 +749,49 @@ function clipforge() {
 
     readyTracks() {
       return this.tracks.filter((t) => t.status === "ready");
+    },
+
+    // Audio files in the bucket, quietly: [] without a bucket (or if it can't be reached).
+    async loadBucketMusic() {
+      try {
+        if (!(await (await fetch("/bucket")).json()).set_up) return;
+        const r = await fetch("/bucket/audio");
+        if (r.ok) this.bucketMusic = (await r.json()).audio;
+      } catch (e) {}
+    },
+    inLibrary(key) {
+      return this.tracks.some((t) => t.bucket?.key === key);
+    },
+    // What the music pickers offer: the library on this computer, then audio
+    // files only in the bucket (☁), brought into the library when picked.
+    musicChoices() {
+      return [
+        ...this.readyTracks().map((t) => ({ value: t.id, label: t.filename, duration_s: t.duration_s })),
+        ...this.bucketMusic
+          .filter((f) => !this.inLibrary(f.key))
+          .map((f) => ({ value: `bucket:${f.key}`, label: `☁ ${f.name}` })),
+      ];
+    },
+    // A picker's new value: a track id as it is, or a bucket file
+    // ("bucket:<key>") brought into the library first. Returns the track id
+    // to pick ("" if that failed).
+    async pickMusic(value) {
+      if (!value?.startsWith("bucket:")) return value;
+      this.fetchingMusic = true;
+      try {
+        const t = await this.postJSON("/audio/from-bucket", { key: value.slice("bucket:".length) });
+        await this.loadTracks();
+        this.notice = `"${t.filename}" brought from the bucket into your music.`;
+        return t.id;
+      } catch (e) {
+        this.error = e.message;
+        return "";
+      } finally {
+        this.fetchingMusic = false;
+      }
+    },
+    isTrack(id) {
+      return !!id && !id.startsWith("bucket:");
     },
 
     // Grab only the audio of a link (YouTube, SoundCloud, ...). Downloads in
@@ -752,6 +942,29 @@ function clipforge() {
       }
       return r.json();
     },
+    // Where a part sits on the video's timeline bar.
+    barStyle(start, end) {
+      const dur = this.video?.duration_s || 1;
+      const left = Math.max(0, Math.min(100, (start / dur) * 100));
+      const width = Math.max(0.5, Math.min(100 - left, ((end - start) / dur) * 100));
+      return `left:${left}%;width:${width}%`;
+    },
+    // 83.5 -> "1:23.5"; 3723 -> "1:02:03.0"
+    fmtTime(s) {
+      if (s === null || s === undefined || Number.isNaN(s)) return "";
+      const t = Math.max(0, Math.round(s * 10) / 10);
+      const h = Math.floor(t / 3600);
+      const m = Math.floor((t % 3600) / 60);
+      const sec = (t % 60).toFixed(1).padStart(4, "0");
+      return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+    },
+    parseTime(text) {
+      const parts = String(text).trim().split(":");
+      if (parts.length > 3 || parts.some((p) => p.trim() === "" || Number.isNaN(Number(p)))) {
+        return NaN;
+      }
+      return parts.reduce((acc, p) => acc * 60 + Number(p), 0);
+    },
     platformLabel(key) {
       return this.platforms.find((p) => p.key === key)?.label || key;
     },
@@ -767,6 +980,15 @@ function clipforge() {
     fmtSize(b) {
       if (!b) return "";
       return b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
+    },
+    // Disk sizes: KB for small files, then MB / GB.
+    fmtBytes(b) {
+      if (!b) return "0 MB";
+      if (b < 1e6) return `${Math.max(1, Math.round(b / 1e3))} KB`;
+      return this.fmtSize(b);
+    },
+    fmtWhen(iso) {
+      return new Date(iso).toLocaleString();
     },
     fmtDur(s) {
       if (!s) return "";

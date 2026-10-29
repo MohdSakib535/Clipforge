@@ -388,11 +388,13 @@ def run_job(job_id: str) -> None:
 def _make_coverage_clips(
     db: Session, job: Job, video: Video, cost: CostTracker, settings: Settings
 ) -> None:
-    """Transcribe, find scene cuts, cut the whole video into ~N-second parts
-    per platform and render them."""
+    """Transcribe, find scene cuts, cut the whole video (or the stretch picked
+    in the Trim step) into ~N-second parts per platform and render them."""
     # Transcription can be switched off per job (Settings step): then
     # parts are cut on time at scene changes, with no titles from speech.
     transcribe = bool((job.settings or {}).get("transcribe", True))
+    picked = (job.settings or {}).get("source_range")
+    start_s, end_s = (picked["start_s"], picked["end_s"]) if picked else (0.0, video.duration_s)
     if transcribe:
         # Fail at once, not after minutes of work, if transcription can't
         # run (unknown TRANSCRIBER, or OpenAI chosen without a key).
@@ -412,10 +414,12 @@ def _make_coverage_clips(
 
     # Also, once per video: loudness-normalise the audio for copy cuts
     # (horizontal clips) so they don't run loudnorm one by one. Scene
-    # cuts are cached too; a re-run of a video skips both.
+    # cuts are cached too; a re-run of a video skips both. A trimmed video
+    # doesn't normalise all of it: its few clips run their own loudnorm.
     source = _source_path(video)
     needs_norm = (
-        (video.audio_tracks or 0) > 0
+        picked is None
+        and (video.audio_tracks or 0) > 0
         and any(not get_preset(p).is_vertical for p in (job.platforms or []))
         and _stream_copy_ok(db, video)
     )
@@ -428,7 +432,11 @@ def _make_coverage_clips(
             if needs_norm
             else None
         )
-        if transcribe:
+        if transcribe and picked:
+            sentences, words = _range_transcript(
+                db, video, start_s, end_s, cost, settings, on_progress=_tx_progress
+            )
+        elif transcribe:
             transcript = _transcribe(db, video, cost, on_progress=_tx_progress)
             sentences, words = transcript.segments or [], transcript.words or []
         else:
@@ -460,10 +468,11 @@ def _make_coverage_clips(
         _check_cancel(db, job)
         _set_stage(db, job, JobStage.planning_clips, base)
 
-        # Tile the entire video into ~target-second parts; each part is a clip.
+        # Tile the entire video (or the picked stretch) into ~target-second
+        # parts; each part is a clip.
         target = _clip_length(job, preset)
         parts = build_coverage_segments(
-            sentences, scene_cuts, target, duration_s=video.duration_s, words=words
+            sentences, scene_cuts, target, start_s=start_s, duration_s=end_s, words=words
         )
         log.info(
             "coverage_segments",
@@ -479,9 +488,67 @@ def _make_coverage_clips(
 
 
 # ---------------------------------------------------------------------------
-# Trims: parts picked by hand ("Reel from a video")
+# Part of a video only: trims picked by hand ("Reel from a video") and the
+# stretch picked in "Clip a video"'s Trim step
 # ---------------------------------------------------------------------------
-_TRIM_CONTEXT_S = 1.5  # heard on each side of a trim (see _trim_words)
+_TRIM_CONTEXT_S = 1.5  # heard on each side of a trim (see _transcribe_seconds)
+
+
+def _range_transcript(
+    db: Session,
+    video: Video,
+    start: float,
+    end: float,
+    cost: CostTracker,
+    settings: Settings,
+    on_progress=None,
+) -> tuple[list[dict], list[dict]]:
+    """(sentences, words) of the stretch picked in the Trim step: from the
+    whole-video transcript when there is one (this video's or the same
+    file's), else by transcribing only these seconds. Not saved as the
+    video's transcript: it covers only part of it."""
+    own = db.query(Transcript).filter(Transcript.video_id == video.id).one_or_none()
+    full = own if own and own.words else _same_file_transcript(db, video)
+    if full is not None:
+        log.info("transcript_cache_hit", extra={"video_id": video.id})
+        return _inside(full.segments or [], start, end), _inside(full.words, start, end)
+    return _transcribe_seconds(video, start, end, cost, settings, on_progress)
+
+
+def _inside(items: list[dict], start: float, end: float) -> list[dict]:
+    """Timed words/sentences that overlap ``start``-``end``."""
+    return [x for x in items if x["end"] > start and x["start"] < end]
+
+
+def _transcribe_seconds(
+    video: Video,
+    start: float,
+    end: float,
+    cost: CostTracker,
+    settings: Settings,
+    on_progress=None,
+) -> tuple[list[dict], list[dict]]:
+    """(sentences, words) said between ``start`` and ``end`` (seconds in the
+    video), by transcribing just these seconds, which takes moments even in a
+    3-hour film."""
+    if video.audio_tracks == 0:
+        return [], []  # a silent video: nothing to transcribe
+    # A little before and after is heard too: a word cut at the edge is
+    # recognised from its context instead of guessed from a fragment.
+    lo, hi = max(0.0, start - _TRIM_CONTEXT_S), end + _TRIM_CONTEXT_S
+    with tempfile.TemporaryDirectory() as tmp:
+        audio = str(Path(tmp) / "part.mp3")
+        ffmpeg.run(ffmpeg.build_audio_chunk_cmd(_source_path(video), audio, lo, hi - lo))
+        result = get_transcriber(settings).transcribe(audio, on_progress=on_progress)
+    cost.add_transcription(
+        settings.transcribe_model, result.audio_minutes, free=settings.transcribe_is_local
+    )
+    words = [w.shifted(lo).as_dict() for w in result.words]
+    sentences = [
+        {**s, "start": round(s["start"] + lo, 3), "end": round(s["end"] + lo, 3)}
+        for s in result.segments
+    ]
+    return _inside(sentences, start, end), _inside(words, start, end)
 
 
 def _full_transcript_words(db: Session, video: Video) -> list[dict] | None:
@@ -504,23 +571,10 @@ def _trim_words(
 ) -> list[dict]:
     """Timed words (seconds in the video) said between ``start`` and ``end``:
     from the whole-video transcript when there is one, else by transcribing
-    just these seconds, which takes moments even in a 3-hour film."""
+    just these seconds."""
     if full is not None:
-        return [w for w in full if w["end"] > start and w["start"] < end]
-    if video.audio_tracks == 0:
-        return []  # a silent video: nothing to transcribe
-    # A little before and after is heard too: a word cut at the edge of the
-    # trim is recognised from its context instead of guessed from a fragment.
-    lo, hi = max(0.0, start - _TRIM_CONTEXT_S), end + _TRIM_CONTEXT_S
-    with tempfile.TemporaryDirectory() as tmp:
-        audio = str(Path(tmp) / "trim.mp3")
-        ffmpeg.run(ffmpeg.build_audio_chunk_cmd(_source_path(video), audio, lo, hi - lo))
-        result = get_transcriber(settings).transcribe(audio)
-    cost.add_transcription(
-        settings.transcribe_model, result.audio_minutes, free=settings.transcribe_is_local
-    )
-    words = [w.shifted(lo).as_dict() for w in result.words]
-    return [w for w in words if w["end"] > start and w["start"] < end]
+        return _inside(full, start, end)
+    return _transcribe_seconds(video, start, end, cost, settings)[1]
 
 
 def _make_trim_clips(
@@ -727,7 +781,7 @@ def _render_specs(
 def render_single_clip(clip_id: str, keep_approved: bool = False) -> None:
     with SessionLocal() as db:
         clip = db.get(Clip, clip_id)
-        if clip is None:
+        if clip is None or clip.status == ClipStatus.deleted:
             return
         bind_job_id(clip.job_id)
         job = db.get(Job, clip.job_id)

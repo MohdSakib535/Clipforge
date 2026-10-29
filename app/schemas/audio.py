@@ -4,6 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.bucket import BucketCopy
 from app.schemas.clip import ClipOut
 
 
@@ -19,10 +20,16 @@ class AudioTrackOut(BaseModel):
     source_url: str | None = None
     progress: int | None = None
     created_at: datetime
+    bucket: BucketCopy | None = None  # the bucket file it came from (POST /audio/from-bucket)
+    to_bucket: bool = False  # a link import going to the bucket (Bucket tab), not kept here
 
 
 class AudioFromUrl(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
+
+
+class AudioFromBucket(BaseModel):
+    key: str = Field(min_length=1, max_length=1024)  # an audio file in the bucket
 
 
 class BackgroundAudioApply(BaseModel):
