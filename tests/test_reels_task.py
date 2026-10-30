@@ -107,7 +107,8 @@ def test_render_task_makes_the_reel_and_reuses_unchanged_scenes(db_session, fact
     assert Path(reel.file_path).exists() and Path(reel.thumbnail_path).exists()
     assert reel.video_duration_s == pytest.approx((38 + 54) / 30, abs=0.01)  # stored rounded
     assert len(fakes["pictures"]) == 2 and len(fakes["voices"]) == 2
-    assert fakes["pictures"][0].startswith("a glass of water. One single vertical 9:16 photo")
+    assert fakes["pictures"][0].startswith("Cinematic film still, ")  # the reel's style
+    assert "a glass of water. One single vertical" in fakes["pictures"][0]
     assert fakes["unloads"] == 1  # the image model is freed once its pictures are done
 
     # Change one line: only its voice is redone; the pictures are reused.

@@ -24,6 +24,8 @@ class Reel(Base, TimestampMixin):
     voice: Mapped[str] = mapped_column(String(32))  # Kokoro voice, e.g. "hf_alpha"
     topic: Mapped[str] = mapped_column(Text)
     duration_s: Mapped[int] = mapped_column(Integer)  # target length
+    # How the pictures are drawn: key of reel_render.STYLES.
+    style: Mapped[str] = mapped_column(String(16), default="cinematic", server_default="cinematic")
 
     # "scripting" -> "script_ready" -> "generating" -> "ready"; "failed" from
     # either step (``script`` tells which: no script yet = the script failed).

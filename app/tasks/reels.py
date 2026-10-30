@@ -64,14 +64,14 @@ def render_reel(reel_id: str) -> None:
         if reel is None or not reel.script:
             return
         scenes = reel.script["scenes"]
-        language, voice = reel.language, reel.voice
+        language, voice, style = reel.language, reel.voice, reel.style
         track = db.get(AudioTrack, reel.music_id) if reel.music_id else None
         music = track.path if track is not None and track.is_ready else None
         music_volume = reel.music_volume
 
         folder = reel_render.reel_dir(reel_id)
         folder.mkdir(parents=True, exist_ok=True)
-        pictures = reel_render.scene_pictures(folder, scenes, settings)
+        pictures = reel_render.scene_pictures(folder, scenes, settings, style)
         voices = [
             reel_render.voice_path(folder, i, sc["narration"], language, voice)
             for i, sc in enumerate(scenes)
@@ -96,7 +96,7 @@ def render_reel(reel_id: str) -> None:
                         if not _update(db, reel_id, stage=stage, progress=progress):
                             break
                         png = imagegen.generate(
-                            reel_render.picture_prompt(scenes[i]["image_prompt"]),
+                            reel_render.picture_prompt(scenes[i]["image_prompt"], style),
                             width=settings.reel_image_width,
                             height=settings.reel_image_height,
                             seed=random.randrange(2**31),

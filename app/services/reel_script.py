@@ -19,8 +19,8 @@ import httpx
 from app.config.settings import get_settings
 from app.services.tts import LANGUAGES
 
-MIN_DURATION_S, MAX_DURATION_S = 15, 90
-MAX_SCENES = 10
+MIN_DURATION_S, MAX_DURATION_S = 15, 300
+MAX_SCENES = 20
 MAX_HASHTAGS = 8
 
 
@@ -52,8 +52,9 @@ PLATFORMS: dict[str, Platform] = {
 
 
 def scene_count(duration_s: int) -> int:
-    """About one picture every 7 seconds."""
-    return max(3, min(8, round(duration_s / 7)))
+    """About one picture every 7 seconds, at most 8; past ~3 minutes one
+    every 20 seconds (15 for 5 minutes), so no picture stays on too long."""
+    return max(3, min(8, round(duration_s / 7)), round(duration_s / 20))
 
 
 def words_per_scene(duration_s: int, language: str, scenes: int) -> int:
@@ -67,13 +68,14 @@ def build_messages(topic: str, platform: str, language: str, duration_s: int) ->
     lang = LANGUAGES[language].prompt_name
     n = scene_count(duration_s)
     w = words_per_scene(duration_s, language, n)
+    sentences = "one or two" if w <= 30 else "a few"
     system = f"""You write voice-over scripts for viral short vertical videos ({p.label}). Reply with JSON only.
 Rules:
 - Write the title, hooks, every narration and the caption in {lang}. Never add translations or text in brackets.
-- Exactly {n} scenes. A narration is what the narrator says during that scene: about {w} words ({w - 4} to {w + 4}), one or two short spoken sentences. Never put the whole script into one scene.
+- Exactly {n} scenes. A narration is what the narrator says during that scene: about {w} words ({w - 4} to {w + 4}), {sentences} short spoken sentences. Never put the whole script into one scene.
 - Scene 1 is the hook: a bold claim, a surprising fact or a question that stops the scroll in the first 3 seconds. Scenes 2 to {n - 1} give one point each and keep the viewer curious (hint that the best part is still coming). Scene {n} gives the payoff and ends with a call to action in {lang}: {p.call_to_action}.
 - Simple everyday words, as if talking to a friend. No emojis, hashtags or stage directions in the narration.
-- image_prompt: in English, one single photograph of one concrete scene showing what the narration says (subject, setting, lighting, camera angle), vertical composition. Never a collage, montage, split screen or several shots. No text, letters, logos or watermarks.
+- image_prompt: in English, one single picture of one concrete scene showing what the narration says: the subject, a detailed colourful setting, dramatic lighting (golden hour, neon glow, moody shadows or rim light) and a striking camera angle, vertical composition. Describe only what is in the picture, never how it is made (no "photo", "illustration" or "painting": the art style is added later). Never a plain white, grey or empty background. Never a collage, montage, split screen or several shots. No text, letters, logos or watermarks.
 - hooks: 3 alternative first lines for scene 1, in {lang}, each in a different style (question, bold claim, surprising fact).
 - caption: the post caption in {lang}, under 150 characters.
 - hashtags: 5 relevant hashtags in English, lowercase, without the # sign.
@@ -129,11 +131,15 @@ def response_schema(scenes: int) -> dict:
 def generate_script(topic: str, platform: str, language: str, duration_s: int) -> dict:
     """Ask Ollama for a script. Raises ScriptError with a message for the UI."""
     n = scene_count(duration_s)
+    # Longer reels need a longer reply (Devanagari takes many tokens); past
+    # Ollama's default 4096-token window the reply would be cut off.
+    num_predict = max(1500, 15 * duration_s)
     raw = _chat(
         build_messages(topic, platform, language, duration_s),
         response_schema(n),
         temperature=0.8,
-        num_predict=1500,
+        num_predict=num_predict,
+        num_ctx=max(4096, num_predict + 1024),
     )
     return normalize_script(raw, topic=topic, language=language, scenes=n)
 
@@ -155,17 +161,27 @@ def suggest_music(script: dict, platform: str) -> dict:
     return music
 
 
-def _chat(messages: list[dict], schema: dict, *, temperature: float, num_predict: int):
+def _chat(
+    messages: list[dict],
+    schema: dict,
+    *,
+    temperature: float,
+    num_predict: int,
+    num_ctx: int | None = None,
+):
     """One Ollama chat call whose reply must follow ``schema``; returns the
     parsed JSON. Raises ScriptError with a message for the UI."""
     settings = get_settings()
+    options = {"temperature": temperature, "num_predict": num_predict}
+    if num_ctx:
+        options["num_ctx"] = num_ctx
     body = {
         "model": settings.reel_script_model,
         "messages": messages,
         "format": schema,
         "stream": False,
         "keep_alive": 0,  # free the RAM for the image model right away
-        "options": {"temperature": temperature, "num_predict": num_predict},
+        "options": options,
     }
     try:
         r = httpx.post(

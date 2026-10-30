@@ -56,7 +56,7 @@ def _pictures(reel: Reel) -> list[Path]:
     if not reel.script:
         return []
     folder = reel_render.reel_dir(reel.id)
-    return reel_render.scene_pictures(folder, reel.script["scenes"], get_settings())
+    return reel_render.scene_pictures(folder, reel.script["scenes"], get_settings(), reel.style)
 
 
 def _video(reel: Reel) -> Path | None:
@@ -77,6 +77,7 @@ def _out(reel: Reel) -> ReelOut:
         voice=reel.voice,
         topic=reel.topic,
         duration_s=reel.duration_s,
+        style=reel.style,
         status=reel.status,
         stalled=_stalled(reel),
         stage=reel.stage,
@@ -104,6 +105,12 @@ def _check_voice(language: str, voice: str | None) -> str:
     return voice
 
 
+def _check_style(style: str) -> str:
+    if style not in reel_render.STYLES:
+        raise AppError(f"Unknown picture style '{style}'", code="bad_style")
+    return style
+
+
 def _start_render(db: Session, reel: Reel) -> None:
     reel.status = "generating"
     reel.stage = "Waiting to start"
@@ -115,7 +122,9 @@ def _start_render(db: Session, reel: Reel) -> None:
 
 @router.get("/options")
 def options() -> dict:
-    """Platforms, languages with their voices, and the allowed length."""
+    """Platforms, languages with their voices, picture styles, the allowed length
+    and rough timings."""
+    settings = get_settings()
     return {
         "platforms": [{"key": k, "label": p.label} for k, p in reel_script.PLATFORMS.items()],
         "languages": [
@@ -127,10 +136,22 @@ def options() -> dict:
             }
             for k, lang in tts.LANGUAGES.items()
         ],
+        "styles": [{"key": k, "label": s.label} for k, s in reel_render.STYLES.items()],
         "duration": {
             "min": reel_script.MIN_DURATION_S,
             "max": reel_script.MAX_DURATION_S,
             "default": 35,
+        },
+        "max_scenes": reel_script.MAX_SCENES,
+        # Rough timings (seconds) for the time estimates in the picture style menus.
+        "timing": {
+            "picture_s": settings.reel_picture_seconds,
+            "load_s": settings.reel_model_load_seconds,
+            # Writing the script (gemma3:4b, loaded each time): base + per second of reel.
+            "script_s": 25,
+            "script_s_per_s": 0.5,
+            # Voice and putting the video together, per second of reel (measured 15 s for 48 s).
+            "render_s_per_s": 0.35,
         },
     }
 
@@ -145,6 +166,7 @@ def create_reel(
     if body.platform not in reel_script.PLATFORMS:
         raise AppError(f"Unknown platform '{body.platform}'", code="bad_platform")
     voice = _check_voice(body.language, body.voice)
+    style = _check_style(body.style)
     reel = Reel(
         user_id=user.id,
         platform=body.platform,
@@ -152,6 +174,7 @@ def create_reel(
         voice=voice,
         topic=body.topic,
         duration_s=body.duration_s,
+        style=style,
         status="scripting",
         stage="Writing the script",
     )
@@ -246,6 +269,7 @@ def generate_video(
     if not reel.script:
         raise ConflictError("Write the script first.")
     reel.voice = _check_voice(reel.language, body.voice or reel.voice)
+    reel.style = _check_style(body.style or reel.style)  # another style redraws every picture
     if body.music_id is not None:
         track = db.get(AudioTrack, body.music_id)
         if track is None or track.user_id != user.id or not track.is_ready:

@@ -14,7 +14,8 @@ from app.services.reel_script import ScriptError, normalize_script
 def test_scene_count_follows_the_length():
     assert reel_script.scene_count(35) == 5
     assert reel_script.scene_count(15) == 3  # never fewer than 3
-    assert reel_script.scene_count(90) == 8  # never more than 8
+    assert reel_script.scene_count(90) == 8  # no more than 8 up to ~3 minutes
+    assert reel_script.scene_count(300) == 15  # then one picture every 20 s
 
 
 def test_prompt_has_language_platform_and_size():
@@ -102,7 +103,24 @@ def test_generate_script_asks_ollama_for_json(monkeypatch):
     assert sent["body"]["keep_alive"] == 0
     assert sent["body"]["stream"] is False
     assert sent["body"]["format"]["properties"]["scenes"]["minItems"] == 5
+    assert sent["body"]["options"]["num_ctx"] == 4096
     assert len(s["scenes"]) == 5 and s["title"] == "T"
+
+
+def test_long_reel_gets_room_for_a_long_reply(monkeypatch):
+    sent = {}
+
+    def fake_post(url, json, timeout):
+        sent.update(body=json)
+        scenes = [{"narration": f"Line {i}.", "image_prompt": f"p{i}"} for i in range(15)]
+        return _reply({"title": "T", "scenes": scenes})
+
+    monkeypatch.setattr(reel_script.httpx, "post", fake_post)
+    s = reel_script.generate_script("topic", "instagram", "hi", 300)
+    assert sent["body"]["options"]["num_predict"] == 4500
+    assert sent["body"]["options"]["num_ctx"] == 5524
+    assert len(s["scenes"]) == 15
+    assert "a few short spoken sentences" in sent["body"]["messages"][0]["content"]
 
 
 def test_music_suggestion_is_cleaned_up():

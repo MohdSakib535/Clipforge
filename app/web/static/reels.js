@@ -2,13 +2,16 @@
 // its toasts (error/notice), the music library (tracks) and helpers.
 function reelMaker() {
   return {
-    options: { platforms: [], languages: [], duration: { min: 15, max: 90, default: 35 } },
-    form: { platform: "instagram", language: "hi", voice: "", duration_s: 35, topic: "" },
+    options: {
+      platforms: [], languages: [], styles: [], duration: { min: 15, max: 300, default: 35 }, max_scenes: 20,
+      timing: { picture_s: 58, load_s: 5, script_s: 25, script_s_per_s: 0.5, render_s_per_s: 0.35 },
+    },
+    form: { platform: "instagram", language: "hi", voice: "", style: "cinematic", duration_s: 35, topic: "" },
     creating: false,
     reels: [],
     reel: null, // the open reel, as the server has it
     draft: null, // its script being edited
-    gen: { voice: "", musicId: "", musicVolume: 20 },
+    gen: { voice: "", style: "cinematic", musicId: "", musicVolume: 20 },
     // Adding music to the library from the reel editor (upload or a link).
     // pendingId: a link import still downloading; picked once it is ready.
     reelMusic: { uploading: false, link: "", grabbing: false, deleting: false, pendingId: null, suggesting: false },
@@ -39,6 +42,38 @@ function reelMaker() {
     },
     reelPlatformLabel(key) {
       return this.options.platforms.find((p) => p.key === key)?.label || key;
+    },
+    styleLabel(key) {
+      return this.options.styles.find((s) => s.key === key)?.label || key;
+    },
+
+    // Rough time to make a reel, shown in the picture style menus. Every style
+    // takes about as long; what counts is how many pictures are drawn.
+    fmtEta(s) {
+      return s < 60 ? `~${Math.max(5, Math.round(s / 5) * 5)} s` : `~${Math.round(s / 60)} min`;
+    },
+    // As reel_script.scene_count: a picture every ~7 s (at most 8), past ~3 minutes one every 20 s.
+    sceneCount(d) {
+      return Math.max(3, Math.min(8, Math.round(d / 7)), Math.round(d / 20));
+    },
+    picturesEta(n) {
+      const t = this.options.timing;
+      return n ? t.load_s + n * t.picture_s : 0;
+    },
+    // A new reel: the script, every picture, then the video.
+    newReelEta() {
+      const t = this.options.timing, d = this.form.duration_s;
+      return t.script_s + t.script_s_per_s * d + this.picturesEta(this.sceneCount(d)) + t.render_s_per_s * d;
+    },
+    // "Generate video" in picture style `key`: the reel's own style redraws only
+    // new or changed scenes, another style redraws every picture.
+    generateEta(key) {
+      if (!this.reel || !this.draft) return 0;
+      const saved = this.reel.script?.scenes || [];
+      const n = key !== this.reel.style
+        ? this.draft.scenes.length
+        : this.draft.scenes.filter((s, i) => !this.reel.scene_pictures[i] || s.image_prompt !== saved[i]?.image_prompt).length;
+      return this.picturesEta(n) + this.options.timing.render_s_per_s * this.estimateS();
     },
     // Being worked on. A "stalled" reel was cut off by a restart: free to retry.
     busy(r) {
@@ -82,6 +117,7 @@ function reelMaker() {
       this.draft = reel.script ? this.toDraft(reel.script) : null;
       this.gen = {
         voice: reel.voice,
+        style: reel.style,
         musicId: reel.music_id || "",
         musicVolume: reel.music_volume,
       };
@@ -183,6 +219,7 @@ function reelMaker() {
         await this.putScript(); // the video is made from the saved script
         this.reel = await this.postJSON(`/reels/${this.reel.id}/generate`, {
           voice: this.gen.voice,
+          style: this.gen.style,
           music_id: this.gen.musicId || null,
           music_volume: this.gen.musicVolume,
         });

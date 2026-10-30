@@ -16,6 +16,7 @@ class ReelCreate(BaseModel):
     language: str = Field(description="A key from GET /reels/options")
     voice: str | None = Field(default=None, description="Omit for the language's first voice.")
     duration_s: int = Field(default=35, ge=MIN_DURATION_S, le=MAX_DURATION_S)
+    style: str = Field(default="cinematic", description="A picture style from GET /reels/options")
 
 
 class ReelScene(BaseModel):
@@ -52,6 +53,7 @@ class ReelScript(BaseModel):
 
 class ReelGenerate(BaseModel):
     voice: str | None = Field(default=None, description="Omit to keep the current voice.")
+    style: str | None = Field(default=None, description="Omit to keep the current style.")
     music_id: str | None = Field(default=None, description="Library track; null = no music.")
     music_volume: int = Field(default=20, ge=0, le=100, description="100 = as loud as the voice.")
 
@@ -63,6 +65,7 @@ class ReelOut(BaseModel):
     voice: str
     topic: str
     duration_s: int
+    style: str
     status: str  # scripting | script_ready | generating | ready | failed
     # Still "scripting"/"generating" but no progress for a long time (cut off
     # by a restart): it can be started again.

@@ -97,10 +97,15 @@ class Settings(BaseSettings):
     reel_script_model: str = "gemma3:4b"
     imagegen_url: str = "http://host.docker.internal:8189"
     # Pictures are made at 9:16 below full size (faster on a 16 GB Mac) and
-    # scaled up to 1080x1920; the slow zoom on each one hides the softness.
-    reel_image_width: int = 576
-    reel_image_height: int = 1024
+    # scaled up to 1080x1920. 576x1024 looked soft; 720x1280 is sharper but
+    # slower (measured on the M4: ~40 s vs ~58 s a picture).
+    reel_image_width: int = 720
+    reel_image_height: int = 1280
     reel_image_steps: int = 4
+    # For the time estimates in the UI: one picture at the size above, and
+    # loading the image model (once per video). Change with the size.
+    reel_picture_seconds: float = 58
+    reel_model_load_seconds: float = 5
     # Kokoro voice model, downloaded on first use to <storage>/.kokoro.
     kokoro_model_url: str = (
         "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"

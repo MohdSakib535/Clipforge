@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ClipForge</title>
+    <link rel="icon" href="data:," /><!-- no favicon: stops the browser asking for one (a 404 each load) -->
     <script src="https://cdn.tailwindcss.com/3.4.16"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
     <style>
@@ -12,7 +13,8 @@
     </style>
   </head>
   <body class="text-slate-100 min-h-screen">
-    <div x-data="clipforge()" x-init="init()" class="max-w-5xl mx-auto px-4 py-8">
+    <!-- No x-init: Alpine calls clipforge().init() by itself (with x-init too it ran twice). -->
+    <div x-data="clipforge()" class="max-w-5xl mx-auto px-4 py-8">
       <header class="flex items-center justify-between mb-8">
         <div class="flex items-center gap-3">
           <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500 to-fuchsia-500 flex items-center justify-center font-bold">CF</div>
@@ -560,7 +562,15 @@
                 </select>
               </label>
             </div>
-            <label class="block text-xs text-slate-400 mb-4">Length <span class="text-slate-200" x-text="`${form.duration_s} s`"></span>
+            <label class="block text-xs text-slate-400 mb-4">Picture style
+              <select x-model="form.style" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                <template x-for="s in options.styles" :key="s.key">
+                  <option :value="s.key" :selected="s.key===form.style" x-text="`${s.label} · ${fmtEta(newReelEta())}`"></option>
+                </template>
+              </select>
+              <span class="block mt-1 text-slate-500">Rough time to make it. Every style takes about as long; longer reels take longer.</span>
+            </label>
+            <label class="block text-xs text-slate-400 mb-4">Length <span class="text-slate-200" x-text="form.duration_s < 60 ? `${form.duration_s} s` : fmtDur(form.duration_s)"></span>
               <input type="range" :min="options.duration.min" :max="options.duration.max" step="5" x-model.number="form.duration_s" class="block w-full mt-2" />
             </label>
             <label class="block text-xs text-slate-400 mb-4">Topic
@@ -609,7 +619,7 @@
             <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
               <div class="flex items-start justify-between gap-3 mb-4">
                 <div class="min-w-0">
-                  <div class="text-xs text-slate-400" x-text="`${reelPlatformLabel(reel.platform)} · ${languageLabel(reel.language)} · ${reel.duration_s} s`"></div>
+                  <div class="text-xs text-slate-400" x-text="`${reelPlatformLabel(reel.platform)} · ${languageLabel(reel.language)} · ${styleLabel(reel.style)} · ${reel.duration_s} s`"></div>
                   <div class="text-sm text-slate-300 truncate" x-text="reel.topic"></div>
                 </div>
                 <button @click="deleteReel()" class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 text-xs flex-none">Delete</button>
@@ -708,7 +718,7 @@
                     </template>
                   </div>
                   <div class="flex justify-between items-center text-xs mb-5">
-                    <button x-show="draft.scenes.length < 10" @click="addScene()" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600">+ Add scene</button>
+                    <button x-show="draft.scenes.length < options.max_scenes" @click="addScene()" class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600">+ Add scene</button>
                     <span class="text-slate-400" x-text="`About ${estimateS()} s spoken (target ${reel.duration_s} s)`"></span>
                   </div>
 
@@ -759,6 +769,13 @@
                         <select x-model="gen.voice" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
                           <template x-for="v in voicesFor(reel.language)" :key="v.key">
                             <option :value="v.key" :selected="v.key===gen.voice" x-text="v.label"></option>
+                          </template>
+                        </select>
+                      </label>
+                      <label class="text-xs text-slate-400">Picture style
+                        <select x-model="gen.style" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                          <template x-for="s in options.styles" :key="s.key">
+                            <option :value="s.key" :selected="s.key===gen.style" x-text="`${s.label} · ${fmtEta(generateEta(s.key))}`"></option>
                           </template>
                         </select>
                       </label>
@@ -823,6 +840,7 @@
                     <button @click="rewrite()" :disabled="saving"
                       class="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm">Write again</button>
                     <span x-show="dirty()" class="text-xs text-amber-300">Unsaved changes</span>
+                    <span x-show="gen.style !== reel.style" class="text-xs text-amber-300">New picture style: every picture is drawn again</span>
                   </div>
                   <p class="text-xs text-slate-500 mt-3">Pictures are made on your Mac by the image generator (start it in a terminal with <code>uv run imagegen/server.py</code>). Pictures and voice already made for the same text are reused, so changing one scene only redoes that scene.</p>
                 </div>

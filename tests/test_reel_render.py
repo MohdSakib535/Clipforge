@@ -42,27 +42,67 @@ def test_ass_file_has_style_font_and_safe_text():
     assert reel_render._ass_time(3661.5) == "1:01:01.50"
 
 
-def test_scene_cmd_zooms_both_ways_and_escapes_the_caption_path():
+def test_scene_cmd_moves_the_camera_and_escapes_the_caption_path():
     cmd = reel_render.build_scene_cmd(
-        "p.png", "s.mp4", frames=90, zoom_in=True, ass="C:/x/cap.ass", preset="veryfast"
+        "p.png", "s.mp4", frames=90, move=0, ass="C:/x/cap.ass", preset="veryfast"
     )
     vf = cmd[cmd.index("-vf") + 1]
     assert "zoompan=z=1+0.15*on/90:" in vf and "d=90:s=1080x1920:fps=30" in vf
+    assert "vignette" in vf and vf.index("vignette") < vf.index("ass=")  # captions not darkened
     assert "ass=C\\:/x/cap.ass" in vf
     assert cmd[cmd.index("-frames:v") + 1] == "90" and "-an" in cmd
     out = reel_render.build_scene_cmd(
-        "p.png", "s.mp4", frames=90, zoom_in=False, ass=None, preset="veryfast"
+        "p.png", "s.mp4", frames=90, move=2, ass=None, preset="veryfast"
     )
     vf = out[out.index("-vf") + 1]
     assert "zoompan=z=1.15-0.15*on/90:" in vf and "ass=" not in vf
 
 
+def test_camera_moves_take_turns():
+    moves = [reel_render.camera_move(i, 60) for i in range(7)]
+    assert len(set(moves[:6])) == 6  # six different moves...
+    assert moves[6] == moves[0]  # ...then round again
+    z, x, _ = moves[1]
+    assert z == "1.15" and x == "(iw-iw/zoom)*on/60"  # pans right while zoomed in
+
+
+def test_join_blends_each_scene_into_the_next_where_its_slot_ends():
+    cmd = reel_render.build_join_cmd(
+        ["a.mp4", "b.mp4", "c.mp4"], [2.0, 3.5, 1.0], "out.mp4", preset="veryfast"
+    )
+    graph = cmd[cmd.index("-filter_complex") + 1]
+    assert graph == (
+        "[0:v][1:v]xfade=transition=fade:duration=0.4:offset=2.0000[v1];"
+        "[v1][2:v]xfade=transition=smoothleft:duration=0.4:offset=5.5000[v2]"
+    )
+    assert cmd[cmd.index("-map") + 1] == "[v2]"
+
+
+def test_captions_light_up_the_word_being_spoken():
+    ass = build_ass([reel_render.Cue(0.0, 1.0, "Do it now")], "DejaVu Sans")
+    dialogue = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+    assert len(dialogue) == 3  # one per word, the whole chunk on screen each time
+    yellow = "{\\c&H0000D7FF&}"
+    assert f"{yellow}Do{{\\c&HFFFFFF&}} it now" in dialogue[0]
+    assert f"Do {yellow}it{{\\c&HFFFFFF&}} now" in dialogue[1]
+    assert "\\fscx80" in dialogue[0] and "\\fscx80" not in dialogue[1]  # pops in once
+    assert dialogue[-1].split(",")[2] == "0:00:01.00"  # the last word ends with the chunk
+
+
+def test_picture_prompt_starts_with_the_style():
+    p = reel_render.picture_prompt("a cat on a roof at night.", "anime")
+    assert p.startswith("Anime style illustration, ")
+    assert ". a cat on a roof at night. One single vertical 9:16 picture, not a collage" in p
+    assert reel_render.DEFAULT_STYLE in reel_render.STYLES
+
+
 def test_cached_files_are_named_after_what_made_them(tmp_path):
-    a = reel_render.picture_path(tmp_path, 0, "a cat", 384, 672, 4)
+    a = reel_render.picture_path(tmp_path, 0, "a cat", "cinematic", 384, 672, 4)
     assert a.name.startswith("scene01-") and a.suffix == ".png"
-    assert a == reel_render.picture_path(tmp_path, 0, "a cat", 384, 672, 4)
-    assert a != reel_render.picture_path(tmp_path, 0, "a dog", 384, 672, 4)
-    assert a != reel_render.picture_path(tmp_path, 0, "a cat", 576, 1024, 4)
+    assert a == reel_render.picture_path(tmp_path, 0, "a cat", "cinematic", 384, 672, 4)
+    assert a != reel_render.picture_path(tmp_path, 0, "a dog", "cinematic", 384, 672, 4)
+    assert a != reel_render.picture_path(tmp_path, 0, "a cat", "anime", 384, 672, 4)
+    assert a != reel_render.picture_path(tmp_path, 0, "a cat", "cinematic", 576, 1024, 4)
     v = reel_render.voice_path(tmp_path, 2, "hello", "en", "af_heart")
     assert v.name.startswith("voice03-")
     assert v != reel_render.voice_path(tmp_path, 2, "hello", "en", "am_michael")

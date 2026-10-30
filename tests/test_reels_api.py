@@ -41,7 +41,12 @@ def test_options_list_platforms_languages_and_voices(client):
     assert [p["key"] for p in body["platforms"]] == ["instagram", "facebook"]
     hindi = next(lang for lang in body["languages"] if lang["key"] == "hi")
     assert hindi["label"] == "Hindi" and hindi["voices"][0]["key"] == "hf_alpha"
-    assert body["duration"] == {"min": 15, "max": 90, "default": 35}
+    assert body["duration"] == {"min": 15, "max": 300, "default": 35}
+    assert body["max_scenes"] == 20
+    assert [s["key"] for s in body["styles"]] == ["cinematic", "realistic", "anime", "3d"]
+    timing = body["timing"]  # for the time estimates in the style menus
+    assert (timing["picture_s"], timing["load_s"]) == (58, 5)
+    assert {"script_s", "script_s_per_s", "render_s_per_s"} <= timing.keys()
 
 
 def test_create_starts_writing_the_script(client):
@@ -49,8 +54,10 @@ def test_create_starts_writing_the_script(client):
     assert reel["status"] == "scripting"
     assert reel["voice"] == "hf_alpha"  # the language's first voice
     assert reel["duration_s"] == 35 and reel["script"] is None
+    assert reel["style"] == "cinematic"  # the default
     assert client.enqueued["reel_script"] == [reel["id"]]
     assert [r["id"] for r in client.get("/reels").json()] == [reel["id"]]
+    assert _create(client, style="anime")["style"] == "anime"
 
 
 def test_create_validates_choices(client):
@@ -59,11 +66,13 @@ def test_create_validates_choices(client):
         return client.post("/reels", json={**base, **body}).status_code
 
     assert code(platform="tiktok") == 400
+    assert code(style="pixel-art") == 400
     assert code(language="xx") == 400
     assert code(voice="hf_alpha") == 400  # a Hindi voice for English
     assert code(topic="hi") == 422
     assert code(duration_s=5) == 422
-    assert code(duration_s=200) == 422
+    assert code(duration_s=301) == 422
+    assert code(duration_s=300) == 202  # up to 5 minutes
     assert code(voice="am_michael", duration_s=40) == 202
 
 
@@ -130,7 +139,7 @@ def test_new_picture_drops_that_scene_picture_only(client, db_session):
     _with_script(db_session, reel["id"], status="ready")
     folder = reel_render.reel_dir(reel["id"])
     folder.mkdir(parents=True, exist_ok=True)
-    pictures = reel_render.scene_pictures(folder, SCRIPT["scenes"], get_settings())
+    pictures = reel_render.scene_pictures(folder, SCRIPT["scenes"], get_settings(), "cinematic")
     for p in pictures:
         p.write_bytes(b"png")
     assert client.get(f"/reels/{reel['id']}").json()["scene_pictures"] == [True, True, True]
@@ -145,6 +154,28 @@ def test_new_picture_drops_that_scene_picture_only(client, db_session):
     db_session.get(Reel, reel["id"]).status = "ready"
     db_session.commit()
     assert client.post(f"/reels/{reel['id']}/scenes/9/new-picture").status_code == 404
+
+
+def test_another_style_needs_every_picture_again(client, db_session):
+    reel = _create(client)
+    _with_script(db_session, reel["id"], status="ready")
+    folder = reel_render.reel_dir(reel["id"])
+    folder.mkdir(parents=True, exist_ok=True)
+    for p in reel_render.scene_pictures(folder, SCRIPT["scenes"], get_settings(), "cinematic"):
+        p.write_bytes(b"png")
+    assert client.get(f"/reels/{reel['id']}").json()["scene_pictures"] == [True, True, True]
+
+    resp = client.post(f"/reels/{reel['id']}/generate", json={"style": "3d"})
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["style"] == "3d"
+    assert resp.json()["scene_pictures"] == [False, False, False]
+
+    db_session.get(Reel, reel["id"]).status = "ready"
+    db_session.commit()
+    resp = client.post(f"/reels/{reel['id']}/generate", json={"style": "oil"})
+    assert resp.status_code == 400
+    # Leaving the style out keeps it.
+    assert client.post(f"/reels/{reel['id']}/generate", json={}).json()["style"] == "3d"
 
 
 def test_video_files_and_delete(client, db_session):
