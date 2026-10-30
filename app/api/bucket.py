@@ -37,7 +37,7 @@ from app.schemas.bucket import (
     BucketUploadStart,
     BucketVideos,
 )
-from app.services import bucket, downloader
+from app.services import bucket, downloader, music
 from app.services.naming import video_stem
 from app.tasks import dispatch
 
@@ -68,7 +68,8 @@ def _audio_key(key: str) -> str:
 
 def _moved(db: Session, key: str, new_key: str | None) -> None:
     """Reels, clips and music uploaded to ``key`` are now at ``new_key``
-    (renamed), or not in the bucket any more (None)."""
+    (renamed), or not in the bucket any more (None): a music track whose
+    audio was only there leaves the library."""
     for reel in db.query(Reel).filter(Reel.bucket["key"].as_string() == key):
         reel.bucket = {**reel.bucket, "key": new_key} if new_key else None
     for clip in db.query(Clip).filter(Clip.extra[("bucket", "key")].as_string() == key):
@@ -77,7 +78,13 @@ def _moved(db: Session, key: str, new_key: str | None) -> None:
             extra["bucket"] = {**clip.extra["bucket"], "key": new_key}
         clip.extra = extra
     for track in db.query(AudioTrack).filter(AudioTrack.bucket_copy["key"].as_string() == key):
-        track.bucket_copy = {**track.bucket_copy, "key": new_key} if new_key else None
+        if new_key:
+            track.bucket_copy = {**track.bucket_copy, "key": new_key}
+            track.filename = new_key.rsplit("/", 1)[-1]  # as the pickers show it
+        elif track.path and Path(track.path).exists():
+            track.bucket_copy = None  # a track from before, still on this computer
+        else:
+            music.forget(db, track)
     db.commit()
 
 
@@ -197,8 +204,8 @@ def audio_from_url(
 ) -> AudioTrack:
     """The audio of a link (YouTube, SoundCloud, ...) into the bucket's audio
     folder. Returns at once, "processing" with ``to_bucket``; the downloads
-    worker fetches it, sends it to the bucket and deletes it here (the row
-    goes too; "failed" with ``error`` if it couldn't). Poll ``GET /audio``."""
+    worker fetches it, sends it to the bucket and deletes it here ("ready",
+    or "failed" with ``error`` if it couldn't). Poll ``GET /audio``."""
     bucket.ensure_set_up()
     try:
         url = downloader.validate_url(body.url)
@@ -247,8 +254,8 @@ def rename_audio(
 def delete_audio(
     key: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)
 ) -> Response:
-    """Deletes any audio file from the bucket, for good (the music library on
-    this computer keeps its track)."""
+    """Deletes any audio file from the bucket, for good; its track leaves the
+    music library."""
     bucket.delete(_audio_key(key))
     _moved(db, key, None)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

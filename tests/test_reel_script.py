@@ -18,6 +18,13 @@ def test_scene_count_follows_the_length():
     assert reel_script.scene_count(300) == 15  # then one picture every 20 s
 
 
+def test_a_slower_voice_gets_fewer_words():
+    usual = reel_script.words_per_scene(40, "hi", 6, "hm_psi")
+    assert reel_script.words_per_scene(40, "hi", 6, "hm_calm") < usual  # speaks at 0.9
+    assert reel_script.words_per_scene(40, "hi", 6, "hm_young") > usual  # at 1.08
+    assert reel_script.words_per_scene(40, "hi", 6) == usual
+
+
 def test_prompt_has_language_platform_and_size():
     system, user = reel_script.build_messages("morning habits", "instagram", "hi", 35)
     text = system["content"]
@@ -29,6 +36,149 @@ def test_prompt_has_language_platform_and_size():
 
     fb = reel_script.build_messages("x", "facebook", "en", 35)[0]["content"]
     assert "share it with someone" in fb and "Facebook Reel" in fb
+
+
+def test_script_types_shape_the_scenes():
+    story = reel_script.build_messages("a lost dog", "instagram", "en", 35)[0]["content"]
+    assert "one story with a beginning, middle and end" in story  # the default
+    assert "Scenes 2 to 4 each carry on straight from the scene before" in story
+    assert "Scene 5 gives the story a clear ending" in story and "save this reel" in story
+    tips = reel_script.build_messages("x", "instagram", "en", 35, "tips")[0]["content"]
+    assert "Scenes 2 to 4 give one point each" in tips and "one story" not in tips
+    facts = reel_script.build_messages("x", "facebook", "en", 35, "facts")[0]["content"]
+    assert "explain the topic step by step" in facts and "share it with someone" in facts
+    # A character drawn in several pictures must look the same in each.
+    assert "described in full, the same way, in every image_prompt" in story
+
+
+def test_call_to_action_closes_the_last_scene():
+    assert "call_to_action" in reel_script.response_schema(3)["required"]
+    scenes = [{"narration": "Moti is home.", "image_prompt": "a dog"},
+              {"narration": "The end.", "image_prompt": "a door"}]  # fmt: skip
+    raw = {"scenes": scenes, "call_to_action": " Save this reel! "}
+    s = normalize_script(raw, topic="dog", language="en", scenes=2)
+    assert [sc["narration"] for sc in s["scenes"]] == ["Moti is home.", "The end. Save this reel!"]
+    # Already said in the last scene: not said twice.
+    again = {"scenes": [{"narration": "The end. Save this reel!", "image_prompt": "a door"}],
+             "call_to_action": "Save this reel!"}  # fmt: skip
+    s = normalize_script(again, topic="dog", language="en", scenes=1)
+    assert s["scenes"][0]["narration"] == "The end. Save this reel!"
+
+
+def test_call_to_action_already_in_the_last_scene_is_not_said_twice():
+    def last(narration, language="hi"):
+        raw = {"scenes": [{"narration": narration, "image_prompt": "p"}],
+               "call_to_action": "इस रील को सेव करें और फॉलो करें!"}  # fmt: skip
+        script = normalize_script(raw, topic="t", language=language, scenes=1)
+        return script["scenes"][0]["narration"]
+
+    own = "कहानी खत्म। ऐसे और वीडियो के लिए हमें फ़ॉलो करो!"
+    assert last(own) == own
+    # "Follow your dreams" is part of the story, not a call to action.
+    story_end = last("Follow your dreams.", "en")
+    assert story_end == "Follow your dreams. इस रील को सेव करें और फॉलो करें!"
+
+
+def test_description_goes_to_the_model_after_the_topic():
+    _, user = reel_script.build_messages(
+        "a lost dog", "instagram", "hi", 35, "story", "Start sad, end happy. Dog is named Moti."
+    )
+    text = user["content"]
+    assert text.startswith("Topic: a lost dog\nLength: 35 seconds.\n")
+    assert "within the rules above:\nStart sad, end happy. Dog is named Moti." in text
+    assert "No plot was given" not in text
+    # Always last: picture prompts in English (they once came back in Hindi).
+    reminder = (
+        "\nReminder: every narration in Hindi, written in Devanagari script, "
+        "every image_prompt in English."
+    )
+    assert text.endswith(reminder)
+    _, plain = reel_script.build_messages("a lost dog", "instagram", "hi", 35)
+    assert "No plot was given: invent a specific one" in plain["content"]  # a story needs a plot
+    assert plain["content"].endswith(reminder)
+    _, tips = reel_script.build_messages("habits", "instagram", "hi", 35, "tips")
+    assert "No plot was given" not in tips["content"]
+
+
+def test_writing_rules_against_mixed_languages_filler_and_looks_in_narration():
+    hindi = reel_script.build_messages("x", "instagram", "hi", 35)[0]["content"]
+    assert "never words from any other language" in hindi
+    assert "never in Roman letters" in hindi  # no Hinglish in a Hindi script
+    english = reel_script.build_messages("x", "instagram", "en", 35)[0]["content"]
+    assert "never words from any other language" in english and "Roman" not in english
+    assert "never repeat a line or an idea" in hindi and "one point of view" in hindi
+    assert "a narration never says anyone's age, hair, build, face or clothes" in hindi
+    assert "never a summary" in hindi  # stories show moments
+
+
+def test_spoken_length_counts_words_pace_and_pauses():
+    texts = [" ".join(["शब्द"] * 15), " ".join(["शब्द"] * 10)]
+    # 25 words at 2.5 a second, 0.25 s after each scene and 0.55 s more at the end.
+    assert reel_script.spoken_seconds(texts, "hi") == pytest.approx(10 + 0.5 + 0.55)
+    assert reel_script.spoken_seconds(texts, "hi", "hm_calm") == pytest.approx(25 / 2.25 + 1.05)
+
+
+def _scenes(*word_counts):
+    return [{"narration": " ".join(["शब्द"] * c), "image_prompt": "p"} for c in word_counts]
+
+
+def test_a_script_of_the_right_length_is_left_alone(monkeypatch):
+    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: pytest.fail("no rewrite needed"))
+    scenes = _scenes(24, 24, 24, 24)  # ~38 s of words + 1.55 s of pauses, for 40 s
+    reel_script.fit_length(scenes, "hi", 40)
+    assert [len(sc["narration"].split()) for sc in scenes] == [24] * 4
+
+
+def test_a_too_long_script_is_rewritten_shorter(monkeypatch):
+    asked = []
+
+    def fake_chat(messages, schema, **options):
+        asked.append(messages[-1]["content"])
+        return {"narrations": [" ".join(["छोटा"] * 22) for _ in range(4)]}
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    scenes = _scenes(40, 40, 40, 40)  # ~66 s for a 40 s reel
+    reel_script.fit_length(scenes, "hi", 40)
+    assert "they must take 40 seconds. Rewrite them shorter" in asked[0]
+    assert [len(sc["narration"].split()) for sc in scenes] == [22] * 4
+    assert all(sc["image_prompt"] == "p" for sc in scenes)  # the pictures stay
+
+
+def test_a_rewrite_that_does_not_help_is_dropped(monkeypatch):
+    scenes = _scenes(40, 40, 40, 40)
+    longer = {"narrations": [" ".join(["x"] * 60) for _ in range(4)]}
+    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: longer)
+    reel_script.fit_length(scenes, "hi", 40)
+    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: {"narrations": ["x"] * 3})
+    reel_script.fit_length(scenes, "hi", 40)  # the wrong count
+
+    def broken(*a, **k):
+        raise ScriptError("Ollama isn't running")
+
+    monkeypatch.setattr(reel_script, "_chat", broken)
+    reel_script.fit_length(scenes, "hi", 40)
+    assert [len(sc["narration"].split()) for sc in scenes] == [40] * 4
+
+
+def test_the_call_to_action_goes_on_after_the_length_fix(monkeypatch):
+    script = {
+        "scenes": [
+            {"narration": " ".join(["लंबा"] * 30), "image_prompt": "A dog"} for _ in range(3)
+        ],
+        "call_to_action": "रील सेव करें और फॉलो करें!",
+    }
+    asked = []
+
+    def fake_chat(messages, schema, **options):
+        asked.append(messages[-1]["content"])
+        if "narrations" in schema["properties"]:
+            return {"narrations": [" ".join(["छोटा"] * 8) for _ in range(3)]}
+        return script
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    s = reel_script.generate_script("dog", "instagram", "hi", 15)  # 3 scenes
+    assert "फॉलो" not in asked[1]  # the rewrite never sees it...
+    assert s["scenes"][-1]["narration"] == " ".join(["छोटा"] * 8) + " रील सेव करें और फॉलो करें!"
 
 
 def test_reply_is_cleaned_up():
@@ -91,7 +241,8 @@ def test_generate_script_asks_ollama_for_json(monkeypatch):
     sent = {}
 
     def fake_post(url, json, timeout):
-        sent.update(url=url, body=json)
+        sent.setdefault("url", url)  # the first call: the script
+        sent.setdefault("body", json)
         scenes = [{"narration": f"Line {i}.", "image_prompt": f"p{i}"} for i in range(5)]
         return _reply({"title": "T", "hooks": ["a", "b", "c"], "scenes": scenes,
                        "caption": "c", "hashtags": ["x"]})  # fmt: skip
@@ -111,14 +262,14 @@ def test_long_reel_gets_room_for_a_long_reply(monkeypatch):
     sent = {}
 
     def fake_post(url, json, timeout):
-        sent.update(body=json)
+        sent.setdefault("body", json)  # the first call: the script
         scenes = [{"narration": f"Line {i}.", "image_prompt": f"p{i}"} for i in range(15)]
         return _reply({"title": "T", "scenes": scenes})
 
     monkeypatch.setattr(reel_script.httpx, "post", fake_post)
     s = reel_script.generate_script("topic", "instagram", "hi", 300)
     assert sent["body"]["options"]["num_predict"] == 4500
-    assert sent["body"]["options"]["num_ctx"] == 5524
+    assert sent["body"]["options"]["num_ctx"] == 6548
     assert len(s["scenes"]) == 15
     assert "a few short spoken sentences" in sent["body"]["messages"][0]["content"]
 
@@ -203,3 +354,90 @@ def test_generate_script_explains_ollama_problems(monkeypatch):
     monkeypatch.setattr(reel_script.httpx, "post", lambda *a, **k: garbage)
     with pytest.raises(ScriptError, match="unreadable"):
         reel_script.generate_script("topic", "facebook", "en", 35)
+
+
+def test_picture_prompts_in_hindi_are_put_into_english(monkeypatch):
+    replies = [
+        {"scenes": [{"narration": "मोती खो गया।", "image_prompt": "बारिश में एक भूरा कुत्ता"},
+                    {"narration": "घर मिला।", "image_prompt": "A brown dog at a red door"}],
+         "call_to_action": ""},
+        {"prompts": ["A small brown dog in the rain"]},
+    ]  # fmt: skip
+    asked = []
+
+    def fake_chat(messages, schema, **options):
+        if "narrations" in schema["properties"]:
+            return {}  # the length fix: nothing usable, the script is kept
+        asked.append(messages[-1]["content"])
+        return replies[len(asked) - 1]
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    s = reel_script.generate_script("dog", "instagram", "hi", 15)
+    assert [sc["image_prompt"] for sc in s["scenes"]] == [
+        "A small brown dog in the rain", "A brown dog at a red door"
+    ]  # fmt: skip
+    # Only the Hindi one is sent to be translated.
+    assert "1. बारिश में एक भूरा कुत्ता" in asked[1] and "red door" not in asked[1]
+
+
+def test_a_failed_translation_keeps_the_picture_prompts(monkeypatch):
+    scenes = [{"narration": "a", "image_prompt": "बारिश"}]
+
+    def broken(messages, schema, **options):
+        raise ScriptError("Ollama isn't running")
+
+    monkeypatch.setattr(reel_script, "_chat", broken)
+    reel_script.english_picture_prompts(scenes)
+    assert scenes[0]["image_prompt"] == "बारिश"
+    # Still not English, or the wrong count: kept too.
+    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: {"prompts": ["बारिश में"]})
+    reel_script.english_picture_prompts(scenes)
+    assert scenes[0]["image_prompt"] == "बारिश"
+
+
+def test_a_stuck_model_gets_one_more_try(monkeypatch):
+    good = {"scenes": [{"narration": " ".join(["word"] * 12), "image_prompt": "A dog"}
+                       for _ in range(3)]}  # fmt: skip
+    stuck = [
+        httpx.Response(200, json={"message": {"content": '{"title": "T", "scenes": [{"narr'}}),
+        httpx.Response(500, json={"error": "prediction aborted, token repeat limit reached"}),
+    ]
+    for first in stuck:
+        calls = []
+
+        def fake_post(url, json, timeout, first=first, calls=calls):
+            calls.append(json)
+            return first if len(calls) == 1 else _reply(good)
+
+        monkeypatch.setattr(reel_script.httpx, "post", fake_post)
+        s = reel_script.generate_script("dog", "instagram", "en", 15)  # 3 scenes, ~15 s
+        assert len(calls) == 2 and len(s["scenes"]) == 3
+
+    # Stuck twice: the error goes to the UI ("Try again").
+    monkeypatch.setattr(reel_script.httpx, "post", lambda *a, **k: stuck[1])
+    with pytest.raises(ScriptError, match="repeat limit"):
+        reel_script.generate_script("dog", "instagram", "en", 15)
+
+
+def test_no_second_try_when_ollama_is_not_there(monkeypatch):
+    calls = []
+
+    def refused(*a, **k):
+        calls.append(1)
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(reel_script.httpx, "post", refused)
+    with pytest.raises(ScriptError, match="Ollama isn't running"):
+        reel_script.generate_script("dog", "instagram", "en", 15)
+    assert len(calls) == 1
+
+
+def test_json_bits_leaked_into_a_text_are_cleaned_up():
+    leaked = "चैनल को फॉलो करो!”, “और प्रेरणा के लिए नए वीडियो देखना मत भूलना।” ,"
+    assert reel_script._clean(leaked) == ("चैनल को फॉलो करो! और प्रेरणा के लिए नए वीडियो देखना मत भूलना।")
+    # Real quotes in a line stay, and so does a list of quoted words.
+    assert reel_script._clean('Say "hello", "thanks" and "sorry".') == (
+        'Say "hello", "thanks" and "sorry".'
+    )
+    assert reel_script._clean("करण कहता है, ‘राहुल, रुको!’") == "करण कहता है, ‘राहुल, रुको!’"
+    assert reel_script._clean("He said “run” and ran.") == "He said “run” and ran."

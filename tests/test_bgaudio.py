@@ -9,9 +9,12 @@ from pathlib import Path
 
 import pytest
 
+from app.config.settings import get_settings
 from app.models import AudioTrack, Clip, ClipStatus, Video, VideoStatus
 from app.services import bgaudio, ffmpeg
 from app.services.ffmpeg import FFmpegError, MediaInfo
+from app.services.storage import get_storage
+from tests.test_bucket_uploads import s3  # noqa: F401 - the fake bucket fixture
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +266,7 @@ def _fake_prepare(src, dst):
 
 
 def _upload_track(client, monkeypatch, name="song.mp3") -> str:
+    """Needs the ``s3`` fixture: uploaded music goes to the bucket."""
     monkeypatch.setattr(bgaudio, "prepare_track", _fake_prepare)
     resp = client.post("/audio/upload", files={"file": (name, b"ID3fake", "audio/mpeg")})
     assert resp.status_code == 201, resp.text
@@ -298,15 +302,60 @@ def _job_with_clips(client, db_session, tmp_path) -> tuple[str, dict[str, Clip]]
     return job_id, clips
 
 
-def test_upload_lists_and_serves_track(client, monkeypatch):
-    tid = _upload_track(client, monkeypatch)
+def test_upload_goes_to_the_bucket_and_plays_from_there(client, monkeypatch, s3):  # noqa: F811
+    tid = _upload_track(client, monkeypatch, "My song.mp3")
     listed = client.get("/audio").json()
     assert [t["id"] for t in listed] == [tid]
-    assert listed[0]["filename"] == "song.mp3" and listed[0]["duration_s"] == 95.5
-    assert client.get(f"/audio/{tid}/file").status_code == 200
+    track = listed[0]
+    assert (track["filename"], track["duration_s"], track["status"]) == (
+        "My_song.m4a",
+        95.5,
+        "ready",
+    )
+    assert track["bucket"]["key"] == "clipforge/audio/My_song.m4a"
+    assert s3.objects == {"clipforge/audio/My_song.m4a": (b"m4a", "audio/mp4")}  # converted
+    assert s3.metadata["clipforge/audio/My_song.m4a"] == {"clipforge": "converted-music"}
+    assert not get_storage().path_for(f"audio/{tid}").exists()  # nothing kept here
+    played = client.get(f"/audio/{tid}/file", follow_redirects=False)
+    assert played.headers["location"].endswith("/clipforge/audio/My_song.m4a")
+    # A name in use is never replaced.
+    other = _upload_track(client, monkeypatch, "My song.wav")
+    assert "clipforge/audio/My_song-2.m4a" in s3.objects and other != tid
 
 
-def test_upload_rejects_non_audio(client, monkeypatch):
+def test_music_needs_a_bucket(client, monkeypatch):
+    monkeypatch.setenv("BUCKET_NAME", "")
+    get_settings.cache_clear()
+    resp = client.post("/audio/upload", files={"file": ("song.mp3", b"ID3", "audio/mpeg")})
+    assert resp.status_code == 409
+    resp = client.post("/audio/from-url", json={"url": "https://www.youtube.com/watch?v=abc"})
+    assert resp.status_code == 409
+    assert client.get("/audio").json() == []
+
+
+def test_a_failed_bucket_upload_keeps_nothing(client, monkeypatch, s3):  # noqa: F811
+    def refused(*args, **kwargs):
+        raise RuntimeError("access denied")
+
+    monkeypatch.setattr(s3, "upload_file", refused)
+    monkeypatch.setattr(bgaudio, "prepare_track", _fake_prepare)
+    resp = client.post("/audio/upload", files={"file": ("song.mp3", b"ID3", "audio/mpeg")})
+    assert resp.status_code == 502
+    assert client.get("/audio").json() == [] and s3.objects == {}
+    assert not any(get_storage().path_for("audio").glob("*/*"))
+
+
+def test_delete_keeps_the_bucket_file_unless_asked(client, monkeypatch, s3):  # noqa: F811
+    tid = _upload_track(client, monkeypatch)
+    assert client.delete(f"/audio/{tid}").status_code == 204  # e.g. the Local tab
+    assert "clipforge/audio/song.m4a" in s3.objects
+    tid = _upload_track(client, monkeypatch)
+    assert client.delete(f"/audio/{tid}", params={"from_bucket": True}).status_code == 204
+    assert "clipforge/audio/song-2.m4a" not in s3.objects  # the music boxes' Delete
+    assert client.get("/audio").json() == []
+
+
+def test_upload_rejects_non_audio(client, monkeypatch, s3):  # noqa: F811
     bad_ext = client.post("/audio/upload", files={"file": ("x.txt", b"hi", "text/plain")})
     assert bad_ext.status_code == 400
 
@@ -320,7 +369,7 @@ def test_upload_rejects_non_audio(client, monkeypatch):
     assert client.get("/audio").json() == []
 
 
-def test_add_music_to_all_ready_clips(client, db_session, monkeypatch, tmp_path):
+def test_add_music_to_all_ready_clips(client, db_session, monkeypatch, tmp_path, s3):  # noqa: F811
     tid = _upload_track(client, monkeypatch)
     job_id, clips = _job_with_clips(client, db_session, tmp_path)
 
@@ -338,7 +387,7 @@ def test_add_music_to_all_ready_clips(client, db_session, monkeypatch, tmp_path)
     assert clips["rendering"].bg_audio_id is None
 
 
-def test_music_on_one_clip_and_remove(client, db_session, monkeypatch, tmp_path):
+def test_music_on_one_clip_and_remove(client, db_session, monkeypatch, tmp_path, s3):  # noqa: F811
     tid = _upload_track(client, monkeypatch)
     job_id, clips = _job_with_clips(client, db_session, tmp_path)
     one = clips["ready"]
@@ -367,7 +416,7 @@ def test_music_on_one_clip_and_remove(client, db_session, monkeypatch, tmp_path)
     assert db_session.get(AudioTrack, tid) is None
 
 
-def test_mute_original_flag_is_stored(client, db_session, monkeypatch, tmp_path):
+def test_mute_original_flag_is_stored(client, db_session, monkeypatch, tmp_path, s3):  # noqa: F811
     tid = _upload_track(client, monkeypatch)
     job_id, clips = _job_with_clips(client, db_session, tmp_path)
     one = clips["ready"]
@@ -389,7 +438,7 @@ def test_mute_original_flag_is_stored(client, db_session, monkeypatch, tmp_path)
     assert one.bg_audio_mute_original is False
 
 
-def test_apply_validates_input(client, db_session, monkeypatch, tmp_path):
+def test_apply_validates_input(client, db_session, monkeypatch, tmp_path, s3):  # noqa: F811
     job_id, clips = _job_with_clips(client, db_session, tmp_path)
     url = f"/jobs/{job_id}/background-audio"
     assert client.post(url, json={"audio_id": "nope"}).status_code == 404
@@ -399,11 +448,12 @@ def test_apply_validates_input(client, db_session, monkeypatch, tmp_path):
     assert client.post("/jobs/missing/background-audio", json={"audio_id": tid}).status_code == 404
 
 
-def test_grab_audio_from_link_runs_in_background(client, db_session):
+def test_grab_audio_from_link_runs_in_background(client, db_session, s3):  # noqa: F811
     resp = client.post("/audio/from-url", json={"url": "https://www.youtube.com/watch?v=abc"})
     assert resp.status_code == 202, resp.text
     track = resp.json()
     assert track["status"] == "processing" and track["progress"] == 0
+    assert track["to_bucket"] is True  # kept in the bucket once downloaded
     assert client.enqueued["audio_link"] == [track["id"]]
     # listed while downloading, but can't be put on clips until ready
     assert [t["status"] for t in client.get("/audio").json()] == ["processing"]
@@ -415,7 +465,7 @@ def test_grab_audio_from_link_runs_in_background(client, db_session):
     assert client.delete(f"/audio/{track['id']}").status_code == 204
 
 
-def test_uploaded_track_is_ready(client, monkeypatch):
+def test_uploaded_track_is_ready(client, monkeypatch, s3):  # noqa: F811
     _upload_track(client, monkeypatch)
     assert [t["status"] for t in client.get("/audio").json()] == ["ready"]
 

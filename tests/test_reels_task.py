@@ -42,11 +42,13 @@ def _reel(db_session, **fields) -> Reel:
 
 
 def test_script_task_saves_the_script(db_session, factory, monkeypatch):
-    reel = _reel(db_session, status="scripting")
-    monkeypatch.setattr(reel_script, "generate_script", lambda *a: SCRIPT)
+    reel = _reel(db_session, status="scripting", script_type="facts", description="Keep it calm.")
+    asked = []
+    monkeypatch.setattr(reel_script, "generate_script", lambda *a: asked.append(a) or SCRIPT)
     reels.write_reel_script.apply(args=[reel.id])
     db_session.refresh(reel)
     assert (reel.status, reel.script) == ("script_ready", SCRIPT)
+    assert asked[0][4:] == ("facts", "Keep it calm.", "af_heart")  # type, description, voice
     assert reel.error is None and reel.stage is None
 
 

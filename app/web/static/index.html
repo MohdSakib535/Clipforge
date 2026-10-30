@@ -336,7 +336,7 @@
               <template x-if="t.status==='processing'">
                 <span class="flex items-center gap-2 text-amber-300">
                   <span class="w-24 h-1.5 bg-slate-800 rounded"><span class="block h-1.5 bg-indigo-500 rounded" :style="`width:${t.progress||0}%`"></span></span>
-                  <span x-text="(t.progress||0) >= 99 ? 'Converting…' : `Downloading ${t.progress||0}%`"></span>
+                  <span x-text="(t.progress||0) >= 99 ? 'Saving to the bucket…' : `Downloading ${t.progress||0}%`"></span>
                 </span>
               </template>
               <span x-show="t.status==='failed'" class="text-rose-300 truncate max-w-md" x-text="`Failed: ${t.error||''}`"></span>
@@ -554,13 +554,17 @@
                   </template>
                 </select>
               </label>
-              <label class="text-xs text-slate-400">Voice
-                <select x-model="form.voice" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
-                  <template x-for="v in voicesFor(form.language)" :key="v.key">
-                    <option :value="v.key" :selected="v.key===form.voice" x-text="v.label"></option>
-                  </template>
-                </select>
-              </label>
+              <div class="text-xs text-slate-400">Voice
+                <div class="flex gap-1 mt-1">
+                  <select x-model="form.voice" class="flex-1 min-w-0 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                    <template x-for="v in voicesFor(form.language)" :key="v.key">
+                      <option :value="v.key" :selected="v.key===form.voice" x-text="v.label"></option>
+                    </template>
+                  </select>
+                  <button type="button" @click="listen(form.language, form.voice)" title="Listen to this voice"
+                    class="px-2.5 rounded bg-slate-700 hover:bg-slate-600 text-sm text-slate-100" x-text="listenIcon(form.language, form.voice)"></button>
+                </div>
+              </div>
             </div>
             <label class="block text-xs text-slate-400 mb-4">Picture style
               <select x-model="form.style" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
@@ -573,9 +577,22 @@
             <label class="block text-xs text-slate-400 mb-4">Length <span class="text-slate-200" x-text="form.duration_s < 60 ? `${form.duration_s} s` : fmtDur(form.duration_s)"></span>
               <input type="range" :min="options.duration.min" :max="options.duration.max" step="5" x-model.number="form.duration_s" class="block w-full mt-2" />
             </label>
+            <label class="block text-xs text-slate-400 mb-4">Script type
+              <select x-model="form.script_type" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                <template x-for="t in options.script_types" :key="t.key">
+                  <option :value="t.key" :selected="t.key===form.script_type" x-text="t.label"></option>
+                </template>
+              </select>
+            </label>
             <label class="block text-xs text-slate-400 mb-4">Topic
               <textarea x-model="form.topic" rows="3" placeholder="e.g. 3 morning habits that change your life"
                 class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+            </label>
+            <label class="block text-xs text-slate-400 mb-4">Description <span class="text-slate-500">(optional: how you want the script)</span>
+              <textarea x-model="form.description" rows="5" :maxlength="options.description_max"
+                placeholder="Plot, flow, characters, tone, ending. e.g. A poor village boy finds a magic crystal. Start: he is bullied. Middle: he finds out what the crystal can do. Twist: it belongs to the villain. End: he gives it back. Emotional tone."
+                class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+              <span class="block mt-1 text-right text-slate-500" x-text="`${form.description.length} / ${options.description_max}`"></span>
             </label>
             <button @click="createReel()" :disabled="creating || form.topic.trim().length < 3"
               class="w-full px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40"
@@ -633,6 +650,23 @@
                 This stopped without finishing (Docker or the Mac was restarted). You can start it again.
               </div>
               <div x-show="reel.error" class="text-sm text-rose-300 bg-rose-950/40 rounded-lg px-3 py-2 mb-4" x-text="reel.error"></div>
+              <details x-show="!(busy(reel) && reel.status==='scripting')" class="mb-4 bg-slate-800/40 rounded-lg px-3 py-2">
+                <summary class="text-xs text-slate-400 cursor-pointer">Script idea:
+                  <span class="text-slate-200" x-text="scriptTypeLabel(idea.script_type)"></span><span x-show="idea.description" class="text-slate-400"> · with your description</span>
+                </summary>
+                <label class="block text-xs text-slate-400 mt-3 mb-3">Script type
+                  <select x-model="idea.script_type" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                    <template x-for="t in options.script_types" :key="t.key">
+                      <option :value="t.key" :selected="t.key===idea.script_type" x-text="t.label"></option>
+                    </template>
+                  </select>
+                </label>
+                <label class="block text-xs text-slate-400 mb-2">Description
+                  <textarea x-model="idea.description" rows="4" :maxlength="options.description_max" placeholder="Plot, flow, characters, tone, ending."
+                    class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+                </label>
+                <p class="text-xs text-slate-500">Change these, then click <b x-text="reel.script ? 'Write again' : 'Try again'"></b> for a new script.</p>
+              </details>
               <button x-show="(reel.status==='failed' || reel.stalled) && !reel.script" @click="rewrite()"
                 class="mb-4 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm">Try again</button>
 
@@ -765,13 +799,17 @@
                     </div>
 
                     <div class="flex flex-wrap items-end gap-4">
-                      <label class="text-xs text-slate-400">Voice
-                        <select x-model="gen.voice" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
-                          <template x-for="v in voicesFor(reel.language)" :key="v.key">
-                            <option :value="v.key" :selected="v.key===gen.voice" x-text="v.label"></option>
-                          </template>
-                        </select>
-                      </label>
+                      <div class="text-xs text-slate-400">Voice
+                        <div class="flex gap-1 mt-1">
+                          <select x-model="gen.voice" class="bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                            <template x-for="v in voicesFor(reel.language)" :key="v.key">
+                              <option :value="v.key" :selected="v.key===gen.voice" x-text="v.label"></option>
+                            </template>
+                          </select>
+                          <button type="button" @click="listen(reel.language, gen.voice)" title="Listen to this voice"
+                            class="px-2.5 rounded bg-slate-700 hover:bg-slate-600 text-sm text-slate-100" x-text="listenIcon(reel.language, gen.voice)"></button>
+                        </div>
+                      </div>
                       <label class="text-xs text-slate-400">Picture style
                         <select x-model="gen.style" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
                           <template x-for="s in options.styles" :key="s.key">
@@ -818,7 +856,7 @@
                         <template x-if="t.status==='processing'">
                           <span class="flex items-center gap-2 text-amber-300">
                             <span class="w-24 h-1.5 bg-slate-900 rounded"><span class="block h-1.5 bg-indigo-500 rounded" :style="`width:${t.progress||0}%`"></span></span>
-                            <span x-text="(t.progress||0) >= 99 ? 'Converting…' : `Downloading ${t.progress||0}%`"></span>
+                            <span x-text="(t.progress||0) >= 99 ? 'Saving to the bucket…' : `Downloading ${t.progress||0}%`"></span>
                           </span>
                         </template>
                         <span x-show="t.status==='failed'" class="text-rose-300 truncate max-w-md" x-text="`Failed: ${t.error||''}`"></span>
@@ -826,7 +864,7 @@
                       </div>
                     </template>
                     <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <p class="text-slate-500">Added music is saved in your music list (also used in Clip a video). Only use music you're allowed to use.</p>
+                      <p class="text-slate-500">Added music is kept in your bucket (listed in every music picker and in the Bucket tab). Only use music you're allowed to use.</p>
                       <button x-show="isTrack(gen.musicId)" @click="deleteReelMusic()" :disabled="reelMusic.deleting"
                         class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40">Delete this track</button>
                     </div>
@@ -1075,7 +1113,7 @@
                   <template x-if="t.status==='processing'">
                     <span class="flex items-center gap-2 text-amber-300">
                       <span class="w-24 h-1.5 bg-slate-800 rounded"><span class="block h-1.5 bg-indigo-500 rounded" :style="`width:${t.progress||0}%`"></span></span>
-                      <span x-text="(t.progress||0) >= 99 ? 'Converting…' : `Downloading ${t.progress||0}%`"></span>
+                      <span x-text="(t.progress||0) >= 99 ? 'Saving to the bucket…' : `Downloading ${t.progress||0}%`"></span>
                     </span>
                   </template>
                   <span x-show="t.status==='failed'" class="text-rose-300 truncate max-w-md" x-text="`Failed: ${t.error||''}`"></span>
@@ -1416,8 +1454,8 @@ BUCKET_PREFIX=clipforge</pre>
                 <div>
                   <h2 class="text-lg font-medium">Music in your bucket (<span x-text="bucketMusic.length"></span>)</h2>
                   <p class="text-xs text-slate-400 mt-1">
-                    Background music goes straight to <code class="text-sky-300" x-text="status.audio_folder"></code>: nothing is kept on this computer.
-                    The music pickers in "Clip a video" and "Create a reel" list every audio file here (☁); the one you pick is brought to this computer to be mixed in.
+                    Background music goes straight to <code class="text-sky-300" x-text="status.audio_folder"></code>, added here or anywhere in the app: nothing is kept on this computer.
+                    The music pickers in "Clip a video" and "Create a reel" list every audio file here; the one you pick is brought to this computer only while a clip or reel is made.
                     <b>Rename</b> gives one a new name in the same folder; <b>Delete</b> removes it from the bucket for good.
                   </p>
                 </div>

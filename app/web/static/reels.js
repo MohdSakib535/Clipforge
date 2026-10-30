@@ -1,17 +1,26 @@
 // "Create a reel": a nested Alpine component inside clipforge(), so it shares
 // its toasts (error/notice), the music library (tracks) and helpers.
 function reelMaker() {
+  // The voice sample playing ("Listen"). Kept out of Alpine's reactive data:
+  // calling an <audio>'s methods through its proxy fails.
+  let sampleAudio = null;
   return {
     options: {
-      platforms: [], languages: [], styles: [], duration: { min: 15, max: 300, default: 35 }, max_scenes: 20,
+      platforms: [], languages: [], styles: [], script_types: [], description_max: 1500,
+      duration: { min: 15, max: 300, default: 35 }, max_scenes: 20,
       timing: { picture_s: 58, load_s: 5, script_s: 25, script_s_per_s: 0.5, render_s_per_s: 0.35 },
     },
-    form: { platform: "instagram", language: "hi", voice: "", style: "cinematic", duration_s: 35, topic: "" },
+    form: {
+      platform: "instagram", language: "hi", voice: "", style: "cinematic", duration_s: 35,
+      script_type: "story", topic: "", description: "",
+    },
     creating: false,
     reels: [],
     reel: null, // the open reel, as the server has it
     draft: null, // its script being edited
     gen: { voice: "", style: "cinematic", musicId: "", musicVolume: 20 },
+    idea: { script_type: "story", description: "" }, // the open reel's, for "Write again"
+    sample: { key: "", state: "" }, // the voice sample: state "loading" | "playing"
     // Adding music to the library from the reel editor (upload or a link).
     // pendingId: a link import still downloading; picked once it is ready.
     reelMusic: { uploading: false, link: "", grabbing: false, deleting: false, pendingId: null, suggesting: false },
@@ -42,6 +51,37 @@ function reelMaker() {
     },
     reelPlatformLabel(key) {
       return this.options.platforms.find((p) => p.key === key)?.label || key;
+    },
+    // ▶ next to a voice: a short line in that voice (made on the first click,
+    // ~2-3 s, then kept). A second click stops it.
+    listen(lang, voice) {
+      const key = `${lang}/${voice}`;
+      const again = this.sample.key === key;
+      this.stopSample();
+      if (again || !voice) return;
+      const audio = new Audio(`/reels/voices/${encodeURIComponent(lang)}/${encodeURIComponent(voice)}/sample`);
+      sampleAudio = audio;
+      this.sample = { key, state: "loading" };
+      audio.addEventListener("playing", () => { if (sampleAudio === audio) this.sample.state = "playing"; });
+      audio.addEventListener("ended", () => { if (sampleAudio === audio) this.stopSample(); });
+      audio.addEventListener("error", () => {
+        if (sampleAudio !== audio) return;
+        this.stopSample();
+        this.error = "Could not play this voice. Is Docker running?";
+      });
+      audio.play().catch(() => {});
+    },
+    stopSample() {
+      sampleAudio?.pause();
+      sampleAudio = null;
+      this.sample = { key: "", state: "" };
+    },
+    listenIcon(lang, voice) {
+      if (this.sample.key !== `${lang}/${voice}`) return "▶";
+      return this.sample.state === "loading" ? "…" : "■";
+    },
+    scriptTypeLabel(key) {
+      return this.options.script_types.find((t) => t.key === key)?.label || key;
     },
     styleLabel(key) {
       return this.options.styles.find((s) => s.key === key)?.label || key;
@@ -103,6 +143,7 @@ function reelMaker() {
       try {
         const reel = await this.postJSON("/reels", this.form);
         this.form.topic = "";
+        this.form.description = "";
         this.reels = [reel, ...this.reels];
         this.open(reel);
       } catch (e) {
@@ -115,6 +156,7 @@ function reelMaker() {
     open(reel) {
       this.reel = reel;
       this.draft = reel.script ? this.toDraft(reel.script) : null;
+      this.idea = { script_type: reel.script_type, description: reel.description };
       this.gen = {
         voice: reel.voice,
         style: reel.style,
@@ -205,7 +247,7 @@ function reelMaker() {
     async rewrite() {
       if (!confirm("Write a completely new script? Your edits to this one will be lost.")) return;
       try {
-        this.reel = await this.postJSON(`/reels/${this.reel.id}/rewrite`, {});
+        this.reel = await this.postJSON(`/reels/${this.reel.id}/rewrite`, this.idea);
         this.updateListItem(this.reel);
         this.watchReel();
       } catch (e) {
@@ -361,9 +403,9 @@ function reelMaker() {
         const r = await fetch("/audio/upload", { method: "POST", body: fd });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error?.message || `HTTP ${r.status}`);
-        await this.loadTracks();
+        await Promise.all([this.loadTracks(), this.loadBucketMusic()]);
         this.gen.musicId = j.id;
-        this.notice = `"${j.filename}" added and picked for this reel.`;
+        this.notice = `"${j.filename}" added to your bucket and picked for this reel.`;
       } catch (err) {
         this.error = "Audio upload failed: " + err.message;
       } finally {
@@ -403,18 +445,18 @@ function reelMaker() {
     async deleteReelMusic() {
       const t = this.tracks.find((x) => x.id === this.gen.musicId);
       if (!t) return;
-      const msg = `Delete "${t.filename}" from your music?\n\n` +
-        "Reels already made keep their sound; this track disappears from the music list.";
+      const msg = `Delete "${t.filename}" from your bucket, for good?\n\n` +
+        "Reels already made keep their sound; this track disappears from every music list.";
       if (!confirm(msg)) return;
       this.reelMusic.deleting = true;
       try {
-        const r = await fetch(`/audio/${t.id}`, { method: "DELETE" });
+        const r = await fetch(`/audio/${t.id}?from_bucket=true`, { method: "DELETE" });
         if (!r.ok) {
           throw new Error((await r.json().catch(() => ({}))).error?.message || "Delete failed");
         }
         this.gen.musicId = "";
-        await this.loadTracks();
-        this.notice = `"${t.filename}" deleted from your music.`;
+        await Promise.all([this.loadTracks(), this.loadBucketMusic()]);
+        this.notice = `"${t.filename}" deleted from your bucket.`;
       } catch (e) {
         this.error = e.message;
       } finally {
@@ -438,7 +480,10 @@ function reelMaker() {
     // Rough spoken length: words at the voice's pace plus the pauses between scenes.
     estimateS() {
       if (!this.draft) return 0;
-      const wps = this.options.languages.find((l) => l.key === this.reel.language)?.words_per_s || 2.8;
+      const lang = this.options.languages.find((l) => l.key === this.reel.language);
+      // A slower voice ("calm") takes longer for the same words.
+      const speed = lang?.voices.find((v) => v.key === this.gen.voice)?.speed || 1;
+      const wps = (lang?.words_per_s || 2.8) * speed;
       const words = this.draft.scenes.reduce((n, s) => n + this.words(s.narration), 0);
       return Math.round(words / wps + this.draft.scenes.length * 0.3 + 0.5);
     },

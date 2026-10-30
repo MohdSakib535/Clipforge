@@ -23,6 +23,10 @@ class Reel(Base, TimestampMixin):
     language: Mapped[str] = mapped_column(String(16))  # key of tts.LANGUAGES
     voice: Mapped[str] = mapped_column(String(32))  # Kokoro voice, e.g. "hf_alpha"
     topic: Mapped[str] = mapped_column(Text)
+    # How the script is shaped (key of reel_script.SCRIPT_TYPES) and the
+    # creator's own idea for it (plot, flow, tone), if any.
+    script_type: Mapped[str] = mapped_column(String(16), default="story", server_default="story")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_s: Mapped[int] = mapped_column(Integer)  # target length
     # How the pictures are drawn: key of reel_render.STYLES.
     style: Mapped[str] = mapped_column(String(16), default="cinematic", server_default="cinematic")

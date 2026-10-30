@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 
 from app.config.settings import get_settings
 from app.core.logging import bind_job_id, get_logger
 from app.db.session import SessionLocal
 from app.models import AudioTrack, Clip, ClipStatus
-from app.services import bgaudio
+from app.services import bgaudio, music
 from app.tasks.celery_app import celery_app
 
 log = get_logger(__name__)
@@ -19,26 +20,40 @@ log = get_logger(__name__)
 def mix_background_audio(clip_ids: list[str], approved_ids: list[str]) -> None:
     """Each clip's settings (track + volume) are already saved; this applies
     them. Clips are mixed in parallel and each is marked done as it finishes.
-    Only ffmpeg runs in the threads; DB writes stay on this thread."""
+    Only ffmpeg runs in the threads; DB writes stay on this thread. Each track
+    comes from the bucket once, for all its clips, and is deleted after."""
     approved = set(approved_ids)
-    with SessionLocal() as db:
+    with SessionLocal() as db, ExitStack() as copies:
         work: list[tuple[str, str, str | None, int, bool]] = []
+        copy_of: dict[str, str | None] = {}  # track id -> its copy here
+        not_fetched: dict[str, str] = {}  # track id -> why
         for clip_id in clip_ids:
             clip = db.get(Clip, clip_id)
             if clip is None or not clip.file_path:
                 continue
             bind_job_id(clip.job_id)
             track = db.get(AudioTrack, clip.bg_audio_id) if clip.bg_audio_id else None
-            music = track.path if track else None
+            if track is not None and track.id not in copy_of and track.id not in not_fetched:
+                try:
+                    copy_of[track.id] = copies.enter_context(music.working_copy(track))
+                except music.MusicError as exc:
+                    not_fetched[track.id] = str(exc)
+            if track is not None and track.id in not_fetched:
+                # The clip file is untouched, so it stays playable.
+                clip.error = not_fetched[track.id][:2000]
+                clip.status = ClipStatus.approved if clip.id in approved else ClipStatus.ready
+                db.commit()
+                continue
+            path = copy_of[track.id] if track is not None else None
             work.append(
-                (clip.id, clip.file_path, music, clip.bg_audio_volume, clip.bg_audio_mute_original)
+                (clip.id, clip.file_path, path, clip.bg_audio_volume, clip.bg_audio_mute_original)
             )
 
         workers = max(1, min(get_settings().copy_concurrency, len(work)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(bgaudio.apply, path, music, volume, mute_original=mute): clip_id
-                for clip_id, path, music, volume, mute in work
+                pool.submit(bgaudio.apply, path, track_path, volume, mute_original=mute): clip_id
+                for clip_id, path, track_path, volume, mute in work
             }
             for future in as_completed(futures):
                 clip = db.get(Clip, futures[future])

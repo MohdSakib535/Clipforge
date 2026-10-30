@@ -10,6 +10,7 @@ kokoro-onnx and numpy are imported lazily: the API only needs ``LANGUAGES``.
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,10 +33,11 @@ class Language:
     label: str  # shown in the UI
     prompt_name: str  # how the script writer is told which language to write
     kokoro_lang: str  # espeak-ng code Kokoro turns the text into sounds with
-    voices: dict[str, str] = field(default_factory=dict)  # Kokoro voice -> label
+    voices: dict[str, str] = field(default_factory=dict)  # Kokoro voice or MIXES key -> label
     # Kokoro's speaking rate (measured), used to size the script to the length.
     words_per_s: float = 2.8
     caption_font: str = "Noto Sans"
+    sample: str = ""  # read out by the "Listen" button next to the voices
 
 
 # Only languages Kokoro reads well through espeak-ng. Japanese and Chinese need
@@ -45,9 +47,14 @@ LANGUAGES: dict[str, Language] = {
         "Hindi",
         "Hindi, written in Devanagari script",
         "hi",
-        {"hf_alpha": "Female 1", "hf_beta": "Female 2", "hm_omega": "Male 1", "hm_psi": "Male 2"},
+        {"hf_alpha": "Female 1", "hf_beta": "Female 2", "hf_mix": "Female 3 · mixed",
+         "hf_low": "Female 4 · soft", "hf_calm": "Female 5 · calm",
+         "hf_bright": "Female 6 · bright",
+         "hm_omega": "Male 1", "hm_psi": "Male 2", "hm_mix": "Male 3 · mixed",
+         "hm_deep": "Male 4 · deep", "hm_calm": "Male 5 · calm", "hm_young": "Male 6 · young"},
         words_per_s=2.5,
         caption_font="Noto Sans Devanagari",
+        sample="नमस्ते! यह आपकी रील की आवाज़ है। सुनिए, आज की कहानी बहुत खास है।",
     ),
     "en": Language(
         "English",
@@ -56,15 +63,68 @@ LANGUAGES: dict[str, Language] = {
         {"af_heart": "Female 1", "af_bella": "Female 2",
          "am_michael": "Male 1", "am_fenrir": "Male 2"},
         words_per_s=3.0,
+        sample="Hi! This is the voice of your reel. Listen, today's story is a special one.",
     ),
-    "es": Language("Spanish", "Spanish", "es", {"ef_dora": "Female", "em_alex": "Male"}),
-    "fr": Language("French", "French", "fr-fr", {"ff_siwis": "Female"}),
-    "it": Language("Italian", "Italian", "it", {"if_sara": "Female", "im_nicola": "Male"}),
+    "es": Language(
+        "Spanish", "Spanish", "es", {"ef_dora": "Female", "em_alex": "Male"},
+        sample="¡Hola! Esta es la voz de tu reel. Escucha, la historia de hoy es muy especial.",
+    ),
+    "fr": Language(
+        "French", "French", "fr-fr", {"ff_siwis": "Female"},
+        sample="Bonjour ! Voici la voix de votre reel. Écoutez, l'histoire d'aujourd'hui est "
+        "très spéciale.",
+    ),
+    "it": Language(
+        "Italian", "Italian", "it", {"if_sara": "Female", "im_nicola": "Male"},
+        sample="Ciao! Questa è la voce del tuo reel. Ascolta, la storia di oggi è davvero "
+        "speciale.",
+    ),
     "pt": Language(
         "Portuguese (Brazil)", "Brazilian Portuguese", "pt-br",
         {"pf_dora": "Female", "pm_alex": "Male"},
+        sample="Olá! Esta é a voz do seu reel. Escute, a história de hoje é muito especial.",
     ),
 }  # fmt: skip
+
+
+@dataclass(frozen=True)
+class VoiceMix:
+    """A voice made from Kokoro's own voices of the same language, so the
+    accent stays: a 50/50 blend of two of them and/or a small change of pitch
+    (semitones; the voice's formants are kept, so it still sounds natural) and
+    of pace (Kokoro's speed)."""
+
+    base: str
+    blend: str | None = None
+    pitch: float = 0.0
+    speed: float = 1.0
+
+
+# Kokoro has only two Hindi voices of each kind; these make more types from
+# them. Measured pitch: hf_alpha ~203 Hz, hf_beta ~182, hm_omega ~124, hm_psi ~131.
+MIXES: dict[str, VoiceMix] = {
+    "hf_mix": VoiceMix("hf_alpha", blend="hf_beta"),
+    "hf_low": VoiceMix("hf_beta", pitch=-1.5),
+    "hf_calm": VoiceMix("hf_alpha", pitch=-0.5, speed=0.9),
+    "hf_bright": VoiceMix("hf_alpha", pitch=1.5, speed=1.08),
+    "hm_mix": VoiceMix("hm_omega", blend="hm_psi"),
+    "hm_deep": VoiceMix("hm_omega", pitch=-3.0),
+    "hm_calm": VoiceMix("hm_psi", pitch=-1.0, speed=0.9),
+    "hm_young": VoiceMix("hm_psi", pitch=1.5, speed=1.08),
+}
+
+
+def voice_speed(voice: str | None) -> float:
+    """How fast ``voice`` speaks compared with its language's usual pace."""
+    mix = MIXES.get(voice or "")
+    return mix.speed if mix else 1.0
+
+
+def voice_key(voice: str) -> str:
+    """What makes the voice, for naming cached voice clips: changing a mix
+    makes its clips again."""
+    mix = MIXES.get(voice)
+    return f"{voice}={mix.base}+{mix.blend}@{mix.pitch}x{mix.speed}" if mix else voice
 
 
 def default_voice(language: str) -> str:
@@ -135,16 +195,53 @@ def synthesize(text: str, language: str, voice: str, speed: float = 1.0):
     lang = LANGUAGES.get(language)
     if lang is None or voice not in lang.voices:
         raise TTSError(f"Unknown voice {voice!r} for language {language!r}")
+    mix = MIXES.get(voice)
     try:
         kokoro = _get_kokoro()  # also points espeak-ng at its library
-        return kokoro.create(
+        style = voice
+        if mix is not None:
+            style = kokoro.get_voice_style(mix.base)
+            if mix.blend:
+                style = (style + kokoro.get_voice_style(mix.blend)) / 2
+            speed *= mix.speed
+        samples, sample_rate = kokoro.create(
             _phonemes(kokoro, text, lang.kokoro_lang),
-            voice=voice,
+            voice=style,
             speed=speed,
             lang=lang.kokoro_lang,
             is_phonemes=True,
         )
+        if mix is not None and mix.pitch:
+            samples = shift_pitch(samples, sample_rate, mix.pitch)
+        return samples, sample_rate
     except TTSError:
         raise
     except Exception as exc:
         raise TTSError(f"Voice-over failed: {exc}") from exc
+
+
+def pitch_cmd(sample_rate: int, semitones: float) -> list[str]:
+    """FFmpeg reading and writing raw mono float samples, the pitch moved by
+    ``semitones`` with the formants kept (no "chipmunk" or "monster" sound)."""
+    ratio = 2 ** (semitones / 12)
+    return [
+        "ffmpeg", "-v", "error",
+        "-f", "f32le", "-ar", str(sample_rate), "-ac", "1", "-i", "pipe:0",
+        "-af", f"rubberband=pitch={ratio:.5f}:formant=preserved:pitchq=quality",
+        "-f", "f32le", "pipe:1",
+    ]  # fmt: skip
+
+
+def shift_pitch(samples, sample_rate: int, semitones: float):
+    import numpy as np
+
+    proc = subprocess.run(
+        pitch_cmd(sample_rate, semitones),
+        input=np.asarray(samples, dtype="<f4").tobytes(),
+        capture_output=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        tail = proc.stderr.decode(errors="replace")[-300:]
+        raise TTSError(f"Changing the voice's pitch failed: {tail}")
+    return np.frombuffer(proc.stdout, dtype="<f4").copy()

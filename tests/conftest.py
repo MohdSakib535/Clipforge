@@ -42,6 +42,19 @@ def _clear_settings_cache():
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_bucket(monkeypatch):
+    """Inside the Docker containers the real BUCKET_* keys are in the
+    environment: a test that forgets the fake bucket (the ``s3`` fixture,
+    which replaces this) must fail, never send files to the real one."""
+    from app.services import bucket
+
+    def refuse(settings):
+        raise AssertionError("This test reached the real bucket: use the s3 fixture.")
+
+    monkeypatch.setattr(bucket, "_client", refuse)
+
+
 @pytest.fixture
 def db_session():
     engine = create_engine(

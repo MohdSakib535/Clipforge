@@ -16,7 +16,7 @@ from app.api.errors import AppError, ConflictError, NotFoundError
 from app.config.settings import get_settings
 from app.db.session import get_db
 from app.models import AudioTrack, Reel, User
-from app.schemas.reel import ReelCreate, ReelGenerate, ReelOut, ReelScript
+from app.schemas.reel import ReelCreate, ReelGenerate, ReelOut, ReelRewrite, ReelScript
 from app.services import bucket, reel_render, reel_script, tts
 from app.services.naming import video_stem
 from app.services.storage import get_storage
@@ -76,6 +76,8 @@ def _out(reel: Reel) -> ReelOut:
         language=reel.language,
         voice=reel.voice,
         topic=reel.topic,
+        script_type=reel.script_type,
+        description=reel.description or "",
         duration_s=reel.duration_s,
         style=reel.style,
         status=reel.status,
@@ -105,6 +107,12 @@ def _check_voice(language: str, voice: str | None) -> str:
     return voice
 
 
+def _check_script_type(script_type: str) -> str:
+    if script_type not in reel_script.SCRIPT_TYPES:
+        raise AppError(f"Unknown script type '{script_type}'", code="bad_script_type")
+    return script_type
+
+
 def _check_style(style: str) -> str:
     if style not in reel_render.STYLES:
         raise AppError(f"Unknown picture style '{style}'", code="bad_style")
@@ -132,11 +140,16 @@ def options() -> dict:
                 "key": k,
                 "label": lang.label,
                 "words_per_s": lang.words_per_s,
-                "voices": [{"key": v, "label": label} for v, label in lang.voices.items()],
+                "voices": [
+                    {"key": v, "label": label, "speed": tts.voice_speed(v)}
+                    for v, label in lang.voices.items()
+                ],
             }
             for k, lang in tts.LANGUAGES.items()
         ],
         "styles": [{"key": k, "label": s.label} for k, s in reel_render.STYLES.items()],
+        "script_types": [{"key": k, "label": t.label} for k, t in reel_script.SCRIPT_TYPES.items()],
+        "description_max": reel_script.MAX_DESCRIPTION,
         "duration": {
             "min": reel_script.MIN_DURATION_S,
             "max": reel_script.MAX_DURATION_S,
@@ -156,6 +169,24 @@ def options() -> dict:
     }
 
 
+@router.get("/voices/{language}/{voice}/sample")
+def voice_sample(language: str, voice: str, user: User = Depends(get_current_user)) -> FileResponse:
+    """A short line read by ``voice``, for the "Listen" button. Made on the
+    first request (~2-3 s), then kept."""
+    voice = _check_voice(language, voice)
+    line = tts.LANGUAGES[language].sample
+    folder = Path(get_settings().storage_path) / ".kokoro" / "samples"
+    path = folder / f"{language}-{voice}-{reel_render._key(line, tts.voice_key(voice))}.wav"
+    if not path.exists():
+        try:
+            samples, sample_rate = tts.synthesize(line, language, voice)
+        except tts.TTSError as exc:
+            raise AppError(str(exc), code="voice_failed", status_code=502) from exc
+        folder.mkdir(parents=True, exist_ok=True)
+        reel_render.write_wav(path, samples, sample_rate)
+    return FileResponse(path, media_type="audio/wav")
+
+
 @router.post("", response_model=ReelOut, status_code=status.HTTP_202_ACCEPTED)
 def create_reel(
     body: ReelCreate,
@@ -167,12 +198,15 @@ def create_reel(
         raise AppError(f"Unknown platform '{body.platform}'", code="bad_platform")
     voice = _check_voice(body.language, body.voice)
     style = _check_style(body.style)
+    script_type = _check_script_type(body.script_type)
     reel = Reel(
         user_id=user.id,
         platform=body.platform,
         language=body.language,
         voice=voice,
         topic=body.topic,
+        script_type=script_type,
+        description=body.description or None,
         duration_s=body.duration_s,
         style=style,
         status="scripting",
@@ -241,11 +275,19 @@ def music_suggestion(
 
 @router.post("/{reel_id}/rewrite", response_model=ReelOut, status_code=status.HTTP_202_ACCEPTED)
 def rewrite_script(
-    reel_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+    reel_id: str,
+    body: ReelRewrite | None = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> ReelOut:
-    """Ask the LLM for a new script (replaces the current one)."""
+    """Ask the LLM for a new script (replaces the current one), optionally
+    with another script type or description."""
     reel = _get(db, user, reel_id)
     _not_busy(reel)
+    if body is not None and body.script_type is not None:
+        reel.script_type = _check_script_type(body.script_type)
+    if body is not None and body.description is not None:
+        reel.description = body.description or None
     reel.status = "scripting"
     reel.stage = "Writing the script"
     reel.error = None

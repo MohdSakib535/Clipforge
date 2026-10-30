@@ -5,7 +5,12 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.bucket import BucketCopy
-from app.services.reel_script import MAX_DURATION_S, MAX_SCENES, MIN_DURATION_S
+from app.services.reel_script import (
+    MAX_DESCRIPTION,
+    MAX_DURATION_S,
+    MAX_SCENES,
+    MIN_DURATION_S,
+)
 
 
 class ReelCreate(BaseModel):
@@ -17,6 +22,21 @@ class ReelCreate(BaseModel):
     voice: str | None = Field(default=None, description="Omit for the language's first voice.")
     duration_s: int = Field(default=35, ge=MIN_DURATION_S, le=MAX_DURATION_S)
     style: str = Field(default="cinematic", description="A picture style from GET /reels/options")
+    script_type: str = Field(default="story", description="A script type from GET /reels/options")
+    description: str = Field(
+        default="", max_length=MAX_DESCRIPTION, description="Plot, flow, tone: how to write it."
+    )
+
+
+class ReelRewrite(BaseModel):
+    """ "Write again", optionally with another script type or description."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    script_type: str | None = Field(default=None, description="Omit to keep the current type.")
+    description: str | None = Field(
+        default=None, max_length=MAX_DESCRIPTION, description="Omit to keep; empty to drop."
+    )
 
 
 class ReelScene(BaseModel):
@@ -64,6 +84,8 @@ class ReelOut(BaseModel):
     language: str
     voice: str
     topic: str
+    script_type: str
+    description: str = ""
     duration_s: int
     style: str
     status: str  # scripting | script_ready | generating | ready | failed

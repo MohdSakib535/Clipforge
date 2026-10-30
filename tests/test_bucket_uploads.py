@@ -22,6 +22,7 @@ class FakeS3:
 
     def __init__(self):
         self.objects: dict[str, tuple[bytes, str]] = {}  # key -> (data, content type)
+        self.metadata: dict[str, dict[str, str]] = {}  # key -> its "x-amz-meta-" tags
         self.started: dict[str, dict] = {}  # upload id -> {"key", "type", "parts"}
         self.aborted: list[str] = []
         self.deleted: list[str] = []
@@ -33,7 +34,7 @@ class FakeS3:
         if status != 200:
             reply = {"Error": {"Code": str(status)}, "ResponseMetadata": {"HTTPStatusCode": status}}
             raise boto_errors.ClientError(reply, "HeadObject")
-        return {"ContentLength": len(self.objects[Key][0])}
+        return {"ContentLength": len(self.objects[Key][0]), "Metadata": self.metadata.get(Key, {})}
 
     def create_multipart_upload(self, Bucket, Key, ContentType):
         upload_id = f"up-{len(self.started) + 1}"
@@ -59,9 +60,11 @@ class FakeS3:
 
     def upload_file(self, path, bucket_name, key, ExtraArgs):
         self.objects[key] = (Path(path).read_bytes(), ExtraArgs["ContentType"])
+        self.metadata[key] = ExtraArgs.get("Metadata", {})
 
     def copy_object(self, Bucket, Key, CopySource):
         self.objects[Key] = self.objects[CopySource["Key"]]
+        self.metadata[Key] = self.metadata.get(CopySource["Key"], {})  # S3 copies the tags
 
     def download_file(self, Bucket, Key, Filename):
         Path(Filename).write_bytes(self.objects[Key][0])
@@ -70,6 +73,7 @@ class FakeS3:
         if self.deny_delete:
             raise boto_errors.ClientError({"Error": {"Code": "AccessDenied"}}, "DeleteObject")
         self.objects.pop(Key, None)  # S3: no error if it isn't there
+        self.metadata.pop(Key, None)
         self.deleted.append(Key)
 
     def get_paginator(self, operation):

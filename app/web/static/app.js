@@ -744,6 +744,7 @@ function clipforge() {
       } else if (!busy && this._trackPoll) {
         clearInterval(this._trackPoll);
         this._trackPoll = null;
+        this.loadBucketMusic(); // a link import is in the bucket now
       }
     },
 
@@ -830,9 +831,9 @@ function clipforge() {
         const r = await fetch("/audio/upload", { method: "POST", body: fd });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error?.message || `HTTP ${r.status}`);
-        await this.loadTracks();
+        await Promise.all([this.loadTracks(), this.loadBucketMusic()]);
         this.music.trackId = j.id;
-        this.notice = `"${j.filename}" added. Pick it and click "Add to all clips", or tick "Background music" on a clip.`;
+        this.notice = `"${j.filename}" added to your bucket. Pick it and click "Add to all clips", or tick "Background music" on a clip.`;
       } catch (err) {
         this.error = "Audio upload failed: " + err.message;
       } finally {
@@ -842,13 +843,13 @@ function clipforge() {
 
     async deleteTrack() {
       const t = this.tracks.find((x) => x.id === this.music.trackId);
-      if (!t || !confirm(`Delete "${t.filename}" from your music?`)) return;
-      const r = await fetch(`/audio/${t.id}`, { method: "DELETE" });
+      if (!t || !confirm(`Delete "${t.filename}" from your bucket, for good?`)) return;
+      const r = await fetch(`/audio/${t.id}?from_bucket=true`, { method: "DELETE" });
       if (!r.ok) {
         this.error = (await r.json().catch(() => ({}))).error?.message || "Delete failed";
         return;
       }
-      await this.loadTracks();
+      await Promise.all([this.loadTracks(), this.loadBucketMusic()]);
     },
 
     // One endpoint for both: clipIds = [id] for one clip, null for every ready

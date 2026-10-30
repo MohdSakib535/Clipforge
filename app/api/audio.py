@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+import functools
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Response, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -21,8 +21,9 @@ from app.schemas.audio import (
     BackgroundAudioApply,
     BackgroundAudioResult,
 )
-from app.services import bgaudio, bucket, downloader
+from app.services import bgaudio, bucket, downloader, music
 from app.services.ffmpeg import FFmpegError
+from app.services.naming import video_stem
 from app.services.storage import get_storage
 from app.tasks import dispatch
 
@@ -48,7 +49,9 @@ async def upload_audio(
     user: User = Depends(get_current_user),
 ) -> AudioTrack:
     """Upload a background-music file. It is converted once (stereo AAC at the
-    clips' loudness) in a thread, so other requests are never held up."""
+    clips' loudness) in a thread, so other requests are never held up, then
+    goes to the bucket's audio folder; nothing is kept on this computer."""
+    bucket.ensure_set_up()
     name = file.filename or "audio.mp3"
     ext = Path(name).suffix.lower()
     if ext not in bgaudio.AUDIO_EXTS:
@@ -86,17 +89,24 @@ async def upload_audio(
             raise AppError(
                 "Could not read this audio file.", code="bad_audio", status_code=400
             ) from None
-    except AppError:
-        storage.delete(f"audio/{track.id}")
+        key = await asyncio.to_thread(
+            bucket.free_key, bucket.audio_folder(), video_stem(Path(name).stem), ".m4a"
+        )
+        await asyncio.to_thread(
+            functools.partial(bucket.upload, dst, key, metadata=music.CONVERTED)
+        )
+        size_bytes = dst.stat().st_size
+    except Exception:
         db.delete(track)
         db.commit()
         raise
     finally:
-        raw.unlink(missing_ok=True)
+        storage.delete(f"audio/{track.id}")  # in the bucket now (or failed): nothing kept here
 
-    track.path = str(dst)
-    track.size_bytes = dst.stat().st_size
+    track.filename = key.rsplit("/", 1)[-1]
+    track.size_bytes = size_bytes
     track.duration_s = round(info.duration_s, 3)
+    track.bucket_copy = music.in_bucket(key, converted=True)
     track.status = "ready"
     db.commit()
     db.refresh(track)
@@ -110,8 +120,10 @@ def audio_from_url(
     user: User = Depends(get_current_user),
 ) -> AudioTrack:
     """Grab just the audio of a link (YouTube, SoundCloud, ...) as a music
-    track. Returns at once with status "processing"; the download runs on the
-    downloads worker. Poll ``GET /audio`` until it is "ready"."""
+    track, kept in the bucket. Returns at once with status "processing"; the
+    download runs on the downloads worker. Poll ``GET /audio`` until it is
+    "ready"."""
+    bucket.ensure_set_up()
     try:
         url = downloader.validate_url(body.url)
     except downloader.DownloadError as exc:
@@ -122,6 +134,7 @@ def audio_from_url(
         status="processing",
         source_url=url,
         progress=0,
+        to_bucket=True,
     )
     db.add(track)
     db.commit()
@@ -138,10 +151,10 @@ async def audio_from_bucket(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> AudioTrack:
-    """Bring an audio file from the bucket into the music library, so it can
-    be picked as background music. Downloaded and converted once, in a thread
-    (as an upload); a file already in the library (brought in, or uploaded
-    from here) is not fetched again."""
+    """Add an audio file in the bucket to the music library, so it can be
+    picked as background music. Nothing is downloaded: the file stays in the
+    bucket and is fetched while a clip or reel is made. A file already in the
+    library gives its track."""
     key = body.key
     ext = Path(key).suffix.lower()
     if ext not in bgaudio.AUDIO_EXTS or ".." in key.split("/"):
@@ -158,49 +171,23 @@ async def audio_from_bucket(
     if kept is not None:
         return kept
     limit = get_settings().max_audio_upload_bytes
-    if await asyncio.to_thread(bucket.size, key) > limit:
+    about = await asyncio.to_thread(bucket.head, key)
+    size_bytes = about["ContentLength"]
+    if size_bytes > limit:
         raise AppError(
             f"Audio file is larger than {limit // (1024 * 1024)} MB",
             code="too_large",
             status_code=413,
         )
-    storage = get_storage()
-
-    track = AudioTrack(user_id=user.id, filename=key.rsplit("/", 1)[-1], status="processing")
+    # The pickers don't offer the bucket file again: it is this track now.
+    track = AudioTrack(
+        user_id=user.id,
+        filename=key.rsplit("/", 1)[-1],
+        size_bytes=size_bytes,
+        status="ready",
+        bucket_copy=music.in_bucket(key, converted=music.is_converted(about.get("Metadata"))),
+    )
     db.add(track)
-    db.commit()
-    db.refresh(track)
-
-    raw = storage.path_for(f"audio/{track.id}/upload{ext}")
-    dst = storage.path_for(f"audio/{track.id}/track.m4a")
-    raw.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        await asyncio.to_thread(bucket.download, key, raw)
-        info = await asyncio.to_thread(bgaudio.prepare_track, raw, dst)
-    except Exception as exc:
-        storage.delete(f"audio/{track.id}")
-        db.delete(track)
-        db.commit()
-        if isinstance(exc, FFmpegError):
-            raise AppError(
-                "Could not read this audio file.", code="bad_audio", status_code=400
-            ) from None
-        raise
-    finally:
-        raw.unlink(missing_ok=True)
-
-    track.path = str(dst)
-    track.size_bytes = dst.stat().st_size
-    track.duration_s = round(info.duration_s, 3)
-    track.status = "ready"
-    # It came from there: it shows as in the bucket, and the pickers don't
-    # offer the bucket file again.
-    version = dst.stat().st_mtime_ns
-    track.bucket_copy = {
-        "key": key,
-        "version": version,
-        "uploaded_at": datetime.now(UTC).isoformat(),
-    }
     db.commit()
     db.refresh(track)
     return track
@@ -226,18 +213,27 @@ def audio_file(
     audio_id: str,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
-) -> FileResponse:
-    """The converted track, for the preview player."""
+) -> Response:
+    """The track for the preview player: played straight from the bucket (a
+    track from before, kept on this computer, from here)."""
     track = _get_track(db, user, audio_id)
-    return FileResponse(track.path, media_type="audio/mp4", content_disposition_type="inline")
+    if track.path and Path(track.path).exists():
+        return FileResponse(track.path, media_type="audio/mp4", content_disposition_type="inline")
+    key = music.bucket_key(track)
+    if not key:
+        raise NotFoundError("Audio track not found")
+    return RedirectResponse(bucket.link(key))
 
 
 @router.delete("/audio/{audio_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_audio(
     audio_id: str,
+    from_bucket: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Response:
+    """Drop a track from the music library; ``from_bucket`` deletes its file
+    in the bucket too, for good (the music boxes' Delete)."""
     track = _get_track(db, user, audio_id, ready=False)
     in_use = (
         db.query(Clip)
@@ -256,11 +252,10 @@ def delete_audio(
             code="audio_in_use",
             status_code=status.HTTP_409_CONFLICT,
         )
-    db.query(Clip).filter(Clip.bg_audio_id == track.id).update({Clip.bg_audio_id: None})
-    # Reels keep the music already mixed into their video; the next render has none.
-    db.query(Reel).filter(Reel.music_id == track.id).update({Reel.music_id: None})
-    get_storage().delete(f"audio/{track.id}")
-    db.delete(track)
+    key = music.bucket_key(track)
+    if from_bucket and key:
+        bucket.delete(key)  # first: if the bucket refuses, nothing has changed
+    music.forget(db, track)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

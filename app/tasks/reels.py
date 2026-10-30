@@ -14,7 +14,7 @@ from app.config.settings import get_settings
 from app.core.logging import get_logger
 from app.db.session import SessionLocal
 from app.models import AudioTrack, Reel
-from app.services import imagegen, reel_render, reel_script, tts
+from app.services import imagegen, music, reel_render, reel_script, tts
 from app.services.ffmpeg import FFmpegError
 from app.services.storage import get_storage
 from app.tasks.celery_app import celery_app
@@ -41,7 +41,13 @@ def write_reel_script(reel_id: str) -> None:
             return
         try:
             script = reel_script.generate_script(
-                reel.topic, reel.platform, reel.language, reel.duration_s
+                reel.topic,
+                reel.platform,
+                reel.language,
+                reel.duration_s,
+                reel.script_type,
+                reel.description or "",
+                reel.voice,
             )
         except reel_script.ScriptError as exc:
             reel = db.get(Reel, reel_id, populate_existing=True)
@@ -66,14 +72,15 @@ def render_reel(reel_id: str) -> None:
         scenes = reel.script["scenes"]
         language, voice, style = reel.language, reel.voice, reel.style
         track = db.get(AudioTrack, reel.music_id) if reel.music_id else None
-        music = track.path if track is not None and track.is_ready else None
+        if track is not None and not track.is_ready:
+            track = None
         music_volume = reel.music_volume
 
         folder = reel_render.reel_dir(reel_id)
         folder.mkdir(parents=True, exist_ok=True)
         pictures = reel_render.scene_pictures(folder, scenes, settings, style)
         voices = [
-            reel_render.voice_path(folder, i, sc["narration"], language, voice)
+            reel_render.voice_path(folder, i, sc["narration"], language, tts.voice_key(voice))
             for i, sc in enumerate(scenes)
         ]
 
@@ -113,19 +120,21 @@ def render_reel(reel_id: str) -> None:
             if not _update(db, reel_id, stage="Putting the video together", progress=90):
                 get_storage().delete(f"reels/{reel_id}")  # deleted while it was working
                 return
-            duration = reel_render.render(
-                folder,
-                [
-                    reel_render.SceneInput(p, sc["narration"], v)
-                    for p, sc, v in zip(pictures, scenes, voices, strict=True)
-                ],
-                font=tts.LANGUAGES[language].caption_font,
-                music=music,
-                music_volume=music_volume,
-                workers=settings.render_concurrency,
-            )
+            # The music comes from the bucket for this render only.
+            with music.working_copy(track) as music_path:
+                duration = reel_render.render(
+                    folder,
+                    [
+                        reel_render.SceneInput(p, sc["narration"], v)
+                        for p, sc, v in zip(pictures, scenes, voices, strict=True)
+                    ],
+                    font=tts.LANGUAGES[language].caption_font,
+                    music=music_path,
+                    music_volume=music_volume,
+                    workers=settings.render_concurrency,
+                )
             reel_render.remove_unused(folder, set(pictures) | set(voices))
-        except (imagegen.ImageGenError, tts.TTSError, FFmpegError) as exc:
+        except (imagegen.ImageGenError, tts.TTSError, FFmpegError, music.MusicError) as exc:
             _update(db, reel_id, status="failed", stage=None, error=str(exc)[:2000])
             return
         except Exception as exc:

@@ -202,6 +202,8 @@ def local_data(db: Session, user_id: str) -> dict:
         }
         for r in db.query(Reel).filter(Reel.user_id == user_id).order_by(Reel.created_at.desc())
     ]
+    # Only music with files here (from before it was kept in the bucket, or
+    # a link still downloading): the rest is in the bucket.
     music = [
         {
             "id": t.id,
@@ -209,11 +211,12 @@ def local_data(db: Session, user_id: str) -> dict:
             "status": t.status,
             "duration_s": t.duration_s,
             "created_at": t.created_at,
-            "bytes": size(f"audio/{t.id}"),
+            "bytes": bytes_here,
         }
         for t in db.query(AudioTrack)
         .filter(AudioTrack.user_id == user_id)
         .order_by(AudioTrack.created_at.desc())
+        if (bytes_here := size(f"audio/{t.id}"))
     ]
     return {
         "videos": videos,

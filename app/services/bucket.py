@@ -195,20 +195,29 @@ def content_type(filename: str) -> str:
     return _CONTENT_TYPES.get(Path(filename).suffix.lower(), "application/octet-stream")
 
 
-def upload(path: Path, key: str) -> dict:
-    """Copy ``path`` to ``key``, replacing what is there. Returns what to save:
-    {"key", "version", "uploaded_at"}; "version" is the file's mtime, so a
-    file changed later (re-made, colour, music) shows as not uploaded."""
+def upload(path: Path, key: str, *, metadata: dict[str, str] | None = None) -> dict:
+    """Copy ``path`` to ``key``, replacing what is there, with ``metadata``
+    (S3 "x-amz-meta-" tags) if given. Returns what to save: {"key", "version",
+    "uploaded_at"}; "version" is the file's mtime, so a file changed later
+    (re-made, colour, music) shows as not uploaded."""
     version = path.stat().st_mtime_ns
+    extra = {"ContentType": content_type(key)}
+    if metadata:
+        extra["Metadata"] = metadata
     with _bucket() as (client, name):
-        client.upload_file(str(path), name, key, ExtraArgs={"ContentType": content_type(key)})
+        client.upload_file(str(path), name, key, ExtraArgs=extra)
     return {"key": key, "version": version, "uploaded_at": datetime.now(UTC).isoformat()}
+
+
+def head(key: str) -> dict:
+    """About the file at ``key``: its size ("ContentLength") and "Metadata"."""
+    with _bucket() as (client, name):
+        return client.head_object(Bucket=name, Key=key)
 
 
 def size(key: str) -> int:
     """How big the file at ``key`` is, in bytes."""
-    with _bucket() as (client, name):
-        return client.head_object(Bucket=name, Key=key)["ContentLength"]
+    return head(key)["ContentLength"]
 
 
 def download(key: str, path: Path) -> None:

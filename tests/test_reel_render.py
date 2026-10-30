@@ -66,16 +66,27 @@ def test_camera_moves_take_turns():
     assert z == "1.15" and x == "(iw-iw/zoom)*on/60"  # pans right while zoomed in
 
 
-def test_join_blends_each_scene_into_the_next_where_its_slot_ends():
-    cmd = reel_render.build_join_cmd(
-        ["a.mp4", "b.mp4", "c.mp4"], [2.0, 3.5, 1.0], "out.mp4", preset="veryfast"
+def test_a_scene_is_cut_into_pieces_on_keyframes():
+    cmd = reel_render.build_scene_cmd(
+        "p.png", "s-%d.mp4", frames=100, move=0, ass=None, preset="veryfast", splits=[12, 88]
     )
+    assert cmd[cmd.index("-force_key_frames") + 1] == "expr:eq(n,12)+eq(n,88)"
+    assert cmd[cmd.index("-segment_frames") + 1] == "12,88"
+    assert cmd[cmd.index("-f") + 1] == "segment" and cmd[-1] == "s-%d.mp4"
+    whole = reel_render.build_scene_cmd(
+        "p.png", "s.mp4", frames=100, move=0, ass=None, preset="veryfast"
+    )
+    assert "-f" not in whole and whole[-1] == "s.mp4"
+
+
+def test_a_blend_takes_only_the_two_pieces_it_joins():
+    cmd = reel_render.build_blend_cmd(
+        "tail.mp4", "head.mp4", "b.mp4", kind="smoothleft", frames=12, preset="veryfast"
+    )
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "-i"] == ["tail.mp4", "head.mp4"]
     graph = cmd[cmd.index("-filter_complex") + 1]
-    assert graph == (
-        "[0:v][1:v]xfade=transition=fade:duration=0.4:offset=2.0000[v1];"
-        "[v1][2:v]xfade=transition=smoothleft:duration=0.4:offset=5.5000[v2]"
-    )
-    assert cmd[cmd.index("-map") + 1] == "[v2]"
+    assert graph == "[0:v][1:v]xfade=transition=smoothleft:duration=0.400000:offset=0[v]"
+    assert cmd[cmd.index("-frames:v") + 1] == "12"
 
 
 def test_captions_light_up_the_word_being_spoken():
@@ -150,8 +161,44 @@ def test_render_makes_a_vertical_reel_with_voice_and_music(tmp_path):
     assert (video["width"], video["height"]) == (1080, 1920)
     assert any(s["codec_type"] == "audio" for s in info["streams"])
     assert float(info["format"]["duration"]) == pytest.approx(duration, abs=0.1)
+    assert _frame_count(tmp_path / "reel.mp4") == 38 + 69  # every frame, none lost or added
+    # Red until the blue scene's voice starts (frame 38), then a 12-frame blend.
+    red, mixed, blue = (_color(tmp_path / "reel.mp4", n) for n in (36, 44, 52))
+    assert red[0] > 3 * red[2] and blue[2] > 3 * blue[0]
+    assert blue[0] < mixed[0] < red[0] and red[2] < mixed[2] < blue[2]
     assert (tmp_path / "thumb.jpg").exists()
     assert not (tmp_path / "tmp").exists()  # temporary files are cleaned up
+
+
+@needs_ffmpeg
+def test_a_very_short_scene_gets_a_shorter_blend(tmp_path):
+    pics = [_picture(tmp_path / f"{c}.png", c) for c in ("red", "green", "blue")]
+    voices = [_voice(tmp_path / "a.wav", 1.0), _voice(tmp_path / "b.wav", 0.05),
+              _voice(tmp_path / "c.wav", 1.0)]  # fmt: skip
+    scenes = [SceneInput(p, "Hi.", v) for p, v in zip(pics, voices, strict=True)]
+    duration = reel_render.render(tmp_path, scenes, font="DejaVu Sans")
+    # The middle scene is 9 frames: the blend into it takes 8, leaving it one.
+    assert duration == pytest.approx((38 + 9 + 54) / 30)
+    assert _frame_count(tmp_path / "reel.mp4") == 38 + 9 + 54
+
+
+def _frame_count(path: Path) -> int:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+         "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    return int(out.stdout.strip())
+
+
+def _color(path: Path, frame: int) -> tuple[int, int, int]:
+    """The average colour of one frame (R, G, B)."""
+    out = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-vf", f"select=eq(n\\,{frame}),scale=1:1",
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True, check=True,
+    )  # fmt: skip
+    return tuple(out.stdout[:3])
 
 
 def test_remove_unused_keeps_only_current_pictures_and_voices(tmp_path):

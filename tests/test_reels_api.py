@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.config.settings import get_settings
 from app.models import AudioTrack, Reel
 from app.services import reel_render
@@ -41,9 +43,13 @@ def test_options_list_platforms_languages_and_voices(client):
     assert [p["key"] for p in body["platforms"]] == ["instagram", "facebook"]
     hindi = next(lang for lang in body["languages"] if lang["key"] == "hi")
     assert hindi["label"] == "Hindi" and hindi["voices"][0]["key"] == "hf_alpha"
+    calm = next(v for v in hindi["voices"] if v["key"] == "hm_calm")
+    assert (calm["label"], calm["speed"]) == ("Male 5 · calm", 0.9)
     assert body["duration"] == {"min": 15, "max": 300, "default": 35}
     assert body["max_scenes"] == 20
     assert [s["key"] for s in body["styles"]] == ["cinematic", "realistic", "anime", "3d"]
+    assert [t["key"] for t in body["script_types"]] == ["story", "tips", "facts"]
+    assert body["description_max"] == 1500
     timing = body["timing"]  # for the time estimates in the style menus
     assert (timing["picture_s"], timing["load_s"]) == (58, 5)
     assert {"script_s", "script_s_per_s", "render_s_per_s"} <= timing.keys()
@@ -55,9 +61,12 @@ def test_create_starts_writing_the_script(client):
     assert reel["voice"] == "hf_alpha"  # the language's first voice
     assert reel["duration_s"] == 35 and reel["script"] is None
     assert reel["style"] == "cinematic"  # the default
+    assert (reel["script_type"], reel["description"]) == ("story", "")  # the defaults
     assert client.enqueued["reel_script"] == [reel["id"]]
     assert [r["id"] for r in client.get("/reels").json()] == [reel["id"]]
     assert _create(client, style="anime")["style"] == "anime"
+    idea = _create(client, script_type="tips", description="  Funny tone, 3 quick tips.  ")
+    assert (idea["script_type"], idea["description"]) == ("tips", "Funny tone, 3 quick tips.")
 
 
 def test_create_validates_choices(client):
@@ -67,6 +76,8 @@ def test_create_validates_choices(client):
 
     assert code(platform="tiktok") == 400
     assert code(style="pixel-art") == 400
+    assert code(script_type="poem") == 400
+    assert code(description="x" * 1501) == 422
     assert code(language="xx") == 400
     assert code(voice="hf_alpha") == 400  # a Hindi voice for English
     assert code(topic="hi") == 422
@@ -288,3 +299,39 @@ def test_rewrite_asks_for_a_new_script(client, db_session):
     body = client.post(f"/reels/{reel['id']}/rewrite").json()
     assert body["status"] == "scripting"
     assert client.enqueued["reel_script"] == [reel["id"], reel["id"]]
+    assert (body["script_type"], body["description"]) == ("story", "")  # no body: kept
+
+
+def test_rewrite_with_another_script_idea(client, db_session):
+    reel = _create(client, description="Old idea")
+    _with_script(db_session, reel["id"])
+    rewrite = f"/reels/{reel['id']}/rewrite"
+    assert client.post(rewrite, json={"script_type": "poem"}).status_code == 400
+
+    body = client.post(rewrite, json={"script_type": "facts", "description": "New idea"}).json()
+    assert (body["status"], body["script_type"], body["description"]) == (
+        "scripting", "facts", "New idea"
+    )  # fmt: skip
+    _with_script(db_session, reel["id"])
+    body = client.post(rewrite, json={"description": ""}).json()  # empty drops it
+    assert (body["script_type"], body["description"]) == ("facts", "")
+
+
+def test_listen_to_a_voice_makes_the_sample_once(client, tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    from app.services import tts
+
+    made = []
+
+    def fake_synthesize(text, language, voice):
+        made.append((text, voice))
+        return np.zeros(2400, np.float32), 24000
+
+    monkeypatch.setattr(tts, "synthesize", fake_synthesize)
+    resp = client.get("/reels/voices/hi/hm_deep/sample")
+    assert resp.status_code == 200 and resp.headers["content-type"] == "audio/wav"
+    assert resp.content[:4] == b"RIFF"
+    assert client.get("/reels/voices/hi/hm_deep/sample").status_code == 200
+    assert made == [(tts.LANGUAGES["hi"].sample, "hm_deep")]  # kept after the first time
+    assert client.get("/reels/voices/hi/af_heart/sample").status_code == 400  # not Hindi
+    assert client.get("/reels/voices/xx/hm_deep/sample").status_code == 400

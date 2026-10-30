@@ -254,12 +254,27 @@ def camera_move(index: int, frames: int) -> tuple[str, str, str]:
     return moves[index % len(moves)]
 
 
+def _encode(preset: str) -> list[str]:
+    """How every piece of a reel is encoded: the same everywhere, so the
+    pieces join without being encoded again."""
+    return ["-c:v", "libx264", "-preset", preset, "-crf", "20", "-pix_fmt", "yuv420p", "-an"]
+
+
 def build_scene_cmd(
-    picture: str, dst: str, *, frames: int, move: int, ass: str | None, preset: str
+    picture: str,
+    dst: str,
+    *,
+    frames: int,
+    move: int,
+    ass: str | None,
+    preset: str,
+    splits: list[int] | None = None,
 ) -> list[str]:
     """One scene: the picture scaled to cover the frame (at twice the output
     size, so the move doesn't wobble), moved slowly, graded, captions on top.
-    Video only; the voice is added to the whole reel at once."""
+    Video only; the voice is added to the whole reel at once. ``splits``: the
+    frames where it is cut into pieces (``dst`` then has a "%d": one file per
+    piece), each starting on a keyframe so the pieces join without encoding."""
     z, x, y = camera_move(move, frames)
     chain = (
         f"scale={2 * WIDTH}:{2 * HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,"
@@ -269,41 +284,36 @@ def build_scene_cmd(
     if ass:
         chain += f",ass={_filter_path(ass)}"
     chain += ",format=yuv420p"
+    cmd = ["ffmpeg", "-y", "-i", picture, "-vf", chain, "-frames:v", str(frames), *_encode(preset)]
+    if splits:
+        cmd += [
+            "-forced-idr", "1",
+            "-force_key_frames", "expr:" + "+".join(f"eq(n,{f})" for f in splits),
+            "-f", "segment", "-segment_frames", ",".join(map(str, splits)),
+            "-reset_timestamps", "1", "-segment_format", "mp4",
+        ]  # fmt: skip
+    return [*cmd, dst]
+
+
+def build_blend_cmd(tail: str, head: str, dst: str, *, kind: str, frames: int, preset: str):
+    """The blend from one scene into the next: the end of one (``tail``) into
+    the start of the other (``head``), both ``frames`` long. Two small inputs:
+    a long reel's blends once took ~3 GB of RAM in a single FFmpeg."""
     return [
         "ffmpeg", "-y",
-        "-i", picture,
-        "-vf", chain,
+        "-i", tail,
+        "-i", head,
+        "-filter_complex",
+        f"[0:v][1:v]xfade=transition={kind}:duration={frames / FPS:.6f}:offset=0[v]",
+        "-map", "[v]",
         "-frames:v", str(frames),
-        # Encoded again when the scenes are joined: keep the quality high here.
-        "-c:v", "libx264", "-preset", preset, "-crf", "16",
-        "-an",
+        *_encode(preset),
         dst,
     ]  # fmt: skip
 
 
-def build_join_cmd(videos: list[str], slots_s: list[float], dst: str, *, preset: str) -> list[str]:
-    """The scenes one after the other, each blending into the next. Every scene
-    but the last is ``TRANSITION_S`` longer than its slot: the blend uses up
-    that extra, so each scene still starts where its voice does."""
-    cmd = ["ffmpeg", "-y"]
-    for v in videos:
-        cmd += ["-i", v]
-    steps, last, offset = [], "[0:v]", 0.0
-    for i in range(1, len(videos)):
-        offset += slots_s[i - 1]
-        kind = TRANSITIONS[(i - 1) % len(TRANSITIONS)]
-        steps.append(
-            f"{last}[{i}:v]xfade=transition={kind}:duration={TRANSITION_S}:offset={offset:.4f}[v{i}]"
-        )
-        last = f"[v{i}]"
-    return [
-        *cmd,
-        "-filter_complex", ";".join(steps),
-        "-map", last,
-        "-c:v", "libx264", "-preset", preset, "-crf", "20", "-pix_fmt", "yuv420p",
-        "-an",
-        dst,
-    ]  # fmt: skip
+def build_concat_cmd(list_file: str, dst: str) -> list[str]:
+    return ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", dst]
 
 
 def build_mux_cmd(video: str, voice: str, dst: str, duration_s: float) -> list[str]:
@@ -364,37 +374,63 @@ def render(
             tracks.append(np.concatenate([samples, np.zeros(max(0, pad), np.float32)]))
             frames.append(n)
 
-        # Every scene but the last runs on into the blend with the next one.
-        blend = round(TRANSITION_S * FPS)
+        # Scene i blends into scene i+1 over blends[i] frames, starting where
+        # scene i+1's voice does: scene i runs that much longer (its "tail"),
+        # scene i+1's first frames (its "head") go into the blend, and the
+        # rest of each (its "body") is used as it is. Each blend leaves the next
+        # scene at least one frame of its own.
+        count = len(scenes)
+        full = round(TRANSITION_S * FPS)
+        blends = [max(1, min(full, frames[i + 1] - 1)) for i in range(count - 1)]
 
-        def _scene(i: int) -> str:
+        def _scene(i: int) -> dict[str, Path]:
+            """The scene, encoded once and cut into its pieces: {"head", "body", "tail"}."""
             sc = scenes[i]
             ass = tmp / f"captions{i + 1:02d}.ass"
             ass.write_text(build_ass(caption_cues(sc.text, speech[i]), font), encoding="utf-8")
-            dst = tmp / f"scene{i + 1:02d}.mp4"
-            n = frames[i] + (blend if i < len(scenes) - 1 else 0)
+            head = blends[i - 1] if i > 0 else 0
+            tail = blends[i] if i < count - 1 else 0
+            names = ["head"] * bool(head) + ["body"] + ["tail"] * bool(tail)
+            splits = [f for f in (head, frames[i]) if 0 < f < frames[i] + tail]
+            stem = f"scene{i + 1:02d}"
+            dst = tmp / (f"{stem}-%d.mp4" if splits else f"{stem}.mp4")
             ffmpeg.run(
                 build_scene_cmd(
-                    str(sc.picture), str(dst), frames=n, move=i, ass=str(ass), preset=preset
+                    str(sc.picture), str(dst), frames=frames[i] + tail, move=i, ass=str(ass),
+                    preset=preset, splits=splits,
                 )
-            )
-            return dst.name
+            )  # fmt: skip
+            if not splits:
+                return {"body": dst}
+            pieces = {name: tmp / f"{stem}-{k}.mp4" for k, name in enumerate(names)}
+            if not all(p.exists() for p in pieces.values()):
+                raise ffmpeg.FFmpegError(f"scene {i + 1} could not be cut into its pieces")
+            return pieces
 
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            names = list(pool.map(_scene, range(len(scenes))))
+            pieces = list(pool.map(_scene, range(count)))
 
+            def _blend(i: int) -> Path:
+                dst = tmp / f"blend{i + 1:02d}.mp4"
+                ffmpeg.run(
+                    build_blend_cmd(
+                        str(pieces[i]["tail"]), str(pieces[i + 1]["head"]), str(dst),
+                        kind=TRANSITIONS[i % len(TRANSITIONS)], frames=blends[i], preset=preset,
+                    )
+                )  # fmt: skip
+                return dst
+
+            blended = list(pool.map(_blend, range(count - 1)))
+
+        order = []  # body 1, blend 1-2, body 2, blend 2-3, ..., last body
+        for i in range(count):
+            order.append(pieces[i]["body"])
+            if i < count - 1:
+                order.append(blended[i])
+        list_file = tmp / "pieces.txt"
+        list_file.write_text("".join(f"file '{p.name}'\n" for p in order))
         video = tmp / "video.mp4"
-        if len(names) > 1:
-            ffmpeg.run(
-                build_join_cmd(
-                    [str(tmp / n) for n in names],
-                    [f / FPS for f in frames],
-                    str(video),
-                    preset=preset,
-                )
-            )
-        else:
-            os.replace(tmp / names[0], video)
+        ffmpeg.run(build_concat_cmd(str(list_file), str(video)))
         voice = tmp / "voice.wav"
         write_wav(voice, np.concatenate(tracks), sample_rate)
 

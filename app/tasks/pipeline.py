@@ -26,7 +26,7 @@ from app.models import (
     Video,
     VideoStatus,
 )
-from app.services import analysis, bgaudio, dub, ffmpeg
+from app.services import analysis, bgaudio, dub, ffmpeg, music
 from app.services.cost import CostCapExceeded, CostTracker
 from app.services.discard import discard_job
 from app.services.filehash import file_fingerprint
@@ -811,12 +811,14 @@ def render_single_clip(clip_id: str, keep_approved: bool = False) -> None:
                 render_clip(spec)
                 if dubbed:
                     dub.apply(dubbed, spec.out_path, clip.start_s, clip.end_s - clip.start_s)
-                bgaudio.after_render(
-                    spec.out_path,
-                    track.path if track else None,
-                    clip.bg_audio_volume,
-                    mute_original=clip.bg_audio_mute_original,
-                )
+                # The music comes from the bucket for this render only.
+                with music.working_copy(track) as music_path:
+                    bgaudio.after_render(
+                        spec.out_path,
+                        music_path,
+                        clip.bg_audio_volume,
+                        mute_original=clip.bg_audio_mute_original,
+                    )
             clip.file_path = spec.out_path
             clip.thumbnail_path = spec.thumb_path
             clip.duration_s = round(clip.end_s - clip.start_s, 3)
