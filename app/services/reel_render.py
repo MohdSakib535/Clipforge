@@ -39,6 +39,13 @@ TRANSITIONS = ("fade", "smoothleft", "smoothup", "fadeblack")
 # darker corners.
 GRADE = "eq=contrast=1.05:saturation=1.12,vignette=angle=PI/5"
 HIGHLIGHT = "&H0000D7FF&"  # the word being spoken: warm yellow (ASS colours are BGR)
+# "Story" scripts are told like a story, not cut like a reel: the narrator a
+# little slower, a breath between scenes while the picture fades into the next
+# (the next line starts once it is there), every picture drifting slowly
+# closer, calm captions and the music dipping under the voice.
+STORY_SPEED = 0.92
+STORY_GAP_S = 0.8
+STORY_ZOOM = 0.08
 VIDEO_NAME = "reel.mp4"
 THUMB_NAME = "thumb.jpg"
 
@@ -51,20 +58,70 @@ def _key(*parts: object) -> str:
     return hashlib.sha1("\x1f".join(str(p) for p in parts).encode()).hexdigest()[:12]
 
 
-def scene_pictures(folder: Path, scenes: list[dict], settings: Settings, style: str) -> list[Path]:
-    """Where each scene's picture is (or will be) for the current prompts."""
+def scene_pictures(folder: Path, script: dict, settings: Settings, style: str) -> list[Path]:
+    """Where each scene's picture is (or will be) for the current script: a
+    new look for a character, or a new setting, draws its pictures again."""
     return [
         picture_path(
             folder,
             i,
-            sc["image_prompt"],
+            scene_prompt(sc, script),
             style,
             settings.reel_image_width,
             settings.reel_image_height,
             settings.reel_image_steps,
         )  # fmt: skip
-        for i, sc in enumerate(scenes)
+        for i, sc in enumerate(script["scenes"])
     ]
+
+
+def scene_prompt(scene: dict, script: dict) -> str:
+    """What a scene's picture shows: its moment (image_prompt), everyone in it
+    with their look from the script's characters (the same words in every
+    picture, so they look the same), how many people, and the story's setting
+    (its time and place). A script from before characters gives just the
+    image_prompt."""
+    looks = {c["name"]: c["look"] for c in script.get("characters") or []}
+    names = [n for n in scene.get("characters") or [] if n in looks]
+    setting = (script.get("setting") or "").strip().rstrip(".")
+    if not names and not setting:
+        return scene["image_prompt"]
+    parts = [scene["image_prompt"].strip().rstrip(".")]
+    if names:
+        parts.append("In the picture: " + "; ".join(f"{n}, {looks[n]}" for n in names))
+        if scene.get("crowd"):
+            parts.append("Other people only in the background, dressed for the time and place")
+        else:
+            many = "person" if len(names) == 1 else "people"
+            parts.append(
+                f"Only {len(names)} {many} in the picture, nobody else: no statues, idols or "
+                "paintings of people"
+            )
+    if setting:
+        parts.append(f"Time and place: {setting}. Everything in the picture belongs there")
+    return ". ".join(p.strip().rstrip(".") for p in parts) + "."
+
+
+def picture_problems(counts: dict[str, int] | None, scene: dict) -> list[str]:
+    """What looks wrong in a scene's picture, from the faces, hands and people
+    Vision saw in it: more people than the scene has (an extra person, or a
+    second face), or more hands than they can have. [] if it looks right, or
+    if nothing was seen to judge by."""
+    if not counts:
+        return []
+    faces, hands, people = counts["faces"], counts["hands"], counts["people"]
+    problems = []
+    named = scene.get("characters") or []
+    if named and not scene.get("crowd") and max(faces, people) > len(named):
+        problems.append(f"{max(faces, people)} people or faces instead of {len(named)}")
+    if hands > 2 * max(faces, people, len(named), 1):
+        problems.append(f"{hands} hands for {max(faces, people, len(named), 1)} people")
+    return problems
+
+
+def warning_path(picture: Path) -> Path:
+    """Beside a picture that still looked wrong after being drawn again: why."""
+    return picture.with_name(picture.name + ".warn")
 
 
 def picture_path(
@@ -114,7 +171,10 @@ DEFAULT_STYLE = "cinematic"
 def picture_prompt(prompt: str, style: str) -> str:
     # Without a style the pictures looked like plain stock photos. The model
     # drew a 3-panel collage for "a montage of quick shots": hence "single".
-    suffix = "One single vertical 9:16 picture, not a collage, no text, no logos."
+    suffix = (
+        "Natural, correct anatomy. One single vertical 9:16 picture, not a collage, no text, "
+        "no logos."
+    )
     return f"{STYLES[style].prompt}. {prompt.rstrip('. ')}. {suffix}"
 
 
@@ -185,7 +245,7 @@ def _ass_time(t: float) -> str:
     return f"{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}"
 
 
-def build_ass(cues: list[Cue], font: str) -> str:
+def build_ass(cues: list[Cue], font: str, *, story: bool = False) -> str:
     """White bold text with a thick outline, a "pop" as each chunk appears and
     the word being spoken in yellow (its time is guessed from its length, as
     for the chunks). It sits at ~70% height: above the caption/username area
@@ -202,13 +262,15 @@ def build_ass(cues: list[Cue], font: str) -> str:
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Caption,{font},92,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,"
+        f"Style: Caption,{font},{80 if story else 92},&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,"
         "-1,0,0,0,100,100,0,0,1,8,3,2,80,80,560,1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
     pop = "{\\fscx80\\fscy80\\t(0,80,\\fscx108\\fscy108)\\t(80,150,\\fscx100\\fscy100)}"
+    if story:
+        pop = ""  # calm: no "pop" as each chunk appears
     for c in cues:
         words = c.text.replace("\\", "").replace("{", "(").replace("}", ")").split()
         if not words:
@@ -238,11 +300,14 @@ def _filter_path(path: str) -> str:
     return path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
-def camera_move(index: int, frames: int) -> tuple[str, str, str]:
+def camera_move(index: int, frames: int, *, story: bool = False) -> tuple[str, str, str]:
     """zoompan's (zoom, x, y) for scene ``index``; the moves take turns: zoom
-    in, pan right, zoom out, pan up, pan left, pan down."""
+    in, pan right, zoom out, pan up, pan left, pan down. A story drifts
+    slowly closer in every scene, so the scenes flow into one another."""
     p = f"on/{frames}"
     cx, cy, zoomed = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)", f"{1 + ZOOM}"
+    if story:
+        return (f"1+{STORY_ZOOM}*{p}", cx, cy)
     moves = [
         (f"1+{ZOOM}*{p}", cx, cy),
         (zoomed, f"(iw-iw/zoom)*{p}", cy),
@@ -269,13 +334,14 @@ def build_scene_cmd(
     ass: str | None,
     preset: str,
     splits: list[int] | None = None,
+    story: bool = False,
 ) -> list[str]:
     """One scene: the picture scaled to cover the frame (at twice the output
     size, so the move doesn't wobble), moved slowly, graded, captions on top.
     Video only; the voice is added to the whole reel at once. ``splits``: the
     frames where it is cut into pieces (``dst`` then has a "%d": one file per
     piece), each starting on a keyframe so the pieces join without encoding."""
-    z, x, y = camera_move(move, frames)
+    z, x, y = camera_move(move, frames, story=story)
     chain = (
         f"scale={2 * WIDTH}:{2 * HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,"
         f"crop={2 * WIDTH}:{2 * HEIGHT},"
@@ -335,6 +401,34 @@ def build_mux_cmd(video: str, voice: str, dst: str, duration_s: float) -> list[s
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
+def scene_timing(
+    frames: list[int], spoken: list[int], *, story: bool = False
+) -> tuple[list[int], list[int], list[int]]:
+    """How the scenes' pictures line up with their voice: (frames of picture
+    per scene, frames of each blend into the next, frames into its picture at
+    which each scene's line starts).
+
+    ``frames``: each scene's slot (its line plus the breath after it),
+    ``spoken``: the frames of the line itself. A reel blends into the next
+    picture as that scene's line starts (0.4 s). A story blends during the
+    breath before it (0.8 s): the next line starts once its picture is there,
+    so each picture starts earlier than its slot. Every scene keeps at least
+    one frame of its own."""
+    count = len(frames)
+    if not story:
+        full = round(TRANSITION_S * FPS)
+        blends = [max(1, min(full, frames[i + 1] - 1)) for i in range(count - 1)]
+        return list(frames), blends, [0] * count
+    full = round(STORY_GAP_S * FPS)
+    blends = [
+        max(1, min(full, frames[i] - spoken[i], frames[i] - 1, frames[i + 1] - 1))
+        for i in range(count - 1)
+    ]
+    starts = [0] + blends  # the blend into a scene runs before its line starts
+    shown = [frames[i] - (blends[i] if i < count - 1 else 0) + starts[i] for i in range(count)]
+    return shown, blends, starts
+
+
 @dataclass
 class SceneInput:
     picture: Path
@@ -351,9 +445,11 @@ def render(
     music_volume: int = 20,
     preset: str = "veryfast",
     workers: int = 4,
+    story: bool = False,
 ) -> float:
     """Write ``reel.mp4`` and ``thumb.jpg`` in ``reel_dir``; returns the length
-    in seconds. Raises FFmpegError."""
+    in seconds. ``story``: told like a story (see STORY_SPEED). Raises
+    FFmpegError."""
     import numpy as np
 
     tmp = reel_dir / "tmp"
@@ -367,37 +463,42 @@ def render(
             if sample_rate not in (None, sr):
                 raise ffmpeg.FFmpegError("voice clips have different sample rates")
             sample_rate = sr
+            if story:  # soft edges: the joins between the lines can't be heard
+                samples = _soften(samples, sr)
             speech.append(len(samples) / sr)
-            gap = END_GAP_S if i == len(scenes) - 1 else GAP_S
+            gap = END_GAP_S if i == len(scenes) - 1 else (STORY_GAP_S if story else GAP_S)
             n = math.ceil((speech[i] + gap) * FPS)
             pad = round(n / FPS * sr) - len(samples)
             tracks.append(np.concatenate([samples, np.zeros(max(0, pad), np.float32)]))
             frames.append(n)
 
-        # Scene i blends into scene i+1 over blends[i] frames, starting where
-        # scene i+1's voice does: scene i runs that much longer (its "tail"),
+        # Scene i blends into scene i+1 over blends[i] frames, at the start of
+        # scene i+1's picture: scene i runs that much longer (its "tail"),
         # scene i+1's first frames (its "head") go into the blend, and the
-        # rest of each (its "body") is used as it is. Each blend leaves the next
-        # scene at least one frame of its own.
+        # rest of each (its "body") is used as it is.
         count = len(scenes)
-        full = round(TRANSITION_S * FPS)
-        blends = [max(1, min(full, frames[i + 1] - 1)) for i in range(count - 1)]
+        spoken = [math.ceil(s * FPS) for s in speech]
+        shown, blends, starts = scene_timing(frames, spoken, story=story)
 
         def _scene(i: int) -> dict[str, Path]:
             """The scene, encoded once and cut into its pieces: {"head", "body", "tail"}."""
             sc = scenes[i]
             ass = tmp / f"captions{i + 1:02d}.ass"
-            ass.write_text(build_ass(caption_cues(sc.text, speech[i]), font), encoding="utf-8")
+            longer = {"max_words": 5, "max_chars": 30} if story else {}  # calm: a line, not words
+            cues = caption_cues(sc.text, speech[i], **longer)
+            late = starts[i] / FPS  # its line starts this far into its picture
+            cues = [Cue(c.start + late, c.end + late, c.text) for c in cues]
+            ass.write_text(build_ass(cues, font, story=story), encoding="utf-8")
             head = blends[i - 1] if i > 0 else 0
             tail = blends[i] if i < count - 1 else 0
             names = ["head"] * bool(head) + ["body"] + ["tail"] * bool(tail)
-            splits = [f for f in (head, frames[i]) if 0 < f < frames[i] + tail]
+            splits = [f for f in (head, shown[i]) if 0 < f < shown[i] + tail]
             stem = f"scene{i + 1:02d}"
             dst = tmp / (f"{stem}-%d.mp4" if splits else f"{stem}.mp4")
             ffmpeg.run(
                 build_scene_cmd(
-                    str(sc.picture), str(dst), frames=frames[i] + tail, move=i, ass=str(ass),
-                    preset=preset, splits=splits,
+                    str(sc.picture), str(dst), frames=shown[i] + tail, move=i, ass=str(ass),
+                    preset=preset, splits=splits, story=story,
                 )
             )  # fmt: skip
             if not splits:
@@ -415,7 +516,8 @@ def render(
                 ffmpeg.run(
                     build_blend_cmd(
                         str(pieces[i]["tail"]), str(pieces[i + 1]["head"]), str(dst),
-                        kind=TRANSITIONS[i % len(TRANSITIONS)], frames=blends[i], preset=preset,
+                        kind="fade" if story else TRANSITIONS[i % len(TRANSITIONS)],
+                        frames=blends[i], preset=preset,
                     )
                 )  # fmt: skip
                 return dst
@@ -442,7 +544,12 @@ def render(
             mixed = tmp / "mixed.mp4"
             ffmpeg.run(
                 bgaudio.build_mix_cmd(
-                    str(voiced), music, str(mixed), volume_pct=music_volume, duration_s=duration
+                    str(voiced),
+                    music,
+                    str(mixed),
+                    volume_pct=music_volume,
+                    duration_s=duration,
+                    duck=story,
                 )
             )
             voiced = mixed
@@ -462,8 +569,24 @@ def render(
         tmp.rmdir()
 
 
+def _soften(samples, sample_rate: int):
+    """A line with a 10 ms fade in and a 40 ms fade out."""
+    import numpy as np
+
+    out = np.array(samples, dtype=np.float32, copy=True)
+    fade_in = min(int(0.01 * sample_rate), len(out) // 2)
+    fade_out = min(int(0.04 * sample_rate), len(out) // 2)
+    if fade_in:
+        out[:fade_in] *= np.linspace(0.0, 1.0, fade_in, dtype=np.float32)
+    if fade_out:
+        out[-fade_out:] *= np.linspace(1.0, 0.0, fade_out, dtype=np.float32)
+    return out
+
+
 def remove_unused(reel_dir: Path, keep: set[Path]) -> None:
-    """Drop pictures and voice clips no scene uses any more."""
+    """Drop pictures and voice clips no scene uses any more (with the
+    warnings beside the pictures)."""
     for f in reel_dir.glob("*"):
-        if f.is_file() and f.suffix in (".png", ".wav") and f not in keep:
+        used = f.with_suffix("") if f.suffix == ".warn" else f
+        if f.is_file() and f.suffix in (".png", ".wav", ".warn") and used not in keep:
             f.unlink(missing_ok=True)

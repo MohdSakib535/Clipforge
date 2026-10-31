@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import httpx
 
 from app.config.settings import get_settings
@@ -12,6 +14,14 @@ START_HINT = "Start it in a terminal on the Mac with:  uv run imagegen/server.py
 
 class ImageGenError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class Picture:
+    png: bytes
+    # {"faces", "hands", "people"} Apple's Vision saw in it on the Mac; None
+    # if it couldn't look (an older generator, or Vision failed).
+    counts: dict[str, int] | None = None
 
 
 def check() -> None:
@@ -31,8 +41,8 @@ def unload() -> None:
         pass
 
 
-def generate(prompt: str, *, width: int, height: int, seed: int, steps: int) -> bytes:
-    """One picture as PNG bytes (~20 s at 384x672 on an M4)."""
+def generate(prompt: str, *, width: int, height: int, seed: int, steps: int) -> Picture:
+    """One picture (~58 s at 720x1280 on an M4), with what is seen in it."""
     try:
         r = httpx.post(
             f"{get_settings().imagegen_url}/generate",
@@ -50,4 +60,8 @@ def generate(prompt: str, *, width: int, height: int, seed: int, steps: int) -> 
         except ValueError:
             detail = r.text
         raise ImageGenError(f"Picture failed: {detail[:300]}")
-    return r.content
+    try:
+        counts = {k: int(r.headers[f"x-{k}"]) for k in ("faces", "hands", "people")}
+    except (KeyError, ValueError):
+        counts = None
+    return Picture(r.content, counts)

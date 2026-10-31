@@ -3,6 +3,7 @@
 # dependencies = [
 #     "mflux==0.23.0",
 #     "pillow<13",  # Pillow 13.0.0 breaks mflux 0.23 at import (PIL._typing)
+#     "pyobjc-framework-Vision",  # counts faces, hands and people in each picture
 # ]
 # ///
 """ClipForge image generator: FLUX.2 [klein] 4B on the Mac's GPU (Apple MLX).
@@ -25,7 +26,10 @@ IMAGEGEN_IDLE_UNLOAD_S seconds without work, so the Mac gets the RAM back. On a
 
 API:
     GET  /health    -> {"ok": true, "loaded": bool, "model_path": str}
-    POST /generate  {"prompt", "width", "height", "seed", "steps"} -> image/png
+    POST /generate  {"prompt", "width", "height", "seed", "steps"} -> image/png,
+                    with the faces, hands and people Apple's Vision framework
+                    sees in it (X-Faces, X-Hands, X-People; left out if it
+                    can't look), so the reel maker can draw a broken one again
     POST /unload    -> {"ok": true, "loaded": false}
 """
 
@@ -126,6 +130,34 @@ class Generator:
 GENERATOR = Generator()
 
 
+def count_people(png: bytes) -> dict[str, int] | None:
+    """Faces, hands and people in a picture, by Apple's Vision framework
+    (built into macOS; ~40 ms after the first). The small model sometimes
+    draws an extra arm, face or person. None if Vision can't look."""
+    try:
+        import Vision
+        from Foundation import NSData
+
+        handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(
+            NSData.dataWithBytes_length_(png, len(png)), None
+        )
+        faces = Vision.VNDetectFaceRectanglesRequest.alloc().init()
+        hands = Vision.VNDetectHumanHandPoseRequest.alloc().init()
+        hands.setMaximumHandCount_(12)
+        people = Vision.VNDetectHumanRectanglesRequest.alloc().init()
+        ok, error = handler.performRequests_error_([faces, hands, people], None)
+        if not ok:
+            raise RuntimeError(error)
+    except Exception:
+        log.exception("could not count the people in a picture")
+        return None
+    return {
+        "faces": len(faces.results() or []),
+        "hands": len(hands.results() or []),
+        "people": len(people.results() or []),
+    }
+
+
 def _side(value: object) -> int:
     """A width/height rounded down to a multiple of 16, within limits."""
     return max(_MIN_SIDE, min(_MAX_SIDE, int(value) // 16 * 16))
@@ -164,9 +196,14 @@ class Handler(BaseHTTPRequestHandler):
             log.exception("generation failed")
             self._json(500, {"error": f"generation failed: {exc}"})
             return
+        counts = count_people(png)
+        if counts is not None:
+            log.info("seen: %(faces)d faces, %(hands)d hands, %(people)d people", counts)
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(png)))
+        for name, value in (counts or {}).items():
+            self.send_header(f"X-{name.title()}", str(value))
         self.end_headers()
         self.wfile.write(png)
 

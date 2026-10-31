@@ -28,6 +28,9 @@ DEFAULT_VOLUME = 40
 _FADE_IN_S = 0.5
 _FADE_OUT_S = 1.5
 _STEREO = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+# The voice pushes the music down: ~13 dB under speech, back within ~0.35 s
+# of a pause (a gentler threshold/ratio only moved it ~2 dB).
+_DUCK = "threshold=0.005:ratio=20:attack=20:release=350"
 
 
 # ---------------------------------------------------------------------------
@@ -54,16 +57,26 @@ def build_mix_cmd(
     volume_pct: int,
     duration_s: float,
     clip_has_audio: bool = True,
+    duck: bool = False,
 ) -> list[str]:
     """Clip + looping music -> new MP4. The video is copied as-is; the music
-    fades in/out and a limiter stops speech + music from clipping."""
+    fades in/out and a limiter stops speech + music from clipping. ``duck``:
+    the music dips under the voice (~13 dB, measured) and comes back up in
+    its pauses, as in a documentary; ``volume_pct`` is then its level there."""
     fade_out = min(_FADE_OUT_S, duration_s / 4)
     music_chain = (
         f"[1:a]{_STEREO},volume={volume_pct / 100:.2f},"
         f"afade=t=in:d={_FADE_IN_S},"
         f"afade=t=out:st={max(0.0, duration_s - fade_out):.3f}:d={fade_out:.3f}"
     )
-    if clip_has_audio:
+    if clip_has_audio and duck:
+        graph = (
+            f"{music_chain}[bg];[0:a]{_STEREO},asplit=2[fg][voice];"
+            f"[bg][voice]sidechaincompress={_DUCK}[ducked];"
+            "[fg][ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+            "alimiter=limit=0.95:level=0[a]"
+        )
+    elif clip_has_audio:
         graph = (
             f"{music_chain}[bg];[0:a]{_STEREO}[fg];"
             "[fg][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"

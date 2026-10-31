@@ -17,12 +17,18 @@ from dataclasses import dataclass
 import httpx
 
 from app.config.settings import get_settings
+from app.services.reel_render import END_GAP_S, GAP_S, STORY_GAP_S, STORY_SPEED
+from app.services.romanize import contains_devanagari, romanize
 from app.services.tts import LANGUAGES, voice_speed
 
 MIN_DURATION_S, MAX_DURATION_S = 15, 300
 MAX_SCENES = 20
 MAX_HASHTAGS = 8
 MAX_DESCRIPTION = 1500  # the creator's own idea for the script (plot, flow, tone)
+MAX_CHARACTERS = 6  # people/animals with a fixed look (the model is asked for at most 4)
+# Characters shown clearly in one picture: more come out with extra arms and
+# faces more often, but a story often has three together (Ram, Sita, Lakshman).
+MAX_IN_PICTURE = 3
 
 
 class ScriptError(RuntimeError):
@@ -75,7 +81,12 @@ SCRIPT_TYPES: dict[str, ScriptType] = {
         "carry on straight from the scene before: build up the problem, raise the stakes "
         "and turn it with a twist or a climax. Scene {n} gives the story a clear ending "
         "(and its lesson, if it has one). Show concrete moments (what happens, what people "
-        'say), never a summary like "slowly things got better".',
+        'say), never a summary like "slowly things got better". Read one after another, the '
+        "narrations are one flowing story told aloud, not separate captions: each picks up "
+        "where the last one ended, with a linking word in the script's language (then, "
+        "meanwhile, but, that night), every character is introduced once, and the same "
+        'narrator and tense run all through. Scene 1 opens like a told story ("Long ago...") '
+        "and still grabs the viewer at once.",
     ),
     "tips": ScriptType(
         "Tips / list",
@@ -101,9 +112,18 @@ def scene_count(duration_s: int) -> int:
     return max(3, min(8, round(duration_s / 7)), round(duration_s / 20))
 
 
-def words_per_scene(duration_s: int, language: str, scenes: int, voice: str | None = None) -> int:
-    # 0.9: the short pauses between scenes. A slower voice ("calm") fits fewer words.
-    total = duration_s * LANGUAGES[language].words_per_s * voice_speed(voice) * 0.9
+def pace(language: str, voice: str | None = None, story: bool = False) -> float:
+    """Words a second as the reel reads them: a slower voice ("calm") or a
+    story (read a little slower) fit fewer words."""
+    return LANGUAGES[language].words_per_s * voice_speed(voice) * (STORY_SPEED if story else 1.0)
+
+
+def words_per_scene(
+    duration_s: int, language: str, scenes: int, voice: str | None = None, story: bool = False
+) -> int:
+    # 0.9: the short pauses between scenes; a story's longer ones come off first.
+    talk = duration_s - (scenes - 1) * (STORY_GAP_S - GAP_S if story else 0)
+    total = max(scenes, talk) * pace(language, voice, story) * 0.9
     return max(6, round(total / scenes))
 
 
@@ -127,20 +147,30 @@ def build_messages(
     p = PLATFORMS[platform]
     lang = LANGUAGES[language].prompt_name
     n = scene_count(duration_s)
-    w = words_per_scene(duration_s, language, n, voice)
+    story = script_type == "story"
+    w = words_per_scene(duration_s, language, n, voice, story)
     sentences = "one or two" if w <= 30 else "a few"
     structure = SCRIPT_TYPES[script_type].structure.format(n=n, last_middle=n - 1)
+    hooks_rule = (
+        f"3 alternative opening lines for scene 1, in {lang}, each opening the story in a "
+        "different way (a moment, a mystery, a question)."
+        if story
+        else f"3 alternative first lines for scene 1, in {lang}, each in a different style "
+        "(question, bold claim, surprising fact)."
+    )
     system = f"""You write voice-over scripts for viral short vertical videos ({p.label}). Reply with JSON only.
 Rules:
 - Write the title, hooks, every narration and the caption in {lang} only: never words from any other language, never translations or text in brackets.{LANGUAGE_NOTES.get(language, "")}
-- Exactly {n} scenes. A narration is what the narrator says during that scene: about {w} words ({w - 4} to {w + 4}), {sentences} short spoken sentences. Never put the whole script into one scene.
+- Exactly {n} scenes. A narration is what the narrator says during that scene: about {w} words ({w - 4} to {w + 4}), {sentences} short spoken sentences. Never put the whole script into one scene. A narration holds only the words the narrator says: never word counts, labels or notes.
 - {structure}
 - Every scene adds something new: never repeat a line or an idea, no filler remarks (like "this was very strange"). Keep one point of view all through: a narrator, or the main character speaking as "I".
 - Simple everyday words, as if talking to a friend. No emojis, hashtags or stage directions in the narration.
-- image_prompt: always in English, even though the narration is in {lang}. One single picture of one concrete scene showing what the narration says: the subject, a detailed colourful setting, dramatic lighting (golden hour, neon glow, moody shadows or rim light) and a striking camera angle, vertical composition. Describe only what is in the picture, never how it is made (no "photo", "illustration" or "painting": the art style is added later). Never a plain white, grey or empty background. Never a collage, montage, split screen or several shots. No text, letters, logos or watermarks.
-- A person or animal who is in several scenes is described in full, the same way, in every image_prompt (name, age, build, face, hair or fur, clothes, colours), as each picture is drawn on its own: never "the girl from scene 2". These looks go in image_prompt only: a narration never says anyone's age, hair, build, face or clothes, not even when someone introduces themselves. Spell every name the same way each time.
+- setting: in English, the time and place of the whole story and what everything around the people looks like: the era, the place, the landscape, the buildings and rooms, the clothes and the everyday objects of that time and place. Never the characters themselves (no names: their looks come from characters). Every picture shows only things that belong there. A story from mythology or history (e.g. the Ramayana) has forests, mountains, rivers, hermitages, ancient palaces, oil lamps, bows and chariots, never modern things such as libraries, book shelves, phones, cars, electric lights or plastic.
+- characters: every person or animal seen in the pictures, at most 4, each with a name in English letters (e.g. Ram, Sita, Priya; make one up if the story has none) spelled the same everywhere, and their look in English: age, build, face, skin, hair or fur, clothes and their colours, and anything they carry, fitting the setting, its time and the story's mood. Clothes, jewellery, armour and weapons come from that culture, region and era (ancient India: dhoti, angavastram, sari, gold ornaments, bows, maces; never western, Roman or medieval European armour). Each picture is drawn on its own, so the look is written once, in full, here, and is added to every picture they are in. A narration never says anyone's age, hair, build, face or clothes, not even when someone introduces themselves.
+- image_prompt: always in English, even though the narration is in {lang}. One single picture of one concrete moment showing what the narration says: who does what (call the characters by their name only: their look is added from characters), their pose and expression, where in the setting, the lighting (golden hour, moonlight, firelight, moody shadows or rim light) and a striking camera angle, vertical composition. Describe only what is in the picture, never how it is made (no "photo", "illustration" or "painting": the art style is added later). Never a plain white, grey or empty background. Never a collage, montage, split screen or several shots. No text, letters, logos or watermarks.
+- In each scene, characters lists the names of the characters seen in its picture, exactly the ones its image_prompt names: at most {MAX_IN_PICTURE} (2 or fewer come out best), shown clearly in a medium or close shot, in simple natural poses (hands at rest or doing one simple thing). crowd is true only when other, unnamed people are seen too (a market, a battle); otherwise nobody else is in the picture, and its image_prompt never adds anyone else: no other person, god, statue, idol or painting of a person (for a prayer, show a lamp, flowers, a symbol or a temple instead).
 - call_to_action: one short spoken line in {lang} to {p.call_to_action}. It is read right after the last scene, so never put it in a narration.
-- hooks: 3 alternative first lines for scene 1, in {lang}, each in a different style (question, bold claim, surprising fact).
+- hooks: {hooks_rule}
 - caption: the post caption in {lang}, under 150 characters.
 - hashtags: 5 relevant hashtags in English, lowercase, without the # sign.
 - music: {MUSIC_RULE}
@@ -187,14 +217,30 @@ def response_schema(scenes: int) -> dict:
         "properties": {
             "title": text,
             "hooks": {"type": "array", "items": text, "minItems": 3, "maxItems": 3},
+            # Before the scenes: the looks are settled first, then used.
+            "setting": text,
+            "characters": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {
+                    "type": "object",
+                    "properties": {"name": text, "look": text},
+                    "required": ["name", "look"],
+                },
+            },
             "scenes": {
                 "type": "array",
                 "minItems": scenes,
                 "maxItems": scenes,
                 "items": {
                     "type": "object",
-                    "properties": {"narration": text, "image_prompt": text},
-                    "required": ["narration", "image_prompt"],
+                    "properties": {
+                        "narration": text,
+                        "image_prompt": text,
+                        "characters": {"type": "array", "items": text, "maxItems": MAX_IN_PICTURE},
+                        "crowd": {"type": "boolean"},
+                    },
+                    "required": ["narration", "image_prompt", "characters", "crowd"],
                 },
             },
             # Its own field: inside the last narration the model often left it out.
@@ -203,7 +249,10 @@ def response_schema(scenes: int) -> dict:
             "hashtags": {"type": "array", "items": text, "minItems": 3, "maxItems": 6},
             "music": music_schema(),
         },
-        "required": ["title", "hooks", "scenes", "call_to_action", "caption", "hashtags", "music"],
+        "required": [
+            "title", "hooks", "setting", "characters", "scenes", "call_to_action", "caption",
+            "hashtags", "music",
+        ],  # fmt: skip
     }
 
 
@@ -220,7 +269,7 @@ def generate_script(
     n = scene_count(duration_s)
     # Longer reels need a longer reply (Devanagari takes many tokens); past
     # Ollama's default 4096-token window the reply (or the prompt) would be cut off.
-    num_predict = max(1500, 15 * duration_s)
+    num_predict = max(2000, 15 * duration_s + 500)  # +500: the setting and the characters' looks
     messages = build_messages(
         topic, platform, language, duration_s, script_type, description, voice
     )
@@ -244,42 +293,49 @@ def generate_script(
                 raise
     # The call to action goes on after the length is fixed, so a rewrite can't drop it.
     cta = call_to_action(raw, language)
-    fit_length(script["scenes"], language, duration_s, voice, cta)
+    fit_length(script["scenes"], language, duration_s, voice, cta, story=script_type == "story")
     add_call_to_action(script["scenes"], cta)
-    english_picture_prompts(script["scenes"])
+    english_picture_texts(script)
     return script
 
 
-def spoken_seconds(narrations: list[str], language: str, voice: str | None = None) -> float:
+def spoken_seconds(
+    narrations: list[str], language: str, voice: str | None = None, story: bool = False
+) -> float:
     """About how long the narrations take to read out, with the pauses
-    reel_render puts between scenes (0.25 s, 0.8 s after the last)."""
-    wps = LANGUAGES[language].words_per_s * voice_speed(voice)
+    reel_render puts between scenes (0.25 s, a story 0.8 s; 0.8 s after the last)."""
     words = sum(len(t.split()) for t in narrations)
-    return words / wps + 0.25 * len(narrations) + 0.55
+    gap = STORY_GAP_S if story else GAP_S
+    return words / pace(language, voice, story) + gap * (len(narrations) - 1) + END_GAP_S
 
 
 LENGTH_TOLERANCE = 0.2  # a script this far off the reel's length is rewritten once
 
 
 def fit_length(
-    scenes: list[dict], language: str, duration_s: int, voice: str | None = None, cta: str = ""
+    scenes: list[dict],
+    language: str,
+    duration_s: int,
+    voice: str | None = None,
+    cta: str = "",
+    story: bool = False,
 ) -> None:
     """Small models don't keep to a word count (a 40 s script came back at
     ~70 s, a 3 min one at ~2 min 15 s). If the narrations (with the call to
     action still to come) are more than 20% off the reel's length, ask once for
     them rewritten to it; the rewrite is kept only if it is closer."""
-    wps = LANGUAGES[language].words_per_s * voice_speed(voice)
+    wps = pace(language, voice, story)
     extra = 0 if not cta or _has_call_to_action(scenes[-1]["narration"]) else len(cta.split())
 
     def seconds(texts: list[str]) -> float:
-        return spoken_seconds(texts, language, voice) + extra / wps
+        return spoken_seconds(texts, language, voice, story) + extra / wps
 
     current = [sc["narration"] for sc in scenes]
     before = seconds(current)
     if abs(before - duration_s) <= LENGTH_TOLERANCE * duration_s:
         return
     n = len(scenes)
-    w = max(4, round(words_per_scene(duration_s, language, n, voice) - extra / n))
+    w = max(4, round(words_per_scene(duration_s, language, n, voice, story) - extra / n))
     lang = LANGUAGES[language].prompt_name
     shorter = before > duration_s
     how = (
@@ -301,7 +357,8 @@ def fit_length(
                 f"seconds. Rewrite them {'shorter' if shorter else 'longer'}: about {w} words "
                 f"each ({max(1, w - 3)} to {w + 3}), exactly {n} narrations in the same order. "
                 f"Keep the same story: the same events in the same scenes, the same names, all "
-                f"in {lang}.{LANGUAGE_NOTES.get(language, '')} {how}\n{listed}"
+                f"in {lang}.{LANGUAGE_NOTES.get(language, '')} {how} Write only the words "
+                f"the narrator says: never word counts or notes.\n{listed}"
             ),
         },
     ]
@@ -327,7 +384,7 @@ def fit_length(
     texts = raw.get("narrations") if isinstance(raw, dict) else None
     if not isinstance(texts, list) or len(texts) != n:
         return
-    rewritten = [_clean(t, drop_latin_brackets=language != "en") for t in texts]
+    rewritten = [_spoken(_clean(t, drop_latin_brackets=language != "en")) for t in texts]
     if all(rewritten) and abs(seconds(rewritten) - duration_s) < abs(before - duration_s):
         for sc, t in zip(scenes, rewritten, strict=True):
             sc["narration"] = t
@@ -337,14 +394,19 @@ def fit_length(
 _NOT_LATIN = re.compile(r"[\u0370-\u1fff\u2c00-\ufdff]")
 
 
-def english_picture_prompts(scenes: list[dict]) -> None:
+def english_picture_texts(script: dict) -> None:
     """The image model needs English, but the script model sometimes writes
-    picture prompts in the script's language. One more call puts those into
-    English; if it fails, they stay as they are."""
-    todo = [sc for sc in scenes if _NOT_LATIN.search(sc["image_prompt"])]
+    what goes into the pictures (picture prompts, the characters' looks, the
+    setting) in the script's language. One more call puts those into English;
+    if it fails, they stay as they are."""
+    slots = [(sc, "image_prompt") for sc in script["scenes"]]
+    slots += [(c, "look") for c in script.get("characters") or []]
+    if script.get("setting"):
+        slots.append((script, "setting"))
+    todo = [(holder, key) for holder, key in slots if _NOT_LATIN.search(holder[key])]
     if not todo:
         return
-    listed = "\n".join(f"{i + 1}. {sc['image_prompt']}" for i, sc in enumerate(todo))
+    listed = "\n".join(f"{i + 1}. {holder[key]}" for i, (holder, key) in enumerate(todo))
     messages = [
         {
             "role": "system",
@@ -379,10 +441,10 @@ def english_picture_prompts(scenes: list[dict]) -> None:
     prompts = raw.get("prompts") if isinstance(raw, dict) else None
     if not isinstance(prompts, list) or len(prompts) != count:
         return
-    for sc, prompt in zip(todo, prompts, strict=True):
-        prompt = _clean(prompt)
-        if prompt and not _NOT_LATIN.search(prompt):
-            sc["image_prompt"] = prompt
+    for (holder, key), english in zip(todo, prompts, strict=True):
+        english = _clean(english)
+        if english and not _NOT_LATIN.search(english):
+            holder[key] = english
 
 
 def suggest_music(script: dict, platform: str) -> dict:
@@ -468,6 +530,20 @@ _CTA_MEDIA = re.compile(
 )
 
 
+# What the model sometimes writes after a narration: the word count it was
+# asked for ('…है।”, 20 words. 17 words.', '(18 शब्द)'). Only at the end:
+# "learn 5 words a day" in the middle of a line is meant.
+_NOTES_TAIL = re.compile(
+    r"""(?:\s*["“”'’]?\s*[,;:–—-]?\s*\(?\s*\d+\s*(?:words?|शब्द)\s*\)?\s*[.।]?)+\s*$""",
+    re.IGNORECASE,
+)
+
+
+def _spoken(narration: str) -> str:
+    """A narration without notes after it."""
+    return _NOTES_TAIL.sub("", narration).strip().strip('"“”, ').strip()
+
+
 # Bits of JSON the model sometimes leaks into a text: 'करो!”, “और भूलना।” ,'.
 # Only after the end of a sentence: '"hello", "thanks"' is a list of words.
 _JSON_JOIN = re.compile(r'(?<=[.!?।])\s*["“”]\s*,\s*["“”]\s*')
@@ -527,7 +603,8 @@ def _rebalance(scenes: list[dict], n: int) -> list[dict]:
     if current:
         out.append({"narration": " ".join(current)})
     for i, sc in enumerate(out):
-        sc["image_prompt"] = scenes[min(i, len(scenes) - 1)]["image_prompt"]
+        source = scenes[min(i, len(scenes) - 1)]
+        sc.update({k: v for k, v in source.items() if k != "narration"})  # its picture
     return out
 
 
@@ -549,20 +626,79 @@ def add_call_to_action(scenes: list[dict], cta: str) -> None:
         last["narration"] = f"{last['narration']} {cta}"
 
 
+def _loose(name: str) -> str:
+    """A name to compare spellings by: "Raam" (romanized "राम") is "Ram"."""
+    name = name.casefold()
+    for long, short in (("aa", "a"), ("ee", "i"), ("ii", "i"), ("oo", "u"), ("uu", "u")):
+        name = name.replace(long, short)
+    return name
+
+
+def clean_characters(raw: object, image_prompts: list[str] = ()) -> tuple[list[dict], dict]:
+    """[{"name", "look"}], each name once, both filled in, the name in English
+    letters: a Hindi name ("राम", which the picture prompts call "Ram") would
+    read as another person. Also how the model may call each one: {alias: name}."""
+    words = {_loose(w): w for w in re.findall(r"[A-Za-z][A-Za-z'-]*", " ".join(image_prompts))}
+    out: list[dict] = []
+    aliases: dict[str, str] = {}
+    for c in raw if isinstance(raw, list) else []:
+        if not isinstance(c, dict):
+            continue
+        given, look = _clean(c.get("name"))[:60], _clean(c.get("look"))[:800]
+        name = given
+        if contains_devanagari(given):
+            roman = romanize(given).strip()
+            name = words.get(_loose(roman), roman)  # as the picture prompts spell it
+        if name and look and name not in {o["name"] for o in out}:
+            out.append({"name": name, "look": look})
+            for alias in (given.casefold(), name.casefold(), _loose(name)):
+                aliases.setdefault(alias, name)
+    return out[:MAX_CHARACTERS], aliases
+
+
+def clean_setting(setting: str, names: list[str]) -> str:
+    """The setting without the sentences about the characters: it goes into
+    every picture, so "Ram, Sita and Lakshman wear..." drew all three into a
+    picture of two."""
+    sentences = re.split(r"(?<=[.!?])\s+", setting)
+    return " ".join(s for s in sentences if s and not _named_in(s, names))[:1000]
+
+
+def _named_in(prompt: str, names: list[str]) -> set[str]:
+    """The characters an image_prompt mentions (any spelling of long vowels)."""
+    text = _loose(prompt)
+    return {n for n in names if re.search(rf"(?<![a-z]){re.escape(_loose(n))}(?![a-z])", text)}
+
+
 def normalize_script(
     raw: object, *, topic: str, language: str, scenes: int, with_call_to_action: bool = True
 ) -> dict:
     if not isinstance(raw, dict):
         raise BadReplyError("The script model sent back something unreadable. Try again.")
     foreign = language != "en"
+    raw_scenes = [sc for sc in raw.get("scenes") or [] if isinstance(sc, dict)]
+    prompts = [str(sc.get("image_prompt") or "") for sc in raw_scenes]
+    characters, aliases = clean_characters(raw.get("characters"), prompts)
+    names = [c["name"] for c in characters]
     items = []
-    for sc in raw.get("scenes") or []:
-        if not isinstance(sc, dict):
-            continue
-        narration = _clean(sc.get("narration"), drop_latin_brackets=foreign)
+    for sc in raw_scenes:
+        narration = _spoken(_clean(sc.get("narration"), drop_latin_brackets=foreign))
         if narration:
             prompt = _clean(sc.get("image_prompt")) or topic
-            items.append({"narration": narration, "image_prompt": prompt})
+            listed = sc.get("characters") if isinstance(sc.get("characters"), list) else []
+            # Who is in the picture: the ones listed and the ones its prompt
+            # names (the list once left out a third person the prompt drew).
+            wanted = {aliases.get(_clean(n).casefold()) or aliases.get(_loose(_clean(n)))
+                      for n in listed} | _named_in(prompt, names)  # fmt: skip
+            shown = [n for n in names if n in wanted][:MAX_IN_PICTURE]
+            items.append(
+                {
+                    "narration": narration,
+                    "image_prompt": prompt,
+                    "characters": shown,
+                    "crowd": sc.get("crowd") is True,
+                }
+            )
     if not items:
         raise BadReplyError("The script came back empty. Try again.")
 
@@ -574,9 +710,12 @@ def normalize_script(
         add_call_to_action(items[:MAX_SCENES], call_to_action(raw, language))
 
     hooks = [_clean(h, drop_latin_brackets=True) for h in raw.get("hooks") or []]
+    # Same key order as schemas.reel.ReelScript: the page compares the two.
     script = {
         "title": _clean(raw.get("title"), drop_latin_brackets=foreign) or topic[:120],
         "hooks": [h for h in hooks if h][:3],
+        "setting": clean_setting(_clean(raw.get("setting")), names),
+        "characters": characters,
         "scenes": items[:MAX_SCENES],
         "caption": _clean(raw.get("caption"), drop_latin_brackets=foreign),
         "hashtags": clean_hashtags(raw.get("hashtags")),

@@ -69,8 +69,12 @@ def render_reel(reel_id: str) -> None:
         reel = db.get(Reel, reel_id)
         if reel is None or not reel.script:
             return
-        scenes = reel.script["scenes"]
+        script = reel.script
+        scenes = script["scenes"]
         language, voice, style = reel.language, reel.voice, reel.style
+        # Told like a story: read a little slower, with its own voice clips.
+        story = reel.script_type == "story"
+        speed = reel_render.STORY_SPEED if story else 1.0
         track = db.get(AudioTrack, reel.music_id) if reel.music_id else None
         if track is not None and not track.is_ready:
             track = None
@@ -78,40 +82,75 @@ def render_reel(reel_id: str) -> None:
 
         folder = reel_render.reel_dir(reel_id)
         folder.mkdir(parents=True, exist_ok=True)
-        pictures = reel_render.scene_pictures(folder, scenes, settings, style)
+        pictures = reel_render.scene_pictures(folder, script, settings, style)
         voices = [
-            reel_render.voice_path(folder, i, sc["narration"], language, tts.voice_key(voice))
+            reel_render.voice_path(
+                folder,
+                i,
+                sc["narration"],
+                language,
+                tts.voice_key(voice) + (f"@{speed}" if story else ""),
+            )  # fmt: skip
             for i, sc in enumerate(scenes)
         ]
 
         def _make_voices() -> None:
             for path, sc in zip(voices, scenes, strict=True):
                 if not path.exists():
-                    samples, sample_rate = tts.synthesize(sc["narration"], language, voice)
+                    samples, sample_rate = tts.synthesize(
+                        sc["narration"], language, voice, speed=speed
+                    )
                     reel_render.write_wav(path, samples, sample_rate)
 
+        missing = [i for i, p in enumerate(pictures) if not p.exists()]
+
+        def _draw(n: int, i: int) -> bool:
+            """Scene i's picture (the n-th to draw), drawn again with a new seed
+            while Vision sees something wrong in it (an extra person, face or
+            hands), up to reel_picture_redraws times. The best one is kept, with
+            a warning beside it if it still looks wrong. False if the reel was
+            deleted meanwhile."""
+            prompt = reel_render.picture_prompt(reel_render.scene_prompt(scenes[i], script), style)
+            best: tuple[imagegen.Picture, list[str]] | None = None
+            for _ in range(1 + settings.reel_picture_redraws):
+                stage = f"Picture {n + 1} of {len(missing)}"
+                if best is not None:
+                    stage += " (drawing it again)"
+                if not _update(db, reel_id, stage=stage, progress=5 + 80 * n // len(missing)):
+                    return False
+                picture = imagegen.generate(
+                    prompt,
+                    width=settings.reel_image_width,
+                    height=settings.reel_image_height,
+                    seed=random.randrange(2**31),
+                    steps=settings.reel_image_steps,
+                )
+                problems = reel_render.picture_problems(picture.counts, scenes[i])
+                if best is None or len(problems) < len(best[1]):
+                    best = (picture, problems)
+                if not problems:
+                    break
+                log.info("picture_looks_wrong", extra={"reel_id": reel_id, "problems": problems})
+            picture, problems = best
+            warning = reel_render.warning_path(pictures[i])
+            if problems:
+                warning.write_text("; ".join(problems), encoding="utf-8")
+            else:
+                warning.unlink(missing_ok=True)
+            part = pictures[i].with_name(pictures[i].name + ".part")
+            part.write_bytes(picture.png)
+            os.replace(part, pictures[i])
+            return True
+
         try:
-            missing = [i for i, p in enumerate(pictures) if not p.exists()]
             if missing:
                 imagegen.check()
             with ThreadPoolExecutor(max_workers=1) as pool:
                 voice_job = pool.submit(_make_voices)
                 try:
-                    for done, i in enumerate(missing):
-                        stage = f"Picture {done + 1} of {len(missing)}"
-                        progress = 5 + 80 * done // len(missing)
-                        if not _update(db, reel_id, stage=stage, progress=progress):
+                    for n, i in enumerate(missing):
+                        if not _draw(n, i):
                             break
-                        png = imagegen.generate(
-                            reel_render.picture_prompt(scenes[i]["image_prompt"], style),
-                            width=settings.reel_image_width,
-                            height=settings.reel_image_height,
-                            seed=random.randrange(2**31),
-                            steps=settings.reel_image_steps,
-                        )
-                        part = pictures[i].with_name(pictures[i].name + ".part")
-                        part.write_bytes(png)
-                        os.replace(part, pictures[i])
                 finally:
                     if missing:
                         # Holding the model with Docker running swamped a 16 GB Mac.
@@ -132,6 +171,7 @@ def render_reel(reel_id: str) -> None:
                     music=music_path,
                     music_volume=music_volume,
                     workers=settings.render_concurrency,
+                    story=story,
                 )
             reel_render.remove_unused(folder, set(pictures) | set(voices))
         except (imagegen.ImageGenError, tts.TTSError, FFmpegError, music.MusicError) as exc:

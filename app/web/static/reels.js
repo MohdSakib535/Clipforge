@@ -21,6 +21,7 @@ function reelMaker() {
     gen: { voice: "", style: "cinematic", musicId: "", musicVolume: 20 },
     idea: { script_type: "story", description: "" }, // the open reel's, for "Write again"
     sample: { key: "", state: "" }, // the voice sample: state "loading" | "playing"
+    nameBefore: "", // a character's name while it is being edited (scenes use it)
     // Adding music to the library from the reel editor (upload or a link).
     // pendingId: a link import still downloading; picked once it is ready.
     reelMusic: { uploading: false, link: "", grabbing: false, deleting: false, pendingId: null, suggesting: false },
@@ -109,10 +110,11 @@ function reelMaker() {
     // new or changed scenes, another style redraws every picture.
     generateEta(key) {
       if (!this.reel || !this.draft) return 0;
-      const saved = this.reel.script?.scenes || [];
+      const saved = this.reel.script || { scenes: [] };
       const n = key !== this.reel.style
         ? this.draft.scenes.length
-        : this.draft.scenes.filter((s, i) => !this.reel.scene_pictures[i] || s.image_prompt !== saved[i]?.image_prompt).length;
+        : this.draft.scenes.filter((s, i) => !this.reel.scene_pictures[i] || !saved.scenes[i]
+          || this.pictureSource(s, this.draft) !== this.pictureSource(saved.scenes[i], saved)).length;
       return this.picturesEta(n) + this.options.timing.render_s_per_s * this.estimateS();
     },
     // Being worked on. A "stalled" reel was cut off by a restart: free to retry.
@@ -468,7 +470,44 @@ function reelMaker() {
       this.draft.scenes[0].narration = h;
     },
     addScene() {
-      this.draft.scenes.push({ narration: "", image_prompt: "" });
+      const scene = { narration: "", image_prompt: "" };
+      // Scripts with characters: the same keys as the server's (it compares them).
+      if (this.draft.characters !== undefined) Object.assign(scene, { characters: [], crowd: false });
+      this.draft.scenes.push(scene);
+    },
+
+    // ----- Characters (the same look in every picture) -----
+    addCharacter() {
+      this.draft.characters.push({ name: `Person ${this.draft.characters.length + 1}`, look: "" });
+    },
+    removeCharacter(k) {
+      const [gone] = this.draft.characters.splice(k, 1);
+      for (const s of this.draft.scenes) {
+        if (s.characters) s.characters = s.characters.filter((n) => n !== gone.name);
+      }
+    },
+    // A new name for a character: its scenes follow.
+    renameCharacter(before, after) {
+      if (!before || before === after) return;
+      for (const s of this.draft.scenes) {
+        if (s.characters) s.characters = s.characters.map((n) => (n === before ? after : n));
+      }
+    },
+    // In or out of a scene's picture; at most 3 (more come out with extra arms and faces).
+    toggleInScene(s, name) {
+      if (s.characters.includes(name)) {
+        s.characters = s.characters.filter((n) => n !== name);
+      } else if (s.characters.length < 3) {
+        s.characters = [...s.characters, name];
+      } else {
+        this.notice = "At most 3 characters in a picture (2 or fewer come out best).";
+      }
+    },
+    // What a scene's picture is drawn from (as reel_render.scene_prompt): a change redraws it.
+    pictureSource(s, script) {
+      const looks = Object.fromEntries((script.characters || []).map((c) => [c.name, c.look]));
+      return JSON.stringify([s.image_prompt, (s.characters || []).map((n) => [n, looks[n]]), !!s.crowd,
+        script.setting || ""]);
     },
     removeScene(i) {
       this.draft.scenes.splice(i, 1);
@@ -481,11 +520,14 @@ function reelMaker() {
     estimateS() {
       if (!this.draft) return 0;
       const lang = this.options.languages.find((l) => l.key === this.reel.language);
-      // A slower voice ("calm") takes longer for the same words.
-      const speed = lang?.voices.find((v) => v.key === this.gen.voice)?.speed || 1;
+      // A slower voice ("calm") takes longer for the same words; a story is read a
+      // little slower (0.92), with 0.8 s between scenes (reel_render.STORY_*).
+      const story = this.reel.script_type === "story";
+      const speed = (lang?.voices.find((v) => v.key === this.gen.voice)?.speed || 1) * (story ? 0.92 : 1);
       const wps = (lang?.words_per_s || 2.8) * speed;
       const words = this.draft.scenes.reduce((n, s) => n + this.words(s.narration), 0);
-      return Math.round(words / wps + this.draft.scenes.length * 0.3 + 0.5);
+      const gaps = (this.draft.scenes.length - 1) * (story ? 0.8 : 0.25);
+      return Math.round(words / wps + gaps + 0.8);
     },
     pictureUrl(i) {
       return `/reels/${this.reel.id}/scenes/${i}/picture?v=${encodeURIComponent(this.reel.updated_at)}`;

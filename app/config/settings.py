@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     # loading the image model (once per video). Change with the size.
     reel_picture_seconds: float = 58
     reel_model_load_seconds: float = 5
+    # A picture with an extra person, face or hands (Vision counts them on the
+    # Mac) is drawn again with a new seed, up to this many times.
+    reel_picture_redraws: int = 2
     # Kokoro voice model, downloaded on first use to <storage>/.kokoro.
     kokoro_model_url: str = (
         "https://github.com/thewh1teagle/kokoro-onnx/releases/download/"

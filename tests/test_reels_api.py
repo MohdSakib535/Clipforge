@@ -150,7 +150,7 @@ def test_new_picture_drops_that_scene_picture_only(client, db_session):
     _with_script(db_session, reel["id"], status="ready")
     folder = reel_render.reel_dir(reel["id"])
     folder.mkdir(parents=True, exist_ok=True)
-    pictures = reel_render.scene_pictures(folder, SCRIPT["scenes"], get_settings(), "cinematic")
+    pictures = reel_render.scene_pictures(folder, SCRIPT, get_settings(), "cinematic")
     for p in pictures:
         p.write_bytes(b"png")
     assert client.get(f"/reels/{reel['id']}").json()["scene_pictures"] == [True, True, True]
@@ -172,7 +172,7 @@ def test_another_style_needs_every_picture_again(client, db_session):
     _with_script(db_session, reel["id"], status="ready")
     folder = reel_render.reel_dir(reel["id"])
     folder.mkdir(parents=True, exist_ok=True)
-    for p in reel_render.scene_pictures(folder, SCRIPT["scenes"], get_settings(), "cinematic"):
+    for p in reel_render.scene_pictures(folder, SCRIPT, get_settings(), "cinematic"):
         p.write_bytes(b"png")
     assert client.get(f"/reels/{reel['id']}").json()["scene_pictures"] == [True, True, True]
 
@@ -335,3 +335,55 @@ def test_listen_to_a_voice_makes_the_sample_once(client, tmp_path, monkeypatch):
     assert made == [(tts.LANGUAGES["hi"].sample, "hm_deep")]  # kept after the first time
     assert client.get("/reels/voices/hi/af_heart/sample").status_code == 400  # not Hindi
     assert client.get("/reels/voices/xx/hm_deep/sample").status_code == 400
+
+
+def test_a_script_with_characters_is_saved_as_it_is(client, db_session):
+    reel = _create(client)
+    _with_script(db_session, reel["id"])
+    script = {
+        **SCRIPT,
+        "setting": "Ancient India: forests and hermitages.",
+        "characters": [{"name": "Ram", "look": "a young prince with a bow"}],
+        "scenes": [{**sc, "characters": ["Ram"], "crowd": False} for sc in SCRIPT["scenes"]],
+    }
+    saved = client.put(f"/reels/{reel['id']}/script", json=script).json()["script"]
+    assert saved["characters"] == [{"name": "Ram", "look": "a young prince with a bow"}]
+    assert list(saved) == ["title", "hooks", "setting", "characters", "scenes", "caption",
+                           "hashtags"]  # fmt: skip
+    assert saved["scenes"][0] == {**SCRIPT["scenes"][0], "characters": ["Ram"], "crowd": False}
+    too_many = {**script, "scenes": [{**SCRIPT["scenes"][0], "characters": ["A", "B", "C", "D"]}]}
+    assert client.put(f"/reels/{reel['id']}/script", json=too_many).status_code == 422
+    # A script from before characters gets none added.
+    old = client.put(f"/reels/{reel['id']}/script", json=SCRIPT).json()["script"]
+    assert "characters" not in old and "characters" not in old["scenes"][0]
+
+
+def test_a_picture_that_may_look_wrong_says_so(client, db_session):
+    reel = _create(client)
+    _with_script(db_session, reel["id"], status="ready")
+    folder = reel_render.reel_dir(reel["id"])
+    folder.mkdir(parents=True, exist_ok=True)
+    pictures = reel_render.scene_pictures(folder, SCRIPT, get_settings(), "cinematic")
+    for p in pictures:
+        p.write_bytes(b"png")
+    reel_render.warning_path(pictures[1]).write_text("2 people or faces instead of 1")
+    body = client.get(f"/reels/{reel['id']}").json()
+    assert body["scene_warnings"] == [None, "2 people or faces instead of 1", None]
+    client.post(f"/reels/{reel['id']}/scenes/1/new-picture")  # drawn again: the warning goes
+    assert not reel_render.warning_path(pictures[1]).exists()
+
+
+def test_the_image_client_reads_what_vision_saw(monkeypatch):
+    import httpx
+
+    from app.services import imagegen
+
+    def reply(headers):
+        return lambda *a, **k: httpx.Response(200, content=b"png", headers=headers)
+
+    monkeypatch.setattr(imagegen.httpx, "post", reply({"X-Faces": "2", "X-Hands": "3",
+                                                       "X-People": "2"}))  # fmt: skip
+    pic = imagegen.generate("p", width=16, height=16, seed=1, steps=1)
+    assert (pic.png, pic.counts) == (b"png", {"faces": 2, "hands": 3, "people": 2})
+    monkeypatch.setattr(imagegen.httpx, "post", reply({}))  # an older generator
+    assert imagegen.generate("p", width=16, height=16, seed=1, steps=1).counts is None

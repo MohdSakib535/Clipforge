@@ -56,7 +56,14 @@ def _pictures(reel: Reel) -> list[Path]:
     if not reel.script:
         return []
     folder = reel_render.reel_dir(reel.id)
-    return reel_render.scene_pictures(folder, reel.script["scenes"], get_settings(), reel.style)
+    return reel_render.scene_pictures(folder, reel.script, get_settings(), reel.style)
+
+
+def _warning(picture: Path) -> str | None:
+    warn = reel_render.warning_path(picture)
+    if not picture.exists() or not warn.exists():
+        return None
+    return warn.read_text(encoding="utf-8").strip() or None
 
 
 def _video(reel: Reel) -> Path | None:
@@ -70,6 +77,7 @@ def _video(reel: Reel) -> Path | None:
 def _out(reel: Reel) -> ReelOut:
     video = _video(reel)
     has_video = video is not None
+    pictures = _pictures(reel)
     return ReelOut(
         id=reel.id,
         platform=reel.platform,
@@ -91,7 +99,8 @@ def _out(reel: Reel) -> ReelOut:
         has_video=has_video,
         video_version=int(video.stat().st_mtime) if has_video else None,
         video_duration_s=reel.video_duration_s,
-        scene_pictures=[p.exists() for p in _pictures(reel)],
+        scene_pictures=[p.exists() for p in pictures],
+        scene_warnings=[_warning(p) for p in pictures],
         bucket=bucket.copy_out(reel.bucket, video.stat().st_mtime_ns if has_video else None),
         created_at=reel.created_at,
         updated_at=reel.updated_at,
@@ -339,6 +348,7 @@ def new_picture(
     if not 0 <= index < len(pictures):
         raise NotFoundError("Scene not found")
     pictures[index].unlink(missing_ok=True)
+    reel_render.warning_path(pictures[index]).unlink(missing_ok=True)
     _start_render(db, reel)
     db.refresh(reel)
     return _out(reel)

@@ -103,7 +103,7 @@ def test_captions_light_up_the_word_being_spoken():
 def test_picture_prompt_starts_with_the_style():
     p = reel_render.picture_prompt("a cat on a roof at night.", "anime")
     assert p.startswith("Anime style illustration, ")
-    assert ". a cat on a roof at night. One single vertical 9:16 picture, not a collage" in p
+    assert ". a cat on a roof at night. Natural, correct anatomy. One single vertical" in p
     assert reel_render.DEFAULT_STYLE in reel_render.STYLES
 
 
@@ -211,3 +211,127 @@ def test_remove_unused_keeps_only_current_pictures_and_voices(tmp_path):
     reel_render.remove_unused(tmp_path, {keep, voice})
     assert keep.exists() and voice.exists() and video.exists()
     assert not old.exists()
+
+
+RAMAYANA = {
+    "setting": "Ancient India in the Ramayana: forests, hermitages, oil lamps.",
+    "characters": [
+        {"name": "Ram", "look": "a young prince with a bow, in saffron robes"},
+        {"name": "Sita", "look": "a young princess in a red sari"},
+    ],
+    "scenes": [
+        {"narration": "a", "image_prompt": "Ram walks into the forest.", "characters": ["Ram"],
+         "crowd": False},
+        {"narration": "b", "image_prompt": "Sages bless them", "characters": ["Ram", "Sita"],
+         "crowd": True},
+        {"narration": "c", "image_prompt": "A river at dawn", "characters": [], "crowd": False},
+    ],
+}  # fmt: skip
+
+
+def test_each_picture_gets_its_peoples_looks_and_the_setting():
+    one, two, none = (reel_render.scene_prompt(sc, RAMAYANA) for sc in RAMAYANA["scenes"])
+    assert one.startswith("Ram walks into the forest. In the picture: Ram, a young prince")
+    assert "Only 1 person in the picture, nobody else: no statues, idols or paintings" in one
+    assert one.endswith(
+        "Time and place: Ancient India in the Ramayana: forests, hermitages, oil lamps. "
+        "Everything in the picture belongs there."
+    )
+    assert "Ram, a young prince with a bow, in saffron robes; Sita, a young princess" in two
+    assert "Other people only in the background" in two and "Only" not in two
+    assert "In the picture" not in none and "Time and place: Ancient India" in none
+    # A script from before characters: the picture prompt as it was.
+    assert reel_render.scene_prompt({"image_prompt": "a cat."}, {"scenes": []}) == "a cat."
+
+
+def test_a_new_look_redraws_only_the_pictures_with_that_character(tmp_path):
+    from app.config.settings import get_settings
+
+    settings = get_settings()
+    before = reel_render.scene_pictures(tmp_path, RAMAYANA, settings, "cinematic")
+    blue = {"name": "Sita", "look": "a princess in a blue sari"}
+    sita = {**RAMAYANA, "characters": [RAMAYANA["characters"][0], blue]}
+    after = reel_render.scene_pictures(tmp_path, sita, settings, "cinematic")
+    assert [a == b for a, b in zip(before, after, strict=True)] == [True, False, True]
+    elsewhere = reel_render.scene_pictures(tmp_path, {**RAMAYANA, "setting": "Mars"}, settings,
+                                           "cinematic")  # fmt: skip
+    assert all(a != b for a, b in zip(before, elsewhere, strict=True))  # every picture
+    # Old scripts keep their pictures.
+    old = {"scenes": [{"narration": "a", "image_prompt": "a cat"}]}
+    assert reel_render.scene_pictures(tmp_path, old, settings, "cinematic") == [
+        reel_render.picture_path(tmp_path, 0, "a cat", "cinematic", settings.reel_image_width,
+                                 settings.reel_image_height, settings.reel_image_steps)
+    ]  # fmt: skip
+
+
+def test_what_vision_sees_tells_a_broken_picture():
+    one = {"characters": ["Ram"], "crowd": False}
+
+    def seen(faces: int, hands: int, people: int) -> dict[str, int]:
+        return {"faces": faces, "hands": hands, "people": people}
+
+    assert reel_render.picture_problems(seen(1, 2, 1), one) == []
+    assert reel_render.picture_problems(None, one) == []  # nothing seen: nothing to judge
+    assert reel_render.picture_problems(seen(2, 2, 1), one) == ["2 people or faces instead of 1"]
+    assert reel_render.picture_problems(seen(1, 4, 1), one) == ["4 hands for 1 people"]
+    crowd = {"characters": ["Ram"], "crowd": True}
+    assert reel_render.picture_problems(seen(5, 9, 6), crowd) == []  # others are allowed
+    assert reel_render.picture_problems(seen(2, 9, 2), crowd) == ["9 hands for 2 people"]
+    old = {"image_prompt": "a market"}  # who should be there is not known: hands only
+    assert reel_render.picture_problems(seen(4, 6, 4), old) == []
+
+
+def test_a_warning_goes_with_its_picture(tmp_path):
+    keep, old = tmp_path / "scene01-aaa.png", tmp_path / "scene01-bbb.png"
+    for f in (keep, old, reel_render.warning_path(keep), reel_render.warning_path(old)):
+        f.write_text("x")
+    reel_render.remove_unused(tmp_path, {keep})
+    assert reel_render.warning_path(keep).exists() and not reel_render.warning_path(old).exists()
+
+
+def test_a_story_blends_in_the_breath_before_the_next_line():
+    frames, spoken = [54, 60, 45], [30, 36, 21]  # each line plus a 0.8 s breath
+    shown, blends, starts = reel_render.scene_timing(frames, spoken, story=True)
+    assert blends == [24, 24]  # 0.8 s, within each breath
+    assert starts == [0, 24, 24]  # each line starts once its picture is in
+    assert shown == [30, 60, 69] and sum(shown) == sum(frames)  # voice and picture in step
+    # A reel blends as the next line starts; nothing moves.
+    assert reel_render.scene_timing(frames, spoken) == (frames, [12, 12], [0, 0, 0])
+    # A breath shorter than the blend keeps the blend inside it.
+    assert reel_render.scene_timing([40, 40], [30, 30], story=True)[1] == [10]
+
+
+def test_a_story_drifts_and_has_calm_captions():
+    assert reel_render.camera_move(1, 60, story=True) == (
+        "1+0.08*on/60", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    )  # fmt: skip
+    cues = caption_cues("Long ago in a quiet forest there lived a young prince.", 3.0,
+                        max_words=5, max_chars=30)  # fmt: skip
+    calm = build_ass(cues, "DejaVu Sans", story=True)
+    assert "\\fscx80" not in calm and "Style: Caption,DejaVu Sans,80," in calm
+    assert len(cues) <= 3  # a line at a time, not 2-3 words
+
+
+def test_a_storys_lines_start_and_end_softly():
+    np = pytest.importorskip("numpy")
+    line = np.ones(2400, np.float32)
+    soft = reel_render._soften(line, 24000)
+    assert soft[0] == 0.0 and soft[-1] == 0.0 and soft[1200] == 1.0
+    assert line[0] == 1.0  # the clip itself is untouched
+
+
+@needs_ffmpeg
+def test_a_story_fades_into_the_next_picture_before_its_line(tmp_path):
+    red, blue = _picture(tmp_path / "a.png", "red"), _picture(tmp_path / "b.png", "blue")
+    scenes = [
+        SceneInput(red, "Long ago.", _voice(tmp_path / "a.wav", 1.0)),
+        SceneInput(blue, "Then.", _voice(tmp_path / "b.wav", 1.0)),
+    ]
+    duration = reel_render.render(tmp_path, scenes, font="DejaVu Sans", story=True)
+    # Scene 1: its line (30 frames) and a 0.8 s breath (24); scene 2's line starts at 54.
+    assert duration == pytest.approx((54 + 54) / 30)
+    assert _frame_count(tmp_path / "reel.mp4") == 54 + 54
+    red_end, mixed, blue_start = (_color(tmp_path / "reel.mp4", n) for n in (28, 42, 55))
+    assert red_end[0] > 3 * red_end[2]  # the line is still on red
+    assert blue_start[2] > 3 * blue_start[0]  # the next line starts on blue
+    assert blue_start[0] < mixed[0] < red_end[0]  # faded during the breath

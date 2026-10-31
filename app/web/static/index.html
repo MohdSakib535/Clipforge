@@ -722,6 +722,29 @@
                     </div>
                   </div>
 
+                  <!-- Characters and setting: the same in every picture (scripts from before have none). -->
+                  <details x-show="draft.characters !== undefined" open class="mb-4 bg-slate-800/40 rounded-lg px-3 py-2">
+                    <summary class="text-xs text-slate-400 cursor-pointer">Characters &amp; setting
+                      <span class="text-slate-500">(the same in every picture; a change draws its pictures again)</span></summary>
+                    <label class="block text-xs text-slate-400 mt-3 mb-3">Time and place
+                      <textarea x-model="draft.setting" rows="2" maxlength="1000" placeholder="e.g. Ancient India in the Ramayana: forests, mountains, rivers, hermitages, palaces with carved pillars, oil lamps"
+                        class="block w-full mt-1 bg-slate-900 rounded px-2 py-1 text-xs text-slate-100"></textarea>
+                    </label>
+                    <template x-for="(c, k) in draft.characters || []" :key="k">
+                      <div class="mb-3">
+                        <div class="flex items-center gap-2 mb-1">
+                          <input x-model="c.name" maxlength="60" @focus="nameBefore = c.name" @change="renameCharacter(nameBefore, c.name)"
+                            class="w-40 bg-slate-900 rounded px-2 py-1 text-xs text-slate-100 font-medium" aria-label="Character name" />
+                          <button @click="removeCharacter(k)" class="text-xs text-slate-500 hover:text-rose-300">remove</button>
+                        </div>
+                        <textarea x-model="c.look" rows="2" maxlength="800" placeholder="Age, build, face, skin, hair, clothes and their colours, what they carry"
+                          class="block w-full bg-slate-900 rounded px-2 py-1 text-xs text-slate-100" aria-label="Look"></textarea>
+                      </div>
+                    </template>
+                    <button x-show="(draft.characters || []).length < 6" @click="addCharacter()"
+                      class="mb-2 px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">+ Add character</button>
+                  </details>
+
                   <div class="space-y-3 mb-3">
                     <template x-for="(s, i) in draft.scenes" :key="i">
                       <div class="flex gap-3 bg-slate-800/50 rounded-lg p-3">
@@ -733,6 +756,8 @@
                             <span x-show="!reel.scene_pictures[i]">no picture yet</span>
                           </div>
                           <button x-show="reel.scene_pictures[i]" @click="newPicture(i)" class="mt-1 w-full text-[11px] px-1 py-0.5 rounded bg-slate-700 hover:bg-slate-600">New picture</button>
+                          <p x-show="reel.scene_pictures[i] && reel.scene_warnings?.[i]" class="mt-1 text-[10px] leading-tight text-amber-300"
+                            :title="reel.scene_warnings?.[i]" x-text="`⚠ May look wrong: ${reel.scene_warnings?.[i]}`"></p>
                         </div>
                         <div class="flex-1 min-w-0">
                           <div class="flex justify-between text-xs text-slate-400 mb-1">
@@ -743,6 +768,14 @@
                             </span>
                           </div>
                           <textarea x-model="s.narration" rows="2" class="w-full bg-slate-900 rounded px-2 py-1 text-sm mb-1"></textarea>
+                          <div x-show="s.characters !== undefined && (draft.characters || []).length" class="flex flex-wrap items-center gap-1 mb-1 text-[11px]">
+                            <span class="text-slate-500">In the picture:</span>
+                            <template x-for="c in draft.characters || []" :key="c.name">
+                              <button type="button" @click="toggleInScene(s, c.name)" class="px-1.5 py-0.5 rounded"
+                                :class="(s.characters || []).includes(c.name) ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'" x-text="c.name"></button>
+                            </template>
+                            <label class="ml-1 text-slate-400"><input type="checkbox" x-model="s.crowd" class="align-middle" /> others too</label>
+                          </div>
                           <details class="text-xs">
                             <summary class="cursor-pointer select-none text-slate-400 hover:text-slate-200">Picture description</summary>
                             <textarea x-model="s.image_prompt" rows="2" class="w-full mt-1 bg-slate-900 rounded px-2 py-1 text-xs"></textarea>

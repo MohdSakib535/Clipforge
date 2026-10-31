@@ -6,8 +6,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.bucket import BucketCopy
 from app.services.reel_script import (
+    MAX_CHARACTERS,
     MAX_DESCRIPTION,
     MAX_DURATION_S,
+    MAX_IN_PICTURE,
     MAX_SCENES,
     MIN_DURATION_S,
 )
@@ -44,6 +46,19 @@ class ReelScene(BaseModel):
 
     narration: str = Field(min_length=1, max_length=800)
     image_prompt: str = Field(min_length=1, max_length=1000)
+    # Who is in its picture (names from the script's characters) and whether
+    # other people are too. None: a script from before characters.
+    characters: list[str] | None = Field(default=None, max_length=MAX_IN_PICTURE)
+    crowd: bool | None = None
+
+
+class ReelCharacter(BaseModel):
+    """A person or animal drawn with the same look in every picture."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=60)
+    look: str = Field(min_length=1, max_length=800)
 
 
 class ReelMusic(BaseModel):
@@ -65,6 +80,10 @@ class ReelScript(BaseModel):
 
     title: str = Field(default="", max_length=200)
     hooks: list[str] = Field(default_factory=list, max_length=5)
+    # The story's time and place, and its people's looks: in every picture.
+    # None: a script from before them. Same key order as the generated script.
+    setting: str | None = Field(default=None, max_length=1000)
+    characters: list[ReelCharacter] | None = Field(default=None, max_length=MAX_CHARACTERS)
     scenes: list[ReelScene] = Field(min_length=1, max_length=MAX_SCENES)
     caption: str = Field(default="", max_length=2200)
     hashtags: list[str] = Field(default_factory=list, max_length=30)
@@ -102,6 +121,9 @@ class ReelOut(BaseModel):
     video_version: int | None = None  # changes whenever the file does (cache-busting)
     video_duration_s: float | None = None
     scene_pictures: list[bool]  # per scene: is its picture made yet?
+    # Per scene: why its picture may be wrong (it still looked wrong after
+    # being drawn again), or None.
+    scene_warnings: list[str | None] = []
     bucket: BucketCopy | None = None  # its copy in the bucket, once uploaded
     created_at: datetime
     updated_at: datetime

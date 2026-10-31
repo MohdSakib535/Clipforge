@@ -48,7 +48,7 @@ def test_script_types_shape_the_scenes():
     facts = reel_script.build_messages("x", "facebook", "en", 35, "facts")[0]["content"]
     assert "explain the topic step by step" in facts and "share it with someone" in facts
     # A character drawn in several pictures must look the same in each.
-    assert "described in full, the same way, in every image_prompt" in story
+    assert "the look is written once, in full, here, and is added to every picture" in story
 
 
 def test_call_to_action_closes_the_last_scene():
@@ -105,9 +105,10 @@ def test_writing_rules_against_mixed_languages_filler_and_looks_in_narration():
     assert "never words from any other language" in hindi
     assert "never in Roman letters" in hindi  # no Hinglish in a Hindi script
     english = reel_script.build_messages("x", "instagram", "en", 35)[0]["content"]
-    assert "never words from any other language" in english and "Roman" not in english
+    assert "never words from any other language" in english
+    assert "Roman letters" not in english  # that rule is for Hindi
     assert "never repeat a line or an idea" in hindi and "one point of view" in hindi
-    assert "a narration never says anyone's age, hair, build, face or clothes" in hindi
+    assert "never says anyone's age, hair, build, face or clothes" in hindi
     assert "never a summary" in hindi  # stories show moments
 
 
@@ -268,8 +269,8 @@ def test_long_reel_gets_room_for_a_long_reply(monkeypatch):
 
     monkeypatch.setattr(reel_script.httpx, "post", fake_post)
     s = reel_script.generate_script("topic", "instagram", "hi", 300)
-    assert sent["body"]["options"]["num_predict"] == 4500
-    assert sent["body"]["options"]["num_ctx"] == 6548
+    assert sent["body"]["options"]["num_predict"] == 5000
+    assert sent["body"]["options"]["num_ctx"] == 7048
     assert len(s["scenes"]) == 15
     assert "a few short spoken sentences" in sent["body"]["messages"][0]["content"]
 
@@ -292,7 +293,12 @@ def test_script_carries_its_music_suggestion():
                   "search": "upbeat pop no copyright background music"},
     }  # fmt: skip
     s = normalize_script(raw, topic="t", language="en", scenes=1)
-    assert list(s) == ["title", "hooks", "scenes", "caption", "hashtags", "music"]
+    order = ["title", "hooks", "setting", "characters", "scenes", "caption", "hashtags", "music"]
+    assert list(s) == order
+    from app.schemas.reel import ReelScene, ReelScript  # the page compares the two: same order
+
+    assert list(ReelScript.model_fields) == order
+    assert list(s["scenes"][0]) == list(ReelScene.model_fields)
     assert s["music"]["genre"] == "pop"
     assert "music" not in normalize_script({**raw, "music": {}}, topic="t", language="en", scenes=1)
     assert "music" in reel_script.response_schema(3)["required"]
@@ -387,11 +393,11 @@ def test_a_failed_translation_keeps_the_picture_prompts(monkeypatch):
         raise ScriptError("Ollama isn't running")
 
     monkeypatch.setattr(reel_script, "_chat", broken)
-    reel_script.english_picture_prompts(scenes)
+    reel_script.english_picture_texts({"scenes": scenes})
     assert scenes[0]["image_prompt"] == "बारिश"
     # Still not English, or the wrong count: kept too.
     monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: {"prompts": ["बारिश में"]})
-    reel_script.english_picture_prompts(scenes)
+    reel_script.english_picture_texts({"scenes": scenes})
     assert scenes[0]["image_prompt"] == "बारिश"
 
 
@@ -441,3 +447,144 @@ def test_json_bits_leaked_into_a_text_are_cleaned_up():
     )
     assert reel_script._clean("करण कहता है, ‘राहुल, रुको!’") == "करण कहता है, ‘राहुल, रुको!’"
     assert reel_script._clean("He said “run” and ran.") == "He said “run” and ran."
+
+
+def test_the_model_settles_the_setting_and_looks_before_the_scenes():
+    schema = reel_script.response_schema(3)
+    props = list(schema["properties"])
+    assert props.index("setting") < props.index("scenes")
+    assert props.index("characters") < props.index("scenes")
+    scene = schema["properties"]["scenes"]["items"]
+    assert scene["properties"]["characters"]["maxItems"] == 3
+    assert {"characters", "crowd"} <= set(scene["required"])
+    system = reel_script.build_messages("Ramayana", "instagram", "hi", 35)[0]["content"]
+    assert "never modern things such as libraries" in system  # the time of the story
+    assert "call the characters by their name only" in system
+    assert "at most 3 (2 or fewer come out best)" in system
+    assert "a name in English letters" in system
+
+
+def test_characters_and_who_is_in_each_picture_are_cleaned_up():
+    raw = {
+        "setting": " Ancient India: forests, hermitages. ",
+        "characters": [
+            {"name": "Ram", "look": "a young prince in saffron robes, carrying a bow"},
+            {"name": "Ram", "look": "a second Ram: dropped"},
+            {"name": "Sita", "look": ""},  # no look: dropped
+            {"name": "Lakshman", "look": "Ram's younger brother in white"},
+        ],
+        "scenes": [
+            {"narration": "Ram enters the forest.", "image_prompt": "Ram walks",
+             "characters": ["ram", "Sita", "Ravan", "Lakshman"], "crowd": False},
+            {"narration": "Sages greet them.", "image_prompt": "a hermitage",
+             "characters": [], "crowd": True},
+        ],
+    }  # fmt: skip
+    s = normalize_script(raw, topic="Ramayana", language="en", scenes=2)
+    assert s["setting"] == "Ancient India: forests, hermitages."
+    assert [c["name"] for c in s["characters"]] == ["Ram", "Lakshman"]
+    # Known names only (any case), at most 2.
+    assert s["scenes"][0]["characters"] == ["Ram", "Lakshman"]
+    assert (s["scenes"][1]["characters"], s["scenes"][1]["crowd"]) == ([], True)
+
+
+def test_looks_and_setting_are_put_into_english_too(monkeypatch):
+    script = {
+        "setting": "प्राचीन भारत का जंगल",
+        "characters": [{"name": "Ram", "look": "भगवा वस्त्र में युवा राजकुमार"}],
+        "scenes": [{"narration": "n", "image_prompt": "Ram in the forest"}],
+    }
+    asked = []
+
+    def fake_chat(messages, schema, **options):
+        asked.append(messages[-1]["content"])
+        return {"prompts": ["a young prince in saffron robes", "an ancient Indian forest"]}
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    reel_script.english_picture_texts(script)
+    assert "Ram in the forest" not in asked[0]  # already English: not sent
+    assert script["characters"][0]["look"] == "a young prince in saffron robes"
+    assert script["setting"] == "an ancient Indian forest"
+
+
+def test_hindi_names_and_people_the_prompt_draws_are_matched():
+    # Seen with gemma3: names in Devanagari while the picture prompts say "Ram",
+    # and a third person drawn but left out of the scene's list (max 2 then).
+    raw = {
+        "characters": [
+            {"name": "राम", "look": "a young prince in saffron robes"},
+            {"name": "सीता", "look": "a young woman in a white sari"},
+            {"name": "लक्ष्मण", "look": "a young man in grey"},
+        ],
+        "scenes": [
+            {"narration": "a", "image_prompt": "Ram, Sita and Lakshman walk through the jungle",
+             "characters": ["राम", "लक्ष्मण"], "crowd": False},
+            {"narration": "b", "image_prompt": "A river at dawn", "characters": ["Raam"],
+             "crowd": False},
+        ],
+    }  # fmt: skip
+    s = normalize_script(raw, topic="Ramayana", language="hi", scenes=2)
+    assert [c["name"] for c in s["characters"]] == ["Ram", "Sita", "Lakshman"]  # as the prompts say
+    assert s["scenes"][0]["characters"] == ["Ram", "Sita", "Lakshman"]  # Sita: named in the prompt
+    assert s["scenes"][1]["characters"] == ["Ram"]  # "Raam" is Ram
+
+
+def test_the_setting_never_brings_the_characters_into_every_picture():
+    # Seen: "Ram, Sita, and Lakshman are dressed in..." in the setting drew Ram
+    # into a picture of Sita and Lakshman, three times running.
+    raw = {
+        "setting": "An ancient forest by a river. Ram, Sita, and Lakshman are dressed in cotton "
+        "- Ram in ochre. A mud hut stands in a clearing.",
+        "characters": [{"name": "Ram", "look": "ochre robes"}, {"name": "Sita", "look": "white"}],
+        "scenes": [{"narration": "a", "image_prompt": "Sita by the hut", "characters": ["Sita"],
+                    "crowd": False}],
+    }  # fmt: skip
+    s = normalize_script(raw, topic="Ramayana", language="en", scenes=1)
+    assert s["setting"] == "An ancient forest by a river. A mud hut stands in a clearing."
+    system = reel_script.build_messages("Ramayana", "instagram", "hi", 35)[0]["content"]
+    assert "Never the characters themselves" in system
+
+
+def test_no_extra_figures_and_clothes_of_the_time():
+    # Seen: "praying towards a Vishnu figure" drew a fourth person three times
+    # running, and Lakshman came out in Roman-looking armour.
+    system = reel_script.build_messages("Ramayana", "instagram", "hi", 35)[0]["content"]
+    assert "never adds anyone else: no other person, god, statue, idol" in system
+    assert "show a lamp, flowers, a symbol or a temple instead" in system
+    assert "never western, Roman or medieval European armour" in system
+
+
+def test_word_counts_after_a_narration_are_dropped():
+    # Seen: the model copied the word count it was asked for into the line.
+    seen = (
+        "देखो, राजकुमार राम, अपने बगीचे में खेल रहा है, जीवन कितना सरल और खुशहाल है।" "”, 20 words. 17 words."
+    )
+    assert reel_script._spoken(seen) == (
+        "देखो, राजकुमार राम, अपने बगीचे में खेल रहा है, जीवन कितना सरल और खुशहाल है।"
+    )
+    assert reel_script._spoken("Ram goes to the forest. (18 words)") == "Ram goes to the forest."
+    assert reel_script._spoken("राम वन गए। - 12 शब्द") == "राम वन गए।"
+    # In the middle of a line it is meant.
+    assert reel_script._spoken("Learn 5 words a day.") == "Learn 5 words a day."
+    raw = {"scenes": [{"narration": "Ram smiles.”, 20 words.", "image_prompt": "p"}]}
+    assert normalize_script(raw, topic="t", language="en", scenes=1)["scenes"][0]["narration"] == (
+        "Ram smiles."
+    )
+    system = reel_script.build_messages("x", "instagram", "hi", 35)[0]["content"]
+    assert "never word counts, labels or notes" in system
+
+
+def test_a_story_flows_and_is_paced_like_one():
+    story = reel_script.build_messages("x", "instagram", "hi", 40, "story")[0]["content"]
+    assert "one flowing story told aloud, not separate captions" in story
+    assert "each opening the story in a different way" in story  # its hooks
+    tips = reel_script.build_messages("x", "instagram", "hi", 40, "tips")[0]["content"]
+    assert "flowing story" not in tips and "(question, bold claim, surprising fact)" in tips
+    # Read slower, with longer breaths: fewer words for the same length.
+    assert reel_script.words_per_scene(40, "hi", 6, story=True) < reel_script.words_per_scene(
+        40, "hi", 6
+    )
+    lines = ["शब्द " * 20] * 3
+    longer = reel_script.spoken_seconds(lines, "hi", story=True)
+    assert longer == pytest.approx(60 / (2.5 * 0.92) + 2 * 0.8 + 0.8)
+    assert reel_script.spoken_seconds(lines, "hi") == pytest.approx(60 / 2.5 + 2 * 0.25 + 0.8)

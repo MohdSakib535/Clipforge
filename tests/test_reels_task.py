@@ -34,6 +34,7 @@ def factory(db_session, monkeypatch):
 
 
 def _reel(db_session, **fields) -> Reel:
+    fields.setdefault("script_type", "tips")  # paced as a reel (a story is slower)
     reel = Reel(user_id="u1", platform="instagram", language="en", voice="af_heart",
                 topic="water", duration_s=20, **fields)  # fmt: skip
     db_session.add(reel)
@@ -78,14 +79,16 @@ def fakes(tmp_path, monkeypatch):
          "-frames:v", "1", str(png)],
         check=True,
     )  # fmt: skip
-    calls = {"pictures": [], "voices": [], "unloads": 0}
+    calls = {"pictures": [], "voices": [], "unloads": 0, "counts": [], "speeds": []}
 
     def fake_generate(prompt, *, width, height, seed, steps):
         calls["pictures"].append(prompt)
-        return png.read_bytes()
+        counts = calls["counts"].pop(0) if calls["counts"] else None  # what Vision "sees"
+        return imagegen.Picture(png.read_bytes(), counts)
 
-    def fake_synthesize(text, language, voice):
+    def fake_synthesize(text, language, voice, speed=1.0):
         calls["voices"].append((text, voice))
+        calls["speeds"].append(speed)
         t = np.arange(24000) / 24000
         return (0.3 * np.sin(2 * np.pi * 220 * t)).astype(np.float32), 24000
 
@@ -110,7 +113,7 @@ def test_render_task_makes_the_reel_and_reuses_unchanged_scenes(db_session, fact
     assert reel.video_duration_s == pytest.approx((38 + 54) / 30, abs=0.01)  # stored rounded
     assert len(fakes["pictures"]) == 2 and len(fakes["voices"]) == 2
     assert fakes["pictures"][0].startswith("Cinematic film still, ")  # the reel's style
-    assert "a glass of water. One single vertical" in fakes["pictures"][0]
+    assert "a glass of water. Natural, correct anatomy. One single vertical" in fakes["pictures"][0]
     assert fakes["unloads"] == 1  # the image model is freed once its pictures are done
 
     # Change one line: only its voice is redone; the pictures are reused.
@@ -147,9 +150,66 @@ def test_render_stops_when_the_reel_was_deleted(db_session, factory, fakes, monk
         with factory() as other:  # the user deletes the reel meanwhile
             other.delete(other.get(Reel, rid))
             other.commit()
-        return b"png"
+        return imagegen.Picture(b"png")
 
     monkeypatch.setattr(imagegen, "generate", generate_then_delete)
     reels.render_reel.apply(args=[rid])
     assert db_session.get(Reel, rid, populate_existing=True) is None
     assert not reel_render.reel_dir(rid).exists()  # stopped before the video; files removed
+
+
+PEOPLE = {
+    **SCRIPT,
+    "setting": "A sunny modern kitchen.",
+    "characters": [{"name": "Riya", "look": "a young woman in a yellow kurta"}],
+    "scenes": [
+        {**SCRIPT["scenes"][0], "characters": ["Riya"], "crowd": False},
+        {**SCRIPT["scenes"][1], "characters": ["Riya"], "crowd": False},
+    ],
+}
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_a_picture_with_an_extra_person_is_drawn_again(db_session, factory, fakes):
+    reel = _reel(db_session, status="generating", script=PEOPLE)
+    two_people = {"faces": 2, "hands": 4, "people": 2}
+    right = {"faces": 1, "hands": 2, "people": 1}
+    # Scene 1: wrong, then right. Scene 2: wrong every time.
+    fakes["counts"] += [two_people, right, two_people, two_people, two_people]
+    reels.render_reel.apply(args=[reel.id])
+    db_session.refresh(reel)
+    assert reel.status == "ready", reel.error
+    assert len(fakes["pictures"]) == 2 + 3  # drawn again: once, then twice (the limit)
+    assert "In the picture: Riya, a young woman in a yellow kurta" in fakes["pictures"][0]
+    assert "Time and place: A sunny modern kitchen" in fakes["pictures"][0]
+    folder = Path(reel.file_path).parent
+    first, second = sorted(folder.glob("scene*.png"))
+    assert not reel_render.warning_path(first).exists()
+    assert reel_render.warning_path(second).read_text() == "2 people or faces instead of 1"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_a_story_is_read_slower_and_told_as_one(db_session, factory, fakes, monkeypatch):
+    told = {}
+    render = reel_render.render
+
+    def spy(*args, **kwargs):
+        told["story"] = kwargs.get("story")
+        return render(*args, **kwargs)
+
+    monkeypatch.setattr(reel_render, "render", spy)
+    reel = _reel(db_session, status="generating", script=SCRIPT, script_type="story")
+    reels.render_reel.apply(args=[reel.id])
+    db_session.refresh(reel)
+    assert reel.status == "ready", reel.error
+    assert fakes["speeds"] == [reel_render.STORY_SPEED] * 2 and told["story"] is True
+    # Its voice clips are its own: the same lines in a "tips" reel are read at 1.0.
+    tips = _reel(db_session, status="generating", script=SCRIPT, script_type="tips")
+    reels.render_reel.apply(args=[tips.id])
+    db_session.refresh(tips)
+    assert fakes["speeds"][2:] == [1.0, 1.0] and told["story"] is False
+
+    def clips(r):
+        return sorted(p.name for p in Path(r.file_path).parent.glob("voice*.wav"))
+
+    assert clips(reel) != clips(tips)  # named after the pace they were read at

@@ -170,8 +170,8 @@ def _made_already(monkeypatch):
     """Every picture and voice clip is there: only the video is put together."""
     np = pytest.importorskip("numpy")
 
-    def pictures(folder, scenes, settings, style):
-        paths = [folder / f"scene{i + 1:02d}-x.png" for i in range(len(scenes))]
+    def pictures(folder, script, settings, style):
+        paths = [folder / f"scene{i + 1:02d}-x.png" for i in range(len(script["scenes"]))]
         for p in paths:
             p.write_bytes(b"png")
         return paths
@@ -191,7 +191,7 @@ def test_a_reel_mixes_in_music_fetched_for_it(db_session, factory, downloads, mo
     _made_already(monkeypatch)
     used = {}
 
-    def fake_render(folder, scenes, *, font, music, music_volume, workers):
+    def fake_render(folder, scenes, *, font, music, music_volume, workers, story=False):
         used.update(music=Path(music).read_bytes(), volume=music_volume)
         return 3.0
 
