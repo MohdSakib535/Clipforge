@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Depends, Response, status
 from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
@@ -86,6 +87,7 @@ def _out(reel: Reel) -> ReelOut:
         topic=reel.topic,
         script_type=reel.script_type,
         description=reel.description or "",
+        script_model=reel.script_model or get_settings().reel_script_model,
         duration_s=reel.duration_s,
         style=reel.style,
         status=reel.status,
@@ -120,6 +122,42 @@ def _check_script_type(script_type: str) -> str:
     if script_type not in reel_script.SCRIPT_TYPES:
         raise AppError(f"Unknown script type '{script_type}'", code="bad_script_type")
     return script_type
+
+
+def _check_script_model(name: str | None) -> str | None:
+    """A model to write with, or None for the default."""
+    if name is None or name == get_settings().reel_script_model:
+        return None
+    if name not in reel_script.SCRIPT_MODELS:
+        raise AppError(f"Unknown script writer '{name}'", code="bad_script_model")
+    return name
+
+
+def _script_models(default: str) -> list[dict]:
+    """The script writers to pick from: whether Ollama has each, and how much
+    slower than gemma3:4b it writes (for the time estimates)."""
+    installed = _installed_models()
+    models = dict(reel_script.SCRIPT_MODELS)
+    if default not in models:  # REEL_SCRIPT_MODEL set to another model
+        models = {default: reel_script.ScriptModel(default, 1.0), **models}
+    return [
+        {
+            "key": key,
+            "label": m.label,
+            "slowness": m.slowness,
+            "installed": None if installed is None else key in installed,
+        }
+        for key, m in models.items()
+    ]
+
+
+def _installed_models() -> set[str] | None:
+    """The models Ollama has (None if it can't be asked), for the picker."""
+    try:
+        r = httpx.get(f"{get_settings().ollama_url}/api/tags", timeout=2)
+        return {m["name"] for m in r.json().get("models", [])}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _check_style(style: str) -> str:
@@ -159,6 +197,8 @@ def options() -> dict:
         "styles": [{"key": k, "label": s.label} for k, s in reel_render.STYLES.items()],
         "script_types": [{"key": k, "label": t.label} for k, t in reel_script.SCRIPT_TYPES.items()],
         "description_max": reel_script.MAX_DESCRIPTION,
+        "script_models": _script_models(settings.reel_script_model),
+        "script_model_default": settings.reel_script_model,
         "duration": {
             "min": reel_script.MIN_DURATION_S,
             "max": reel_script.MAX_DURATION_S,
@@ -208,6 +248,7 @@ def create_reel(
     voice = _check_voice(body.language, body.voice)
     style = _check_style(body.style)
     script_type = _check_script_type(body.script_type)
+    script_model = _check_script_model(body.script_model)
     reel = Reel(
         user_id=user.id,
         platform=body.platform,
@@ -216,6 +257,7 @@ def create_reel(
         topic=body.topic,
         script_type=script_type,
         description=body.description or None,
+        script_model=script_model,
         duration_s=body.duration_s,
         style=style,
         status="scripting",
@@ -272,7 +314,7 @@ def music_suggestion(
     if not reel.script:
         raise ConflictError("Write the script first.")
     try:
-        music = reel_script.suggest_music(reel.script, reel.platform)
+        music = reel_script.suggest_music(reel.script, reel.platform, model=reel.script_model)
     except reel_script.ScriptError as exc:
         raise AppError(str(exc), code="music_suggestion_failed", status_code=502) from None
     db.refresh(reel)  # the call took a while: build on what is saved now
@@ -297,6 +339,8 @@ def rewrite_script(
         reel.script_type = _check_script_type(body.script_type)
     if body is not None and body.description is not None:
         reel.description = body.description or None
+    if body is not None and body.script_model is not None:
+        reel.script_model = _check_script_model(body.script_model)
     reel.status = "scripting"
     reel.stage = "Writing the script"
     reel.error = None

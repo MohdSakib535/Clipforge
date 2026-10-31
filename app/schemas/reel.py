@@ -28,6 +28,9 @@ class ReelCreate(BaseModel):
     description: str = Field(
         default="", max_length=MAX_DESCRIPTION, description="Plot, flow, tone: how to write it."
     )
+    script_model: str | None = Field(
+        default=None, description="A script writer from GET /reels/options; omit for the default."
+    )
 
 
 class ReelRewrite(BaseModel):
@@ -39,6 +42,7 @@ class ReelRewrite(BaseModel):
     description: str | None = Field(
         default=None, max_length=MAX_DESCRIPTION, description="Omit to keep; empty to drop."
     )
+    script_model: str | None = Field(default=None, description="Omit to keep the current one.")
 
 
 class ReelScene(BaseModel):
@@ -105,6 +109,7 @@ class ReelOut(BaseModel):
     topic: str
     script_type: str
     description: str = ""
+    script_model: str  # the one that writes (wrote) its script
     duration_s: int
     style: str
     status: str  # scripting | script_ready | generating | ready | failed

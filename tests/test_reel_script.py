@@ -263,7 +263,8 @@ def test_long_reel_gets_room_for_a_long_reply(monkeypatch):
     sent = {}
 
     def fake_post(url, json, timeout):
-        sent.setdefault("body", json)  # the first call: the script
+        if "scenes" in json["format"]["properties"]:
+            sent.setdefault("body", json)  # the script itself
         scenes = [{"narration": f"Line {i}.", "image_prompt": f"p{i}"} for i in range(15)]
         return _reply({"title": "T", "scenes": scenes})
 
@@ -372,8 +373,8 @@ def test_picture_prompts_in_hindi_are_put_into_english(monkeypatch):
     asked = []
 
     def fake_chat(messages, schema, **options):
-        if "narrations" in schema["properties"]:
-            return {}  # the length fix: nothing usable, the script is kept
+        if {"narrations", "topic", "lines"} & set(schema["properties"]):
+            return {}  # the length and Hindi fixes: nothing usable, all is kept
         asked.append(messages[-1]["content"])
         return replies[len(asked) - 1]
 
@@ -588,3 +589,70 @@ def test_a_story_flows_and_is_paced_like_one():
     longer = reel_script.spoken_seconds(lines, "hi", story=True)
     assert longer == pytest.approx(60 / (2.5 * 0.92) + 2 * 0.8 + 0.8)
     assert reel_script.spoken_seconds(lines, "hi") == pytest.approx(60 / 2.5 + 2 * 0.25 + 0.8)
+
+
+def test_a_hinglish_idea_is_given_to_the_model_in_devanagari(monkeypatch):
+    # Given "Ravan ka bachpan, Lanka ka raja", the model wrote "Lanka का राजा".
+    asked = []
+
+    def fake_chat(messages, schema, **options):
+        asked.append(options.get("model"))
+        return {"topic": "रावण", "description": "रावण का बचपन, लंका का राजा"}
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    idea = reel_script.devanagari_idea("Ravan", "Ravan ka bachpan, Lanka ka raja", model="m")
+    assert idea == ("रावण", "रावण का बचपन, लंका का राजा") and asked == ["m"]
+    # Already Devanagari: no call.
+    assert reel_script.devanagari_idea("रावण", "") == ("रावण", "") and len(asked) == 1
+
+    def broken(*a, **k):
+        raise ScriptError("Ollama isn't running")
+
+    monkeypatch.setattr(reel_script, "_chat", broken)
+    assert reel_script.devanagari_idea("Ravan", "x") == ("Ravan", "x")  # as it was
+
+
+def test_hindi_lines_with_english_words_are_written_again(monkeypatch):
+    script = {
+        "title": "रावण की कहानी",
+        "hooks": ["रावण कौन था?", "Lanka का राजा कौन बना?"],
+        "caption": "Reels के लिए फॉलो करें",
+        "scenes": [
+            {"narration": "रावण वेद पढ़ता था।", "image_prompt": "Ravan reads"},
+            {"narration": "वह Lanka का राजा बना।", "image_prompt": "Ravan in Lanka"},
+        ],
+        "hashtags": ["ramayana"],
+    }
+    asked = []
+
+    def fake_chat(messages, schema, **options):
+        asked.append(messages[-1]["content"])
+        return {"lines": ["रील्स के लिए फॉलो करें", "लंका का राजा कौन बना?", "वह Lanka का राजा।"]}
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    reel_script.hindi_only(script)
+    assert "1. Reels के लिए फॉलो करें" in asked[0] and "रावण वेद" not in asked[0]  # only those
+    assert script["caption"] == "रील्स के लिए फॉलो करें"
+    assert script["hooks"][1] == "लंका का राजा कौन बना?"
+    assert script["scenes"][1]["narration"] == "वह Lanka का राजा बना।"  # still English: kept
+    assert script["scenes"][1]["image_prompt"] == "Ravan in Lanka"  # pictures stay English
+    system = reel_script.build_messages("x", "instagram", "hi", 35)[0]["content"]
+    assert "names and places too (लंका, राम)" in system and "may stay in English" not in system
+
+
+def test_the_chosen_writer_writes_every_part(monkeypatch):
+    models, steps = [], []
+
+    def fake_chat(messages, schema, **options):
+        models.append(options.get("model"))
+        if "scenes" in schema["properties"]:
+            return {"scenes": [{"narration": "Lanka " + " ".join(["शब्द"] * 30), "image_prompt": "ग"}
+                               for _ in range(3)]}  # fmt: skip
+        return {}
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    reel_script.generate_script("Ravan", "instagram", "hi", 15, model="gemma3:12b",
+                                on_step=steps.append)  # fmt: skip
+    assert models and set(models) == {"gemma3:12b"}  # idea, script, length, Hindi, pictures
+    assert steps == ["Checking its length", "Putting every word in Hindi",
+                     "Checking the pictures' words"]  # fmt: skip

@@ -48,6 +48,10 @@ def write_reel_script(reel_id: str) -> None:
                 reel.script_type,
                 reel.description or "",
                 reel.voice,
+                model=reel.script_model,
+                # What it does next; also shows it is still at work (a 12B
+                # model takes minutes, past which a reel looks cut off).
+                on_step=lambda stage: _update(db, reel_id, stage=stage),
             )
         except reel_script.ScriptError as exc:
             reel = db.get(Reel, reel_id, populate_existing=True)

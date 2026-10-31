@@ -7,19 +7,20 @@ function reelMaker() {
   return {
     options: {
       platforms: [], languages: [], styles: [], script_types: [], description_max: 1500,
+      script_models: [], script_model_default: "",
       duration: { min: 15, max: 300, default: 35 }, max_scenes: 20,
       timing: { picture_s: 58, load_s: 5, script_s: 25, script_s_per_s: 0.5, render_s_per_s: 0.35 },
     },
     form: {
       platform: "instagram", language: "hi", voice: "", style: "cinematic", duration_s: 35,
-      script_type: "story", topic: "", description: "",
+      script_type: "story", topic: "", description: "", script_model: "",
     },
     creating: false,
     reels: [],
     reel: null, // the open reel, as the server has it
     draft: null, // its script being edited
     gen: { voice: "", style: "cinematic", musicId: "", musicVolume: 20 },
-    idea: { script_type: "story", description: "" }, // the open reel's, for "Write again"
+    idea: { script_type: "story", description: "", script_model: "" }, // the open reel's, for "Write again"
     sample: { key: "", state: "" }, // the voice sample: state "loading" | "playing"
     nameBefore: "", // a character's name while it is being edited (scenes use it)
     // Adding music to the library from the reel editor (upload or a link).
@@ -34,6 +35,7 @@ function reelMaker() {
         const r = await fetch("/reels/options");
         this.options = await r.json();
         this.form.duration_s = this.options.duration.default;
+        this.form.script_model = this.options.script_model_default;
         this.form.voice = this.voicesFor(this.form.language)[0]?.key || "";
       } catch (e) {
         this.error = "Could not load reel options";
@@ -81,6 +83,19 @@ function reelMaker() {
       if (this.sample.key !== `${lang}/${voice}`) return "▶";
       return this.sample.state === "loading" ? "…" : "■";
     },
+    // A script writer in the pickers: says so if Ollama doesn't have it yet.
+    scriptModelLabel(m) {
+      return m.installed === false ? `${m.label} · not downloaded (ollama pull ${m.key})` : m.label;
+    },
+    // How much longer the picked writer takes than gemma3:4b.
+    slowness(key) {
+      return this.options.script_models.find((m) => m.key === key)?.slowness || 1;
+    },
+    // A text box as tall as its text, so a long line is seen whole.
+    grow(el) {
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight + 2}px`;
+    },
     scriptTypeLabel(key) {
       return this.options.script_types.find((t) => t.key === key)?.label || key;
     },
@@ -104,7 +119,8 @@ function reelMaker() {
     // A new reel: the script, every picture, then the video.
     newReelEta() {
       const t = this.options.timing, d = this.form.duration_s;
-      return t.script_s + t.script_s_per_s * d + this.picturesEta(this.sceneCount(d)) + t.render_s_per_s * d;
+      const script = (t.script_s + t.script_s_per_s * d) * this.slowness(this.form.script_model);
+      return script + this.picturesEta(this.sceneCount(d)) + t.render_s_per_s * d;
     },
     // "Generate video" in picture style `key`: the reel's own style redraws only
     // new or changed scenes, another style redraws every picture.
@@ -158,7 +174,7 @@ function reelMaker() {
     open(reel) {
       this.reel = reel;
       this.draft = reel.script ? this.toDraft(reel.script) : null;
-      this.idea = { script_type: reel.script_type, description: reel.description };
+      this.idea = { script_type: reel.script_type, description: reel.description, script_model: reel.script_model };
       this.gen = {
         voice: reel.voice,
         style: reel.style,

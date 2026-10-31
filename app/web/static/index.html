@@ -584,6 +584,14 @@
                 </template>
               </select>
             </label>
+            <label class="block text-xs text-slate-400 mb-4">Script writer
+              <select x-model="form.script_model" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                <template x-for="m in options.script_models" :key="m.key">
+                  <option :value="m.key" :selected="m.key===form.script_model" x-text="scriptModelLabel(m)"></option>
+                </template>
+              </select>
+              <span class="block mt-1 text-slate-500">The 12B writer's Hindi and old stories are better; it takes ~2.5x as long and ~8 GB of RAM while it writes.</span>
+            </label>
             <label class="block text-xs text-slate-400 mb-4">Topic
               <textarea x-model="form.topic" rows="3" placeholder="e.g. 3 morning habits that change your life"
                 class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
@@ -658,6 +666,13 @@
                   <select x-model="idea.script_type" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
                     <template x-for="t in options.script_types" :key="t.key">
                       <option :value="t.key" :selected="t.key===idea.script_type" x-text="t.label"></option>
+                    </template>
+                  </select>
+                </label>
+                <label class="block text-xs text-slate-400 mb-3">Script writer
+                  <select x-model="idea.script_model" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                    <template x-for="m in options.script_models" :key="m.key">
+                      <option :value="m.key" :selected="m.key===idea.script_model" x-text="scriptModelLabel(m)"></option>
                     </template>
                   </select>
                 </label>
@@ -767,7 +782,8 @@
                               <button x-show="draft.scenes.length > 1" @click="removeScene(i)" class="ml-2 text-slate-500 hover:text-rose-300">remove</button>
                             </span>
                           </div>
-                          <textarea x-model="s.narration" rows="2" class="w-full bg-slate-900 rounded px-2 py-1 text-sm mb-1"></textarea>
+                          <textarea x-model="s.narration" rows="3" x-effect="s.narration; $nextTick(() => grow($el))" @input="grow($el)"
+                            class="w-full bg-slate-900 rounded px-2 py-1 text-sm leading-relaxed mb-1 resize-y overflow-hidden"></textarea>
                           <div x-show="s.characters !== undefined && (draft.characters || []).length" class="flex flex-wrap items-center gap-1 mb-1 text-[11px]">
                             <span class="text-slate-500">In the picture:</span>
                             <template x-for="c in draft.characters || []" :key="c.name">
@@ -776,9 +792,10 @@
                             </template>
                             <label class="ml-1 text-slate-400"><input type="checkbox" x-model="s.crowd" class="align-middle" /> others too</label>
                           </div>
-                          <details class="text-xs">
+                          <details class="text-xs" @toggle="$el.open && grow($el.querySelector('textarea'))">
                             <summary class="cursor-pointer select-none text-slate-400 hover:text-slate-200">Picture description</summary>
-                            <textarea x-model="s.image_prompt" rows="2" class="w-full mt-1 bg-slate-900 rounded px-2 py-1 text-xs"></textarea>
+                            <textarea x-model="s.image_prompt" rows="4" x-effect="s.image_prompt; $nextTick(() => grow($el))" @input="grow($el)"
+                              class="w-full mt-1 bg-slate-900 rounded px-2 py-1 text-xs leading-relaxed resize-y overflow-hidden"></textarea>
                           </details>
                         </div>
                       </div>

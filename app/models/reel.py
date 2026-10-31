@@ -27,6 +27,9 @@ class Reel(Base, TimestampMixin):
     # creator's own idea for it (plot, flow, tone), if any.
     script_type: Mapped[str] = mapped_column(String(16), default="story", server_default="story")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The Ollama model that writes its script (reel_script.SCRIPT_MODELS);
+    # None: the default, REEL_SCRIPT_MODEL.
+    script_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     duration_s: Mapped[int] = mapped_column(Integer)  # target length
     # How the pictures are drawn: key of reel_render.STYLES.
     style: Mapped[str] = mapped_column(String(16), default="cinematic", server_default="cinematic")

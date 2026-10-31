@@ -46,13 +46,15 @@ App 2 cheezon se chalti hai: **Docker** (`docker compose up`) aur **image servic
 
 | Model | Kis kaam aata hai | Size | Kahan chalta hai | Install command |
 |---|---|---|---|---|
-| **gemma3:4b** | Reel ki script likhta hai (hook, scenes, caption, hashtags) | 3.4 GB | Ollama (Mac) | `ollama pull gemma3:4b` |
+| **gemma3:4b** | Reel ki script likhta hai (hook, scenes, caption, hashtags) — tez wala, default | 3.4 GB | Ollama (Mac) | `ollama pull gemma3:4b` |
+| **gemma3:12b** *(optional)* | Wahi kaam, lekin **behtar Hindi** aur purani kahaniyon (Ramayana jaisi) ki behtar jaankari — script ~2.5 guna dheere, likhte waqt ~8 GB RAM | 8.1 GB | Ollama (Mac) | `ollama pull gemma3:12b` |
 | **FLUX.2-klein-4B** | Reel ke har scene ki picture banata hai | 16 GB download → 4.3 GB bachta hai | Image service (Mac GPU) | Step 4 ka command (`mflux-save`) — Hugging Face se aata hai, Ollama se nahi |
 | **Kokoro v1.0** (int8) | Reel ka voiceover (Hindi, English, Spanish, French, Italian, Portuguese) | ~120 MB | Docker (`reelmaker`) | Apne aap pehli reel pe |
 | **Whisper large-v3-turbo** | Video ki awaaz se text (captions, titles) — `TRANSCRIBER=local` | ~1.6 GB | Docker (`worker`) | Apne aap pehli video pe |
 | OpenAI whisper-1 | Upar wala hi kaam, online aur fast — `TRANSCRIBER=openai` | — | OpenAI (internet) | Sirf `.env` me `OPENAI_API_KEY` |
 
-> **Ollama me sirf `gemma3:4b` chahiye.** Ollama ke apne image models (jaise
+> **Ollama me `gemma3:4b` zaroori hai; `gemma3:12b` optional hai** (Create a reel me
+> "Script writer" se chuno). Ollama ke apne image models (jaise
 > `x/flux2-klein`, `x/z-image-turbo`) download **mat** karna — Ollama ne image banana
 > band kar diya hai (v0.32.6 se), isliye pictures mflux se banti hain. Picture model ka
 > download command **Step 4** me hai.
@@ -79,6 +81,7 @@ Docker app ek baar kholo. Settings → Resources → Memory **~8 GB** rakho.
 brew install ollama
 brew services start ollama
 ollama pull gemma3:4b          # ~3.4 GB, script likhne ka model
+ollama pull gemma3:12b         # optional, ~8.1 GB: behtar Hindi script (thoda dheere)
 ```
 
 **4. uv** (image service ke liye Python yahi le aata hai):
@@ -96,7 +99,7 @@ xcode-select --install
 ```bash
 docker --version
 ollama --version
-ollama list            # isme gemma3:4b dikhna chahiye
+ollama list            # isme gemma3:4b dikhna chahiye (aur gemma3:12b, agar download kiya)
 uv --version
 git --version
 ```
@@ -221,6 +224,11 @@ docker compose up -d --build
 
 1. Dashboard me upar **Create a reel** pe click karo.
 2. Platform (Instagram / Facebook), language, voice, length aur topic chuno → **Write script** (~20 sec).
+   **Script writer** me chuno kaun likhe:
+   - **Fast (gemma3 4B)** — tez (~40 sec), Hindi theek-thaak.
+   - **Better Hindi (gemma3 12B)** — Hindi aur kahani behtar, ~2.5 guna time, likhte waqt ~8 GB RAM.
+     Pehle `ollama pull gemma3:12b` karna hoga; download na ho to list me
+     "not downloaded" dikhega. Kisi reel ka writer baad me **Script idea → Write again** se bhi badal sakte ho.
 3. Script padho, chaaho to edit karo ya doosra hook chuno.
 4. **Generate video** → 30–40 sec ki reel ~2–2.5 min me.
 5. **Download video** aur **Copy caption + hashtags**.
@@ -245,6 +253,9 @@ upload karo; wo reel ke music list me aa jayega.
 - Mac ko **charger pe** rakho — battery pe 1 min me so jata hai aur kaam ruk jata hai.
 - Reel banate waqt Chrome ke bahut saare tabs / bhaari apps band rakho.
 - Reel aur badi video ka clip job ek saath mat chalao — dono RAM khaate hain.
+- **gemma3:12b** chuno to script likhte waqt ~8 GB RAM lagti hai (likhne ke baad turant khaali
+  ho jaati hai, pictures banne se pehle). Mac slow lage to bhaari apps band karo ya
+  **Fast (gemma3 4B)** chuno.
 
 ---
 
@@ -254,7 +265,7 @@ upload karo; wo reel ke music list me aa jayega.
 |---|---|
 | Reel me error: *"The image generator isn't running"* | Image service band hai — terminal me `uv run imagegen/server.py` chalao |
 | Reel me error: *"Ollama isn't running"* | `brew services start ollama` |
-| Error: *"The script model isn't installed"* | `ollama pull gemma3:4b` |
+| Error: *"The script model isn't installed"* | Jo writer chuna hai wo download karo: `ollama pull gemma3:4b` (ya `ollama pull gemma3:12b`) |
 | `.env` badla par asar nahi hua | `docker compose up -d` chalao (`restart` purani settings rakhta hai) |
 | Reel "Stopped" dikha rahi hai | Mac/Docker beech me restart hua tha — **Generate video** dobara dabao |
 | Mac bahut slow / hang | Bhaari apps band karo; Docker Desktop ki memory 8 GB se zyada mat rakho |

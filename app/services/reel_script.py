@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -25,6 +26,21 @@ MIN_DURATION_S, MAX_DURATION_S = 15, 300
 MAX_SCENES = 20
 MAX_HASHTAGS = 8
 MAX_DESCRIPTION = 1500  # the creator's own idea for the script (plot, flow, tone)
+
+
+@dataclass(frozen=True)
+class ScriptModel:
+    label: str  # shown in the UI
+    slowness: float  # how much longer it takes to write a script than gemma3:4b
+
+
+# The script writers to pick from (Ollama models; the default is
+# REEL_SCRIPT_MODEL). 12B writes clearly better Hindi and knows the old
+# stories better, but needs ~8 GB of RAM while it writes.
+SCRIPT_MODELS: dict[str, ScriptModel] = {
+    "gemma3:4b": ScriptModel("Fast (gemma3 4B)", 1.0),
+    "gemma3:12b": ScriptModel("Better Hindi (gemma3 12B, slower)", 2.5),
+}
 MAX_CHARACTERS = 6  # people/animals with a fixed look (the model is asked for at most 4)
 # Characters shown clearly in one picture: more come out with extra arms and
 # faces more often, but a story often has three together (Ram, Sita, Lakshman).
@@ -129,9 +145,9 @@ def words_per_scene(
 
 # Extra writing rules for some languages (the small model mixes scripts).
 LANGUAGE_NOTES = {
-    "hi": " Hindi words are always written in Devanagari, never in Roman letters (no "
-    'Hinglish like "karti hai"), even when the creator\'s idea is written in Hinglish; '
-    "English names and terms people use (like IAS) may stay in English.",
+    "hi": " Every word is written in Devanagari, never in Roman letters: no Hinglish like "
+    '"karti hai", names and places too (लंका, राम), and English words the way they sound '
+    "(रील, वीडियो, आईएएस), even when the creator's idea is written in Hinglish.",
 }
 
 
@@ -264,9 +280,17 @@ def generate_script(
     script_type: str = DEFAULT_SCRIPT_TYPE,
     description: str = "",
     voice: str | None = None,
+    *,
+    model: str | None = None,
+    on_step: Callable[[str], None] | None = None,
 ) -> dict:
-    """Ask Ollama for a script. Raises ScriptError with a message for the UI."""
+    """Ask Ollama (``model``, else REEL_SCRIPT_MODEL) for a script; ``on_step``
+    hears what it does next. Raises ScriptError with a message for the UI."""
+    step = on_step or (lambda _: None)
     n = scene_count(duration_s)
+    if language == "hi":
+        # Written in Hinglish, the idea came back with Roman words ("Lanka").
+        topic, description = devanagari_idea(topic, description, model=model)
     # Longer reels need a longer reply (Devanagari takes many tokens); past
     # Ollama's default 4096-token window the reply (or the prompt) would be cut off.
     num_predict = max(2000, 15 * duration_s + 500)  # +500: the setting and the characters' looks
@@ -283,6 +307,7 @@ def generate_script(
                 temperature=0.8,
                 num_predict=num_predict,
                 num_ctx=max(4096, num_predict + 2048),  # room for a long description
+                model=model,
             )
             script = normalize_script(
                 raw, topic=topic, language=language, scenes=n, with_call_to_action=False
@@ -293,10 +318,109 @@ def generate_script(
                 raise
     # The call to action goes on after the length is fixed, so a rewrite can't drop it.
     cta = call_to_action(raw, language)
-    fit_length(script["scenes"], language, duration_s, voice, cta, story=script_type == "story")
+    step("Checking its length")
+    story = script_type == "story"
+    fit_length(script["scenes"], language, duration_s, voice, cta, story=story, model=model)
     add_call_to_action(script["scenes"], cta)
-    english_picture_texts(script)
+    if language == "hi":
+        step("Putting every word in Hindi")
+        hindi_only(script, model=model)
+    step("Checking the pictures' words")
+    english_picture_texts(script, model=model)
     return script
+
+
+_LATIN = re.compile(r"[A-Za-z]")
+
+
+def devanagari_idea(topic: str, description: str, *, model: str | None = None) -> tuple[str, str]:
+    """The creator's topic and idea in Devanagari, when written in Roman
+    letters (Hinglish) or English: the model copies the script it is given.
+    As they were if this fails."""
+    if not (_LATIN.search(topic) or _LATIN.search(description)):
+        return topic, description
+    messages = [
+        {
+            "role": "system",
+            "content": "You rewrite text in Hindi written in Devanagari. Reply with JSON only.",
+        },
+        {
+            "role": "user",
+            "content": "Rewrite both in Hindi, Devanagari script only: write Hindi words given "
+            "in Roman letters (Hinglish) in Devanagari, translate English words, keep every "
+            "name and the meaning exactly.\n"
+            + json.dumps({"topic": topic, "description": description}, ensure_ascii=False),
+        },
+    ]
+    text = {"type": "string"}
+    schema = {
+        "type": "object",
+        "properties": {"topic": text, "description": text},
+        "required": ["topic", "description"],
+    }
+    try:
+        raw = _chat(messages, schema, temperature=0.2, num_predict=1200, model=model)
+    except ScriptError:
+        return topic, description
+    new_topic = _clean(raw.get("topic")) if isinstance(raw, dict) else ""
+    new_description = _clean(raw.get("description")) if isinstance(raw, dict) else ""
+    if not new_topic or (description and not new_description):
+        return topic, description
+    return new_topic[:500], new_description[:MAX_DESCRIPTION]
+
+
+def hindi_only(script: dict, *, model: str | None = None) -> None:
+    """Every spoken or shown Hindi line in Devanagari: lines the model still
+    wrote with Roman letters ("Lanka का राजा", "Reels") are written again.
+    Picture prompts and hashtags stay English. A line still not all Devanagari
+    after that is kept as it was."""
+    slots = [(script, "title"), (script, "caption")]
+    slots += [(script["hooks"], i) for i in range(len(script.get("hooks") or []))]
+    slots += [(sc, "narration") for sc in script["scenes"]]
+    todo = [(holder, key) for holder, key in slots if _LATIN.search(holder[key] or "")]
+    if not todo:
+        return
+    listed = "\n".join(f"{i + 1}. {holder[key]}" for i, (holder, key) in enumerate(todo))
+    messages = [
+        {
+            "role": "system",
+            "content": "You correct Hindi text to use Devanagari script only. "
+            "Reply with JSON only.",
+        },
+        {
+            "role": "user",
+            "content": "Rewrite each line in Hindi using only Devanagari script: names and places "
+            "too (Lanka → लंका, Ram → राम), English words the way they sound (Reels → रील्स, "
+            "video → वीडियो). Change nothing else.\n" + listed,
+        },
+    ]
+    count = len(todo)
+    schema = {
+        "type": "object",
+        "properties": {
+            "lines": {"type": "array", "items": {"type": "string"}, "minItems": count,
+                      "maxItems": count}
+        },
+        "required": ["lines"],
+    }  # fmt: skip
+    try:
+        raw = _chat(
+            messages,
+            schema,
+            temperature=0.2,
+            num_predict=200 + 200 * count,
+            num_ctx=max(4096, 800 + 400 * count),
+            model=model,
+        )
+    except ScriptError:
+        return
+    lines = raw.get("lines") if isinstance(raw, dict) else None
+    if not isinstance(lines, list) or len(lines) != count:
+        return
+    for (holder, key), line in zip(todo, lines, strict=True):
+        line = _spoken(_clean(line))
+        if line and not _LATIN.search(line):
+            holder[key] = line
 
 
 def spoken_seconds(
@@ -319,6 +443,7 @@ def fit_length(
     voice: str | None = None,
     cta: str = "",
     story: bool = False,
+    model: str | None = None,
 ) -> None:
     """Small models don't keep to a word count (a 40 s script came back at
     ~70 s, a 3 min one at ~2 min 15 s). If the narrations (with the call to
@@ -378,6 +503,7 @@ def fit_length(
             temperature=0.4,
             num_predict=num_predict,
             num_ctx=max(4096, num_predict + len(listed) // 2 + 1024),
+            model=model,
         )
     except ScriptError:
         return
@@ -394,7 +520,7 @@ def fit_length(
 _NOT_LATIN = re.compile(r"[\u0370-\u1fff\u2c00-\ufdff]")
 
 
-def english_picture_texts(script: dict) -> None:
+def english_picture_texts(script: dict, *, model: str | None = None) -> None:
     """The image model needs English, but the script model sometimes writes
     what goes into the pictures (picture prompts, the characters' looks, the
     setting) in the script's language. One more call puts those into English;
@@ -435,6 +561,7 @@ def english_picture_texts(script: dict) -> None:
             temperature=0.2,
             num_predict=200 + 150 * count,
             num_ctx=max(4096, 600 + 350 * count),
+            model=model,
         )
     except ScriptError:
         return
@@ -447,7 +574,7 @@ def english_picture_texts(script: dict) -> None:
             holder[key] = english
 
 
-def suggest_music(script: dict, platform: str) -> dict:
+def suggest_music(script: dict, platform: str, *, model: str | None = None) -> dict:
     """A music suggestion for an existing script (~5-15 s). Raises ScriptError."""
     narration = " ".join(sc["narration"] for sc in script.get("scenes", []))
     system = "You pick background music for short vertical videos. Reply with JSON only."
@@ -458,7 +585,9 @@ def suggest_music(script: dict, platform: str) -> dict:
         f"Suggest {MUSIC_RULE}"
     )
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    music = clean_music(_chat(messages, music_schema(), temperature=0.7, num_predict=300))
+    music = clean_music(
+        _chat(messages, music_schema(), temperature=0.7, num_predict=300, model=model)
+    )
     if music is None:
         raise ScriptError("The model didn't suggest any music. Try again.")
     return music
@@ -471,15 +600,17 @@ def _chat(
     temperature: float,
     num_predict: int,
     num_ctx: int | None = None,
+    model: str | None = None,
 ):
-    """One Ollama chat call whose reply must follow ``schema``; returns the
-    parsed JSON. Raises ScriptError with a message for the UI."""
+    """One Ollama chat call (``model``, else REEL_SCRIPT_MODEL) whose reply
+    must follow ``schema``; returns the parsed JSON. Raises ScriptError with
+    a message for the UI."""
     settings = get_settings()
     options = {"temperature": temperature, "num_predict": num_predict}
     if num_ctx:
         options["num_ctx"] = num_ctx
     body = {
-        "model": settings.reel_script_model,
+        "model": model or settings.reel_script_model,
         "messages": messages,
         "format": schema,
         "stream": False,
@@ -488,7 +619,10 @@ def _chat(
     }
     try:
         r = httpx.post(
-            f"{settings.ollama_url}/api/chat", json=body, timeout=httpx.Timeout(10, read=300)
+            # A long script from the 12B model takes minutes.
+            f"{settings.ollama_url}/api/chat",
+            json=body,
+            timeout=httpx.Timeout(10, read=900),
         )
     except httpx.ConnectError:
         raise ScriptError(
@@ -498,9 +632,8 @@ def _chat(
     except httpx.HTTPError as exc:
         raise ScriptError(f"Ollama did not answer: {exc}") from None
     if r.status_code == 404:
-        raise ScriptError(
-            f"The script model isn't installed. Run: ollama pull {settings.reel_script_model}"
-        )
+        name = model or settings.reel_script_model
+        raise ScriptError(f"The script model isn't installed. Run: ollama pull {name}")
     if r.status_code != 200:
         # 500 "token repeat limit reached": the model got stuck repeating itself.
         error = BadReplyError if r.status_code == 500 else ScriptError

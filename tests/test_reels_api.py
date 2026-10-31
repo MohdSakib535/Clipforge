@@ -267,7 +267,7 @@ def test_music_suggestion_is_saved_in_the_script(client, db_session, monkeypatch
     assert client.post(f"/reels/{reel['id']}/music-suggestion").status_code == 409  # busy
 
     _with_script(db_session, reel["id"], status="ready")
-    monkeypatch.setattr(reel_script, "suggest_music", lambda script, platform: MUSIC)
+    monkeypatch.setattr(reel_script, "suggest_music", lambda script, platform, model=None: MUSIC)
     body = client.post(f"/reels/{reel['id']}/music-suggestion").json()
     assert body["script"]["music"] == MUSIC
     assert body["script"]["scenes"] == SCRIPT["scenes"]  # the rest is untouched
@@ -277,7 +277,7 @@ def test_music_suggestion_is_saved_in_the_script(client, db_session, monkeypatch
     saved = client.put(f"/reels/{reel['id']}/script", json=body["script"]).json()
     assert saved["script"]["music"] == MUSIC and saved["status"] == "ready"
 
-    def down(script, platform):
+    def down(script, platform, model=None):
         raise reel_script.ScriptError("Ollama isn't running on this Mac.")
 
     monkeypatch.setattr(reel_script, "suggest_music", down)
@@ -387,3 +387,32 @@ def test_the_image_client_reads_what_vision_saw(monkeypatch):
     assert (pic.png, pic.counts) == (b"png", {"faces": 2, "hands": 3, "people": 2})
     monkeypatch.setattr(imagegen.httpx, "post", reply({}))  # an older generator
     assert imagegen.generate("p", width=16, height=16, seed=1, steps=1).counts is None
+
+
+def test_pick_the_script_writer(client, db_session, monkeypatch):
+    from app.api import reels as reels_api
+
+    monkeypatch.setattr(reels_api, "_installed_models", lambda: {"gemma3:4b"})
+    models = {m["key"]: m for m in client.get("/reels/options").json()["script_models"]}
+    assert models["gemma3:4b"]["installed"] is True
+    assert models["gemma3:12b"]["installed"] is False and models["gemma3:12b"]["slowness"] > 1
+    assert client.get("/reels/options").json()["script_model_default"] == "gemma3:4b"
+
+    reel = _create(client, script_model="gemma3:12b")
+    assert reel["script_model"] == "gemma3:12b"
+    assert db_session.get(Reel, reel["id"]).script_model == "gemma3:12b"
+    plain = _create(client, script_model="gemma3:4b")  # the default: stored as None
+    assert plain["script_model"] == "gemma3:4b"
+    assert db_session.get(Reel, plain["id"]).script_model is None
+    unknown = {
+        "topic": "a topic",
+        "platform": "instagram",
+        "language": "hi",
+        "script_model": "x:1b",
+    }
+    assert client.post("/reels", json=unknown).status_code == 400
+    # "Write again" with another writer.
+    db_session.get(Reel, reel["id"]).status = "script_ready"
+    db_session.commit()
+    body = client.post(f"/reels/{reel['id']}/rewrite", json={"script_model": "gemma3:4b"}).json()
+    assert body["script_model"] == "gemma3:4b"

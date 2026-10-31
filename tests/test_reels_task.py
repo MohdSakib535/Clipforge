@@ -45,16 +45,23 @@ def _reel(db_session, **fields) -> Reel:
 def test_script_task_saves_the_script(db_session, factory, monkeypatch):
     reel = _reel(db_session, status="scripting", script_type="facts", description="Keep it calm.")
     asked = []
-    monkeypatch.setattr(reel_script, "generate_script", lambda *a: asked.append(a) or SCRIPT)
+    monkeypatch.setattr(
+        reel_script, "generate_script", lambda *a, **k: asked.append((a, k)) or SCRIPT
+    )
     reels.write_reel_script.apply(args=[reel.id])
     db_session.refresh(reel)
     assert (reel.status, reel.script) == ("script_ready", SCRIPT)
-    assert asked[0][4:] == ("facts", "Keep it calm.", "af_heart")  # type, description, voice
     assert reel.error is None and reel.stage is None
+    args, kwargs = asked[0]
+    assert args[4:] == ("facts", "Keep it calm.", "af_heart")  # type, description, voice
+    assert kwargs["model"] is None  # the default writer
+    kwargs["on_step"]("Checking its length")  # each step shows on the reel
+    db_session.refresh(reel)
+    assert reel.stage == "Checking its length"
 
 
 def test_script_failure_keeps_an_existing_script(db_session, factory, monkeypatch):
-    def broken(*a):
+    def broken(*a, **k):
         raise reel_script.ScriptError("Ollama isn't running")
 
     monkeypatch.setattr(reel_script, "generate_script", broken)
