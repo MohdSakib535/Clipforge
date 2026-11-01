@@ -97,7 +97,7 @@
           <input type="file" class="hidden" accept="video/mp4,video/x-matroska,video/quicktime,.mp4,.mkv,.mov" @change="pickFile($event)" />
           <div class="text-slate-400">
             <div class="text-4xl mb-2">⬆</div>
-            <div x-text="file ? file.name : 'Click to choose an MP4 / MKV / MOV (up to ~5 GB)'"></div>
+            <div x-text="file ? file.name : 'Click to choose an MP4 / MKV / MOV (up to ~7 GB)'"></div>
           </div>
         </label>
         <div x-show="uploading" class="mt-4">
@@ -569,10 +569,11 @@
             <label class="block text-xs text-slate-400 mb-4">Picture style
               <select x-model="form.style" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
                 <template x-for="s in options.styles" :key="s.key">
-                  <option :value="s.key" :selected="s.key===form.style" x-text="`${s.label} · ${fmtEta(newReelEta())}`"></option>
+                  <option :value="s.key" :selected="s.key===form.style" x-text="`${s.label} · ${fmtEta(reel && draft ? generateEta(s.key) : newReelEta())}`"></option>
                 </template>
               </select>
-              <span class="block mt-1 text-slate-500">Rough time to make it. Every style takes about as long; longer reels take longer.</span>
+              <span x-show="!(reel && draft)" class="block mt-1 text-slate-500">Rough time to make it. Every style takes about as long; longer reels take longer.</span>
+              <span x-show="reel && draft" class="block mt-1 text-slate-500">"Generate video" makes the open reel with this voice and style. The time is to make it again.</span>
             </label>
             <label class="block text-xs text-slate-400 mb-4">Length <span class="text-slate-200" x-text="form.duration_s < 60 ? `${form.duration_s} s` : fmtDur(form.duration_s)"></span>
               <input type="range" :min="options.duration.min" :max="options.duration.max" step="5" x-model.number="form.duration_s" class="block w-full mt-2" />
@@ -760,6 +761,15 @@
                       class="mb-2 px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">+ Add character</button>
                   </details>
 
+                  <!-- The writer that "Rephrase with AI" uses, for every scene -->
+                  <label class="flex flex-wrap items-center gap-2 text-xs text-slate-400 mb-2">Rephrase with
+                    <select x-model="editModel" class="bg-slate-800 rounded px-2 py-1 text-xs text-slate-100">
+                      <template x-for="m in options.script_models" :key="m.key">
+                        <option :value="m.key" :selected="m.key===editModel" x-text="scriptModelLabel(m)"></option>
+                      </template>
+                    </select>
+                    <span class="text-slate-500">12B: better Hindi, but ~3x slower and ~8 GB of RAM while it writes.</span>
+                  </label>
                   <div class="space-y-3 mb-3">
                     <template x-for="(s, i) in draft.scenes" :key="i">
                       <div class="flex gap-3 bg-slate-800/50 rounded-lg p-3">
@@ -784,6 +794,31 @@
                           </div>
                           <textarea x-model="s.narration" rows="3" x-effect="s.narration; $nextTick(() => grow($el))" @input="grow($el)"
                             class="w-full bg-slate-900 rounded px-2 py-1 text-sm leading-relaxed mb-1 resize-y overflow-hidden"></textarea>
+                          <!-- This scene's tools: rephrase it with the AI (never more words than now),
+                               or replace a word exactly, without the AI -->
+                          <div x-data="{ ai: { hint: '', busy: false, find: '', swap: '', done: '', undo: null } }" class="mb-1 text-xs space-y-1">
+                            <div class="flex gap-2">
+                              <input type="text" x-model="ai.hint" maxlength="300" @keydown.enter.prevent="rephraseScene(i, ai)" :disabled="ai.busy || busy(reel)"
+                                placeholder="How to rephrase? (optional, e.g. simpler)" title="The AI says this scene in other words: same story, never more words than now. Other scenes play no part."
+                                class="flex-1 min-w-0 bg-slate-900 rounded px-2 py-1 outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-60" />
+                              <button @click="rephraseScene(i, ai)" :disabled="ai.busy || !s.narration.trim() || busy(reel)"
+                                class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 flex-none w-36"
+                                x-text="ai.busy ? `Rephrasing… (~${Math.round(10 * slowness(editModel))} s)` : 'Rephrase with AI'"></button>
+                            </div>
+                            <div class="flex gap-2 items-center">
+                              <input type="text" x-model="ai.find" maxlength="100" @keydown.enter.prevent="replaceWord(i, ai)" placeholder="Replace word"
+                                class="flex-1 min-w-0 bg-slate-900 rounded px-2 py-1 outline-none focus:ring-2 focus:ring-indigo-500" />
+                              <span class="text-slate-500">→</span>
+                              <input type="text" x-model="ai.swap" maxlength="100" @keydown.enter.prevent="replaceWord(i, ai)" placeholder="with"
+                                class="flex-1 min-w-0 bg-slate-900 rounded px-2 py-1 outline-none focus:ring-2 focus:ring-indigo-500" />
+                              <button @click="replaceWord(i, ai)" :disabled="!ai.find.trim() || ai.busy" title="Exact, no AI: every place it stands as a whole word in this scene"
+                                class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 flex-none w-36">Replace</button>
+                            </div>
+                            <p x-show="ai.undo && ai.undo.scene === s" class="text-slate-400">
+                              <span class="text-slate-300" x-text="ai.done"></span> ·
+                              <button @click="undoScene(ai)" class="underline hover:text-slate-200">Undo</button>
+                            </p>
+                          </div>
                           <div x-show="s.characters !== undefined && (draft.characters || []).length" class="flex flex-wrap items-center gap-1 mb-1 text-[11px]">
                             <span class="text-slate-500">In the picture:</span>
                             <template x-for="c in draft.characters || []" :key="c.name">
@@ -849,24 +884,6 @@
                     </div>
 
                     <div class="flex flex-wrap items-end gap-4">
-                      <div class="text-xs text-slate-400">Voice
-                        <div class="flex gap-1 mt-1">
-                          <select x-model="gen.voice" class="bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
-                            <template x-for="v in voicesFor(reel.language)" :key="v.key">
-                              <option :value="v.key" :selected="v.key===gen.voice" x-text="v.label"></option>
-                            </template>
-                          </select>
-                          <button type="button" @click="listen(reel.language, gen.voice)" title="Listen to this voice"
-                            class="px-2.5 rounded bg-slate-700 hover:bg-slate-600 text-sm text-slate-100" x-text="listenIcon(reel.language, gen.voice)"></button>
-                        </div>
-                      </div>
-                      <label class="text-xs text-slate-400">Picture style
-                        <select x-model="gen.style" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
-                          <template x-for="s in options.styles" :key="s.key">
-                            <option :value="s.key" :selected="s.key===gen.style" x-text="`${s.label} · ${fmtEta(generateEta(s.key))}`"></option>
-                          </template>
-                        </select>
-                      </label>
                       <label class="text-xs text-slate-400">Background music
                         <select x-model="gen.musicId" @change="gen.musicId = await pickMusic($event.target.value)" :disabled="fetchingMusic"
                           class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 max-w-[14rem]">
@@ -928,8 +945,16 @@
                     <button @click="rewrite()" :disabled="saving"
                       class="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm">Write again</button>
                     <span x-show="dirty()" class="text-xs text-amber-300">Unsaved changes</span>
-                    <span x-show="gen.style !== reel.style" class="text-xs text-amber-300">New picture style: every picture is drawn again</span>
+                    <span x-show="form.style !== reel.style" class="text-xs text-amber-300"
+                      x-text="`New picture style (${styleLabel(form.style)}): every picture is drawn again`"></span>
+                    <span x-show="genVoice() !== reel.voice" class="text-xs text-amber-300"
+                      x-text="`New voice (${voiceLabel(reel.language, genVoice())}): the voice is made again`"></span>
                   </div>
+                  <p class="text-xs text-slate-500 mt-2">
+                    <span x-text="`Voice and picture style: ${voiceLabel(reel.language, genVoice())} · ${styleLabel(form.style)}, picked on the left.`"></span>
+                    <span x-show="form.language !== reel.language" class="text-amber-300"
+                      x-text="`This reel is in ${languageLabel(reel.language)}, so it keeps its own voice.`"></span>
+                  </p>
                   <p class="text-xs text-slate-500 mt-3">Pictures are made on your Mac by the image generator (start it in a terminal with <code>uv run imagegen/server.py</code>). Pictures and voice already made for the same text are reused, so changing one scene only redoes that scene.</p>
                 </div>
               </template>
@@ -992,7 +1017,7 @@
               <input type="file" class="hidden" accept="video/mp4,video/x-matroska,video/quicktime,.mp4,.mkv,.mov" @change="pickFile($event)" />
               <div class="text-slate-400">
                 <div class="text-4xl mb-2">⬆</div>
-                <div x-text="file ? file.name : 'Click to choose an MP4 / MKV / MOV (up to ~5 GB)'"></div>
+                <div x-text="file ? file.name : 'Click to choose an MP4 / MKV / MOV (up to ~7 GB)'"></div>
               </div>
             </label>
             <div x-show="uploading" class="mt-4">

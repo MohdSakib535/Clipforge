@@ -656,3 +656,97 @@ def test_the_chosen_writer_writes_every_part(monkeypatch):
     assert models and set(models) == {"gemma3:12b"}  # idea, script, length, Hindi, pictures
     assert steps == ["Checking its length", "Putting every word in Hindi",
                      "Checking the pictures' words"]  # fmt: skip
+
+
+# --- One scene's spoken text rephrased (a word is replaced on the page, without the model) ---
+def test_rephrase_sends_only_this_scene_never_grows_and_stays_in_hindi(monkeypatch):
+    replies = [
+        {"narration": "दूसरा सीन यहाँ अब बहुत लंबा हो गया है।"},  # more words: asked again
+        {"narration": "दूसरा सीन ये है।"},
+    ]
+    seen = []
+
+    def fake_chat(messages, schema, **options):
+        seen.append([m["content"] for m in messages])
+        return replies[len(seen) - 1]
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    text = reel_script.rephrase_narration("दूसरा सीन यहाँ है।", "simple banao", "hi")
+    assert text == "दूसरा सीन ये है।"
+    system, user = seen[0]
+    assert "You rephrase one line" in system
+    assert "Write in Hindi, written in Devanagari script only" in system
+    assert "3 to 4 words and at most" in system  # never longer, not much shorter
+    # Only this scene and the hint: no title, no other scene.
+    assert user.splitlines()[:2] == [
+        "The line: दूसरा सीन यहाँ है।",
+        "How to rephrase it: simple banao",
+    ]
+    assert "too long, it needs 3 to 4 words" in seen[1][-1]  # told why, then asked again
+
+    seen.clear()
+    replies[:] = [{"narration": "दूसरा सीन ये है।"}]
+    reel_script.rephrase_narration("दूसरा सीन यहाँ है।", "", "hi")
+    assert not any(line.startswith("How to") for line in seen[0][1].splitlines())  # no hint
+
+
+def test_rephrase_may_spell_a_little_longer_but_never_has_more_words(monkeypatch):
+    narration = "Have some water now"  # 4 words, 19 characters: at most 21 back
+    reply = {}
+    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: reply)
+    reply["narration"] = "Have some waters now!"
+    assert reel_script.rephrase_narration(narration, "", "en") == "Have some waters now!"
+    reply["narration"] = "Have some waters now!!"
+    with pytest.raises(ScriptError, match="at most 21 characters"):
+        reel_script.rephrase_narration(narration, "", "en")
+
+
+def test_rephrase_gives_up_after_asking_again(monkeypatch):
+    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: {"narration": "Raju ka सीन"})
+    with pytest.raises(ScriptError, match="Roman letters"):
+        reel_script.rephrase_narration("राजू का सीन", "", "hi")
+
+    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: {"narration": "Drink a big glass."})
+    with pytest.raises(ScriptError, match="needs 2 to 3 words"):
+        reel_script.rephrase_narration("Drink water first.", "", "en")
+
+
+def test_rephrase_that_changes_nothing_is_asked_again(monkeypatch):
+    seen = []
+    replies = iter([{"narration": "Drink  water first."}, {"narration": "First, drink water."}])
+
+    def fake_chat(messages, schema, **options):
+        seen.append(messages[-1]["content"])
+        return next(replies)
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    assert reel_script.rephrase_narration("Drink water first.", "", "en") == "First, drink water."
+    assert seen[1].startswith("That is the line as it was")
+
+
+def test_rephrase_tries_again_after_an_unreadable_reply(monkeypatch):
+    replies = iter([reel_script.BadReplyError("stuck"), {"narration": "First, drink water."}])
+
+    def fake_chat(messages, schema, **options):
+        reply = next(replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    assert reel_script.rephrase_narration("Drink water first.", "", "en") == "First, drink water."
+
+
+def test_rephrase_is_not_much_shorter_either(monkeypatch):
+    seen = []
+    replies = iter([{"narration": "Drink water."}, {"narration": "First drink a glass of water."}])
+
+    def fake_chat(messages, schema, **options):
+        seen.append(messages[-1]["content"])
+        return next(replies)
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    narration = "Drink a glass of water first."  # 6 words: 5 or 6 back
+    text = reel_script.rephrase_narration(narration, "", "en")
+    assert text == "First drink a glass of water."
+    assert seen[1] == "That has 2 words: too short, it needs 5 to 6 words. Write it again."

@@ -19,7 +19,10 @@ function reelMaker() {
     reels: [],
     reel: null, // the open reel, as the server has it
     draft: null, // its script being edited
-    gen: { voice: "", style: "cinematic", musicId: "", musicVolume: 20 },
+    editModel: "", // the script writer that rephrases a scene (picked above the scenes)
+    // The open reel's music. Its voice and picture style come from the form on
+    // the left (set to the reel's when it is opened).
+    gen: { musicId: "", musicVolume: 20 },
     idea: { script_type: "story", description: "", script_model: "" }, // the open reel's, for "Write again"
     sample: { key: "", state: "" }, // the voice sample: state "loading" | "playing"
     nameBefore: "", // a character's name while it is being edited (scenes use it)
@@ -175,13 +178,22 @@ function reelMaker() {
       this.reel = reel;
       this.draft = reel.script ? this.toDraft(reel.script) : null;
       this.idea = { script_type: reel.script_type, description: reel.description, script_model: reel.script_model };
-      this.gen = {
-        voice: reel.voice,
-        style: reel.style,
-        musicId: reel.music_id || "",
-        musicVolume: reel.music_volume,
-      };
+      this.editModel = reel.script_model;
+      // The form on the left shows the open reel's language, voice and style;
+      // "Generate video" uses what is picked there.
+      this.form.language = reel.language;
+      this.form.voice = reel.voice;
+      this.form.style = reel.style;
+      this.gen = { musicId: reel.music_id || "", musicVolume: reel.music_volume };
       this.watchReel();
+    },
+    // The voice "Generate video" uses: the one on the left, if it is in the
+    // reel's language; otherwise the reel keeps its own.
+    genVoice() {
+      return this.form.language === this.reel.language && this.form.voice ? this.form.voice : this.reel.voice;
+    },
+    voiceLabel(lang, key) {
+      return this.voicesFor(lang).find((v) => v.key === key)?.label || key;
     },
 
     toDraft(script) {
@@ -278,8 +290,8 @@ function reelMaker() {
       try {
         await this.putScript(); // the video is made from the saved script
         this.reel = await this.postJSON(`/reels/${this.reel.id}/generate`, {
-          voice: this.gen.voice,
-          style: this.gen.style,
+          voice: this.genVoice(),
+          style: this.form.style,
           music_id: this.gen.musicId || null,
           music_volume: this.gen.musicVolume,
         });
@@ -529,6 +541,55 @@ function reelMaker() {
       this.draft.scenes.splice(i, 1);
     },
 
+    // A scene's own tools; ai: its row's { hint, busy, find, swap, done, undo }
+    // (kept off the script). Both changes go into the draft, saved with Save.
+    // Rephrase: the AI says it in other words (only this scene is sent; never
+    // more words than now), with the writer picked above the scenes.
+    async rephraseScene(i, ai) {
+      const s = this.draft.scenes[i];
+      if (ai.busy || !s.narration.trim()) return;
+      ai.busy = true;
+      try {
+        const j = await this.postJSON(`/reels/${this.reel.id}/scenes/${i}/rephrase`, {
+          narration: s.narration,
+          hint: ai.hint,
+          model: this.editModel,
+        });
+        ai.undo = { scene: s, text: s.narration };
+        ai.done = `AI rephrased it (${this.words(s.narration)} → ${j.words} words)`;
+        s.narration = j.narration;
+        ai.hint = "";
+      } catch (e) {
+        this.error = e.message;
+      } finally {
+        ai.busy = false;
+      }
+    },
+    // Replace a word (or words) with another, exactly and without the AI:
+    // everywhere it stands as a whole word in this scene ("का" not inside "काम").
+    replaceWord(i, ai) {
+      const s = this.draft.scenes[i];
+      const find = ai.find.trim().normalize("NFC");
+      const swap = ai.swap.trim().normalize("NFC");
+      if (!find) return;
+      const text = s.narration.normalize("NFC"); // "ज़" typed one way matches the other
+      const escaped = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(?<![\\p{L}\\p{M}\\p{N}])${escaped}(?![\\p{L}\\p{M}\\p{N}])`, "gu");
+      const count = (text.match(re) || []).length;
+      if (!count) {
+        this.notice = `"${find}" is not in scene ${i + 1} as a whole word.`;
+        return;
+      }
+      ai.undo = { scene: s, text: s.narration };
+      ai.done = `Replaced "${find}" with "${swap}"` + (count > 1 ? ` (${count}×)` : "");
+      s.narration = text.replace(re, () => swap).replace(/ {2,}/g, " ").trim();
+      ai.find = ai.swap = "";
+    },
+    undoScene(ai) {
+      ai.undo.scene.narration = ai.undo.text;
+      ai.undo = null;
+    },
+
     words(text) {
       return (text || "").trim().split(/\s+/).filter(Boolean).length;
     },
@@ -539,7 +600,7 @@ function reelMaker() {
       // A slower voice ("calm") takes longer for the same words; a story is read a
       // little slower (0.92), with 0.8 s between scenes (reel_render.STORY_*).
       const story = this.reel.script_type === "story";
-      const speed = (lang?.voices.find((v) => v.key === this.gen.voice)?.speed || 1) * (story ? 0.92 : 1);
+      const speed = (lang?.voices.find((v) => v.key === this.genVoice())?.speed || 1) * (story ? 0.92 : 1);
       const wps = (lang?.words_per_s || 2.8) * speed;
       const words = this.draft.scenes.reduce((n, s) => n + this.words(s.narration), 0);
       const gaps = (this.draft.scenes.length - 1) * (story ? 0.8 : 0.25);

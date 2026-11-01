@@ -593,6 +593,100 @@ def suggest_music(script: dict, platform: str, *, model: str | None = None) -> d
     return music
 
 
+# ---------------------------------------------------------------------------
+# One scene's spoken text rephrased (replacing a word is done on the page,
+# exactly, without the model)
+# ---------------------------------------------------------------------------
+MAX_HINT = 300
+# The reel's length comes from the words: a rephrase never has more, and not
+# many fewer either. Some room for more letters (a word spelled longer).
+MIN_WORDS_SHARE = 0.85
+EXTRA_CHARS = 0.10
+EDIT_TRIES = 3  # the small model often misses the length once
+
+
+def _edit_problem(
+    text: str, before: str, min_words: int, max_words: int, max_chars: int, language: str
+) -> str | None:
+    """What is wrong with a rephrased narration, told to the model; None: fine."""
+    if not text:
+        return "That was empty."
+    if _SPACES.sub(" ", text) == _SPACES.sub(" ", before).strip():
+        return "That is the line as it was: say it in other words."
+    words = len(text.split())
+    if words < min_words:
+        return f"That has {words} words: too short, it needs {min_words} to {max_words} words."
+    if words > max_words or len(text) > max_chars:
+        return (
+            f"That has {words} words and {len(text)} characters: too long, it needs "
+            f"{min_words} to {max_words} words and at most {max_chars} characters."
+        )
+    if language == "hi" and _LATIN.search(text):
+        return "That has words in Roman letters: write every word in Devanagari."
+    return None
+
+
+def rephrase_narration(
+    narration: str,
+    hint: str,
+    language: str,
+    *,
+    model: str | None = None,
+) -> str:
+    """One scene's spoken text (``narration``, as on screen, maybe not saved
+    yet) said in other words, the way ``hint`` asks if given ("simpler").
+    Only this text goes to the model: no other scene, so nothing from them
+    comes in. In the reel's language, never more words than now (nor over
+    10% more letters) and not under 85% of them, so the reel keeps its
+    length. Asked again (twice at most) if it breaks that; then raises
+    ScriptError (~5-45 s)."""
+    lang = LANGUAGES[language].prompt_name
+    max_words = len(narration.split())
+    min_words = max(1, int(max_words * MIN_WORDS_SHARE))
+    max_chars = round(len(narration) * (1 + EXTRA_CHARS))
+    system = f"""You rephrase one line of a voice-over script. Reply with JSON only.
+Rules:
+- Say the same thing in other words: the same events, people, names, facts and order. Never add anything and never leave anything out.
+- Write in {lang} only, whatever language the creator's note is written in.{LANGUAGE_NOTES.get(language, "")}
+- {min_words} to {max_words} words and at most {max_chars} characters: never longer than the line is now, and not much shorter.
+- Only the words the narrator says: no notes, labels, word counts, quotes or brackets."""  # noqa: E501
+    user = "\n".join(
+        [
+            f"The line: {narration}",
+            *([f"How to rephrase it: {hint}"] if hint else []),
+            f"Reminder: the new line in {lang}, {min_words} to {max_words} words.",
+        ]
+    )
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    schema = {
+        "type": "object",
+        "properties": {"narration": {"type": "string"}},
+        "required": ["narration"],
+    }
+    problem = "It sent back something unreadable."
+    for _ in range(EDIT_TRIES):
+        try:
+            raw = _chat(
+                messages,
+                schema,
+                temperature=0.5,
+                num_predict=200 + 3 * max_chars,
+                model=model,
+            )
+        except BadReplyError:
+            continue
+        text = _spoken(_clean(raw.get("narration") if isinstance(raw, dict) else ""))
+        problem = _edit_problem(text, narration, min_words, max_words, max_chars, language)
+        if problem is None:
+            return text
+        reply = json.dumps({"narration": text}, ensure_ascii=False)
+        messages += [
+            {"role": "assistant", "content": reply},
+            {"role": "user", "content": f"{problem} Write it again."},
+        ]
+    raise ScriptError(f"The AI's version was not used: {problem} Try again.")
+
+
 def _chat(
     messages: list[dict],
     schema: dict,

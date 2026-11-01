@@ -285,6 +285,47 @@ def test_music_suggestion_is_saved_in_the_script(client, db_session, monkeypatch
     assert resp.status_code == 502 and "Ollama" in resp.json()["error"]["message"]
 
 
+def test_rephrase_one_scene_without_saving(client, db_session, monkeypatch):
+    from app.services import reel_script
+
+    reel = _create(client)
+    url = f"/reels/{reel['id']}/scenes/1/rephrase"
+    body = {"narration": "Drink water first.", "hint": "friendlier"}
+    assert client.post(url, json=body).status_code == 409  # still writing the script
+
+    _with_script(db_session, reel["id"], status="ready")
+    calls = []
+
+    def fake(narration, hint, language, model=None):
+        calls.append((narration, hint, language, model))
+        return "First, drink some water."
+
+    monkeypatch.setattr(reel_script, "rephrase_narration", fake)
+    resp = client.post(url, json=body)
+    assert resp.json() == {"narration": "First, drink some water.", "words": 4}
+    db_session.expire_all()
+    stored = db_session.get(Reel, reel["id"])
+    assert stored.script == SCRIPT and stored.status == "ready"  # not saved: the page keeps it
+
+    # The writer picked on the page, else the reel's; the hint is optional.
+    assert client.post(url, json={"narration": "Hi.", "model": "gemma3:12b"}).status_code == 200
+    assert calls == [
+        ("Drink water first.", "friendlier", "hi", None),
+        ("Hi.", "", "hi", "gemma3:12b"),
+    ]
+    resp = client.post(url, json={**body, "model": "no-such-model"})
+    assert resp.status_code == 400 and resp.json()["error"]["code"] == "bad_script_model"
+    assert client.post(url, json={**body, "narration": "  "}).status_code == 422
+    assert client.post(f"/reels/{reel['id']}/scenes/99/rephrase", json=body).status_code == 404
+
+    def down(*args, **kwargs):
+        raise reel_script.ScriptError("Ollama isn't running on this Mac.")
+
+    monkeypatch.setattr(reel_script, "rephrase_narration", down)
+    resp = client.post(url, json=body)
+    assert resp.status_code == 502 and "Ollama" in resp.json()["error"]["message"]
+
+
 def test_saving_a_script_without_music_adds_no_empty_music(client, db_session):
     reel = _create(client)
     _with_script(db_session, reel["id"], status="ready")

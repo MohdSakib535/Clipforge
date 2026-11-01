@@ -17,7 +17,15 @@ from app.api.errors import AppError, ConflictError, NotFoundError
 from app.config.settings import get_settings
 from app.db.session import get_db
 from app.models import AudioTrack, Reel, User
-from app.schemas.reel import ReelCreate, ReelGenerate, ReelOut, ReelRewrite, ReelScript
+from app.schemas.reel import (
+    ReelCreate,
+    ReelGenerate,
+    ReelOut,
+    ReelRewrite,
+    ReelScript,
+    SceneRephrase,
+    SceneRephrased,
+)
 from app.services import bucket, reel_render, reel_script, tts
 from app.services.naming import video_stem
 from app.services.storage import get_storage
@@ -322,6 +330,35 @@ def music_suggestion(
     db.commit()
     db.refresh(reel)
     return _out(reel)
+
+
+@router.post("/{reel_id}/scenes/{index}/rephrase", response_model=SceneRephrased)
+def rephrase_scene(
+    reel_id: str,
+    index: int,
+    body: SceneRephrase,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> SceneRephrased:
+    """Scene ``index``'s (0-based) spoken text said in other words, by the
+    script writer picked (else the reel's); the other scenes play no part.
+    Never more words than sent. Not saved: the page puts it in the script
+    being edited. Waits for the answer (~5-45 s)."""
+    reel = _get(db, user, reel_id)
+    _not_busy(reel)
+    if not reel.script:
+        raise ConflictError("Write the script first.")
+    if not 0 <= index < reel_script.MAX_SCENES:
+        raise NotFoundError("Scene not found")
+    model = reel.script_model
+    if body.model is not None:
+        _check_script_model(body.model)  # an unknown one is refused
+        model = body.model
+    try:
+        text = reel_script.rephrase_narration(body.narration, body.hint, reel.language, model=model)
+    except reel_script.ScriptError as exc:
+        raise AppError(str(exc), code="rephrase_failed", status_code=502) from None
+    return SceneRephrased(narration=text, words=len(text.split()))
 
 
 @router.post("/{reel_id}/rewrite", response_model=ReelOut, status_code=status.HTTP_202_ACCEPTED)

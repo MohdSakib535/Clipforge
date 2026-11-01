@@ -9,6 +9,7 @@ from app.services.reel_script import (
     MAX_CHARACTERS,
     MAX_DESCRIPTION,
     MAX_DURATION_S,
+    MAX_HINT,
     MAX_IN_PICTURE,
     MAX_SCENES,
     MIN_DURATION_S,
@@ -54,6 +55,21 @@ class ReelScene(BaseModel):
     # other people are too. None: a script from before characters.
     characters: list[str] | None = Field(default=None, max_length=MAX_IN_PICTURE)
     crowd: bool | None = None
+
+
+class SceneRephrase(BaseModel):
+    """Ask the AI to rephrase one scene's spoken text."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    narration: str = Field(min_length=1, max_length=800)  # as on screen, maybe not saved yet
+    hint: str = Field(default="", max_length=MAX_HINT)  # how, e.g. "simpler"; optional
+    model: str | None = Field(default=None, description="A script writer; omit for the reel's.")
+
+
+class SceneRephrased(BaseModel):
+    narration: str  # never more words than the one sent
+    words: int
 
 
 class ReelCharacter(BaseModel):
