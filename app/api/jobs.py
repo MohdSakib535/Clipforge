@@ -307,8 +307,8 @@ def export_zip(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> FileResponse:
-    """Every rendered clip, or with ``?only=approved`` just the approved ones.
-    Only the videos: captions are downloaded per clip."""
+    """Every rendered clip, or with ``?only=approved`` just the approved ones,
+    numbered again from 1. Only the videos: captions are downloaded per clip."""
     job = _get_job(db, user, job_id)
     wanted = [ClipStatus.approved]
     if only != "approved":
@@ -329,9 +329,18 @@ def export_zip(
     tmp.close()
     # MP4 is already compressed: store, don't deflate (much faster, same size).
     names: set[str] = set()
+    # Approved only: the parts are numbered 1, 2, 3... on each platform, in
+    # video order, so approving parts 2, 4 and 5 gives part-001 to part-003. A
+    # dubbed copy keeps the number of its part.
+    serial: dict[tuple[str, int], int] = {}
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as zf:
         for c in ready:
-            stem = f"{c.platform}/{clip_basename(c.rank, c.dub_language)}"
+            rank = c.rank
+            if only:
+                if (c.platform, c.rank) not in serial:
+                    serial[(c.platform, c.rank)] = 1 + sum(p == c.platform for p, _ in serial)
+                rank = serial[(c.platform, c.rank)]
+            stem = f"{c.platform}/{clip_basename(rank, c.dub_language)}"
             name, n = f"{stem}.mp4", 1
             while name in names:  # e.g. a reel dubbed twice (two voices)
                 n += 1

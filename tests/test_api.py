@@ -358,6 +358,51 @@ def test_download_and_zip_names_are_just_the_part_number(client, db_session, tmp
         assert zf.read("facebook_video/part-041.mp4") == b"x" * 10
 
 
+def test_approved_export_numbers_each_platform_from_one(client, db_session, tmp_path):
+    """Approved parts 2 and 3 of one platform and part 2 of another: each
+    platform's folder starts at part-001; a dubbed copy keeps its part's number."""
+    import zipfile
+
+    vid = _upload_sample(client)
+    video = db_session.get(Video, vid)
+    video.status = VideoStatus.ready
+    video.rights_confirmed_at = datetime.now(UTC)
+    db_session.commit()
+    job_id = client.post(f"/videos/{vid}/jobs", json={"platforms": ["facebook_video"]}).json()["id"]
+
+    def clip(platform, rank, status, dub=None):
+        mp4 = tmp_path / f"{platform}-{rank}{dub or ''}.mp4"
+        mp4.write_bytes(f"{platform} {rank} {dub}".encode())
+        c = Clip(
+            job_id=job_id, platform=platform, start_s=rank * 60, end_s=rank * 60 + 50,
+            rank=rank, status=status, file_path=str(mp4),
+            extra={"dub": {"language": dub}} if dub else None,
+        )  # fmt: skip
+        db_session.add(c)
+
+    ready, approved = ClipStatus.ready, ClipStatus.approved
+    for platform, rank, status in [
+        ("facebook_video", 1, ready),
+        ("facebook_video", 2, approved),
+        ("facebook_video", 3, approved),
+        ("youtube_shorts", 1, ready),
+        ("youtube_shorts", 2, approved),
+    ]:
+        clip(platform, rank, status)
+    clip("facebook_video", 3, approved, dub="hi")
+    db_session.commit()
+
+    out = tmp_path / "approved.zip"
+    out.write_bytes(client.get(f"/jobs/{job_id}/export.zip?only=approved").content)
+    with zipfile.ZipFile(out) as zf:
+        assert {n: zf.read(n) for n in zf.namelist()} == {
+            "facebook_video/part-001.mp4": b"facebook_video 2 None",
+            "facebook_video/part-002.mp4": b"facebook_video 3 None",
+            "facebook_video/part-002-hi.mp4": b"facebook_video 3 hi",
+            "youtube_shorts/part-001.mp4": b"youtube_shorts 2 None",
+        }
+
+
 def test_export_only_approved_and_approve_can_be_undone(client, db_session, tmp_path):
     import zipfile
 
@@ -371,7 +416,7 @@ def test_export_only_approved_and_approve_can_be_undone(client, db_session, tmp_
     clips = []
     for rank in (1, 2, 3):
         mp4 = tmp_path / f"c{rank}.mp4"
-        mp4.write_bytes(b"x" * 10)
+        mp4.write_bytes(f"clip {rank}".encode())
         clip = Clip(
             job_id=job_id, platform="facebook_video", start_s=rank * 60, end_s=rank * 60 + 50,
             rank=rank, status=ClipStatus.ready, file_path=str(mp4),
@@ -390,9 +435,13 @@ def test_export_only_approved_and_approve_can_be_undone(client, db_session, tmp_
     assert 'filename="sample_approved.zip"' in z.headers["content-disposition"]
     out = tmp_path / "approved.zip"
     out.write_bytes(z.content)
+    # Numbered again, in order: parts 1 and 3 come out as part-001 and part-002.
     with zipfile.ZipFile(out) as zf:
-        parts = {n.split("/")[1].split(".")[0] for n in zf.namelist()}
-    assert parts == {"part-001", "part-003"}
+        assert sorted(zf.namelist()) == [
+            "facebook_video/part-001.mp4",
+            "facebook_video/part-002.mp4",
+        ]
+        assert zf.read("facebook_video/part-002.mp4") == b"clip 3"
 
     # Un-approve: back to ready, and gone from the approved export.
     undo = client.patch(f"/clips/{clips[2].id}", json={"status": "ready"})
@@ -402,10 +451,11 @@ def test_export_only_approved_and_approve_can_be_undone(client, db_session, tmp_
     with zipfile.ZipFile(out) as zf:
         assert {n.split("/")[1].split(".")[0] for n in zf.namelist()} == {"part-001"}
 
-    # The plain export still has every rendered clip.
+    # The plain export still has every rendered clip, with its own number.
     out.write_bytes(client.get(f"/jobs/{job_id}/export.zip").content)
     with zipfile.ZipFile(out) as zf:
-        assert len({n.split("/")[1].split(".")[0] for n in zf.namelist()}) == 3
+        parts = {n.split("/")[1].split(".")[0] for n in zf.namelist()}
+        assert parts == {"part-001", "part-002", "part-003"}
     assert client.get(f"/jobs/{job_id}/export.zip?only=junk").status_code == 422
 
 

@@ -18,6 +18,8 @@ function bucketUploads() {
     filter: { text: "", area: "all" },
     shown: 100, // rows on screen; "Show more" adds 100
     deleting: null, // key of the video or audio file being deleted
+    chosen: [], // keys ticked in the video list, to download or delete together
+    bulkJob: null, // { action: "download" | "delete", done, total } while one runs
     // Audio files in the bucket, any folder, newest first: bucketMusic, kept
     // by clipforge() (its music pickers offer them too).
     audioTruncated: false,
@@ -75,6 +77,8 @@ function bucketUploads() {
         if (!r.ok) throw new Error(j.error?.message || `HTTP ${r.status}`);
         this.files = j.videos;
         this.truncated = j.truncated;
+        const keys = new Set(j.videos.map((v) => v.key));
+        this.chosen = this.chosen.filter((k) => keys.has(k)); // gone from the bucket
       } catch (e) {
         this.listError = e.message;
       } finally {
@@ -118,7 +122,7 @@ function bucketUploads() {
       this.sending = false;
       this._send = null;
       if (sent) {
-        this.notice = `${sent} video${sent > 1 ? "s" : ""} uploaded to the bucket.`;
+        this.notice = `${sent} file${sent > 1 ? "s" : ""} uploaded to the bucket.`;
         await this.loadFiles();
       }
     },
@@ -177,24 +181,92 @@ function bucketUploads() {
         "It is deleted from the bucket for good: it can't be undone. A copy on this computer, if any, is kept.")) return;
       this.deleting = f.key;
       try {
-        const r = await fetch(`/bucket/${kind}?key=${encodeURIComponent(f.key)}`, { method: "DELETE" });
-        if (!r.ok) {
-          const j = await r.json().catch(() => ({}));
-          throw new Error(j.error?.message || `HTTP ${r.status}`);
-        }
-        if (kind === "audio") {
-          this.bucketMusic = this.bucketMusic.filter((x) => x.key !== f.key);
-          await this.loadTracks();
-        } else {
-          this.files = this.files.filter((x) => x.key !== f.key);
-          window.dispatchEvent(new CustomEvent("clipforge:bucket-deleted", { detail: { key: f.key } }));
-        }
+        await this.removeFromBucket(f, kind);
         this.notice = `"${f.name}" deleted from the bucket.`;
       } catch (e) {
         this.error = e.message;
       } finally {
         this.deleting = null;
       }
+    },
+    // The delete itself and the lists; the caller has asked to confirm.
+    async removeFromBucket(f, kind = "videos") {
+      const r = await fetch(`/bucket/${kind}?key=${encodeURIComponent(f.key)}`, { method: "DELETE" });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        throw new Error(j.error?.message || `HTTP ${r.status}`);
+      }
+      if (kind === "audio") {
+        this.bucketMusic = this.bucketMusic.filter((x) => x.key !== f.key);
+        await this.loadTracks();
+      } else {
+        this.files = this.files.filter((x) => x.key !== f.key);
+        this.chosen = this.chosen.filter((k) => k !== f.key);
+        window.dispatchEvent(new CustomEvent("clipforge:bucket-deleted", { detail: { key: f.key } }));
+      }
+    },
+
+    // ----- Tick several videos / ZIP files: download or delete them together -----
+    isChosen(f) {
+      return this.chosen.includes(f.key);
+    },
+    toggleChosen(f) {
+      this.chosen = this.isChosen(f) ? this.chosen.filter((k) => k !== f.key) : [...this.chosen, f.key];
+    },
+    // The rows on screen (search, folder and "Show more" applied).
+    shownFiles() {
+      return this.filtered().slice(0, this.shown);
+    },
+    allShownChosen() {
+      const rows = this.shownFiles();
+      return rows.length > 0 && rows.every((f) => this.isChosen(f));
+    },
+    chooseAllShown(on) {
+      const keys = this.shownFiles().map((f) => f.key);
+      this.chosen = on ? [...new Set([...this.chosen, ...keys])] : this.chosen.filter((k) => !keys.includes(k));
+    },
+    chosenFiles() {
+      return this.files.filter((f) => this.isChosen(f));
+    },
+    // One after the other, a second apart, each in a hidden frame: started all
+    // at once, the browser drops some. Chrome asks once to allow several downloads.
+    async downloadChosen() {
+      const list = this.chosenFiles();
+      if (!list.length || this.bulkJob) return;
+      this.bulkJob = { action: "download", done: 0, total: list.length };
+      for (const f of list) {
+        const frame = document.createElement("iframe");
+        frame.hidden = true;
+        frame.src = this.downloadLink(f);
+        document.body.appendChild(frame);
+        setTimeout(() => frame.remove(), 60_000); // the download has long started by then
+        this.bulkJob.done++;
+        await new Promise((ok) => setTimeout(ok, 1000));
+      }
+      this.bulkJob = null;
+      this.notice = `${list.length} download${list.length > 1 ? "s" : ""} started: see your browser's downloads.`;
+    },
+    async deleteChosen() {
+      const list = this.chosenFiles();
+      if (!list.length || this.bulkJob) return;
+      const names = list.slice(0, 10).map((f) => `• ${f.name}`).join("\n") +
+        (list.length > 10 ? `\n… and ${list.length - 10} more` : "");
+      if (!confirm(`Delete ${list.length} file${list.length > 1 ? "s" : ""} from the bucket?\n\n${names}\n\n` +
+        "They are deleted from the bucket for good: it can't be undone. Copies on this computer, if any, are kept.")) return;
+      this.bulkJob = { action: "delete", done: 0, total: list.length };
+      const failed = [];
+      for (const f of list) {
+        try {
+          await this.removeFromBucket(f);
+        } catch (e) {
+          failed.push(`${f.name}: ${e.message}`);
+        }
+        this.bulkJob.done++;
+      }
+      this.bulkJob = null;
+      const deleted = list.length - failed.length;
+      if (deleted) this.notice = `${deleted} file${deleted > 1 ? "s" : ""} deleted from the bucket.`;
+      if (failed.length) this.error = `Could not delete ${failed.length}: ${failed.slice(0, 3).join("; ")}`;
     },
 
     // ----- Rename an audio file (same folder; its extension stays) -----
@@ -284,7 +356,10 @@ function bucketUploads() {
       }
     },
 
-    // ----- The list: every video in the bucket, by where it came from -----
+    // ----- The list: every video and ZIP file in the bucket, by where it came from -----
+    isZip(f) {
+      return f.name.toLowerCase().endsWith(".zip"); // can't be played: Download only
+    },
     area(f) {
       const [reels, clips] = this.status.reels_folders;
       if (f.key.startsWith(this.status.uploads_folder)) return "uploads";
@@ -294,7 +369,7 @@ function bucketUploads() {
     },
     areas() {
       const labels = {
-        all: "All videos", uploads: "Your uploads", reels: "Reels from a topic",
+        all: "All files", uploads: "Your uploads", reels: "Reels from a topic",
         clips: "Reels from a video", other: "Other folders",
       };
       return Object.entries(labels).map(([key, label]) => ({

@@ -53,9 +53,10 @@ def _upload_key(key: str) -> str:
 
 
 def _video_key(key: str) -> str:
-    """Open / Download / Delete: any video in the bucket."""
-    if Path(key).suffix.lower() not in bucket.VIDEO_EXTENSIONS or ".." in key.split("/"):
-        raise AppError("Not a video in the bucket", code="bad_key")
+    """Open / Download / Delete: any video or ZIP file in the bucket."""
+    files = bucket.VIDEO_EXTENSIONS | bucket.ZIP_EXTENSIONS
+    if Path(key).suffix.lower() not in files or ".." in key.split("/"):
+        raise AppError("Not a video or ZIP file in the bucket", code="bad_key")
     return key
 
 
@@ -104,8 +105,8 @@ def bucket_status() -> BucketStatus:
 
 @router.get("/videos", response_model=BucketVideos)
 def list_videos(_user: User = Depends(get_current_user)) -> BucketVideos:
-    """Every video in the bucket, in any folder (uploads, reels, others),
-    newest first."""
+    """Every video and ZIP file in the bucket, in any folder (uploads,
+    reels, others), newest first."""
     videos, truncated = bucket.list_videos()
     return BucketVideos(videos=[BucketFile(**v) for v in videos], truncated=truncated)
 
@@ -114,11 +115,11 @@ def list_videos(_user: User = Depends(get_current_user)) -> BucketVideos:
 def start_upload(
     body: BucketUploadInit, _user: User = Depends(get_current_user)
 ) -> BucketUploadStart:
-    """Start sending a video (or, with folder "audio", a music file); then PUT
-    /bucket/uploads/part for each piece and POST /bucket/uploads/complete. It
-    keeps its name (name-2... if taken)."""
+    """Start sending a video or ZIP file (or, with folder "audio", a music
+    file); then PUT /bucket/uploads/part for each piece and POST
+    /bucket/uploads/complete. It keeps its name (name-2... if taken)."""
     audio = body.folder == "audio"
-    allowed = bucket.AUDIO_EXTENSIONS if audio else bucket.VIDEO_EXTENSIONS
+    allowed = bucket.AUDIO_EXTENSIONS if audio else bucket.VIDEO_EXTENSIONS | bucket.ZIP_EXTENSIONS
     ext = Path(body.filename).suffix.lower()
     if ext not in allowed:
         raise AppError(

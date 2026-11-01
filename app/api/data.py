@@ -5,12 +5,13 @@ from it."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.api.errors import AppError, ConflictError, NotFoundError
 from app.db.session import get_db
-from app.models import User, Video
+from app.models import Job, User, Video
 from app.schemas.data import DeleteAllData
 from app.services.discard import (
     busy_reason,
@@ -19,6 +20,7 @@ from app.services.discard import (
     delete_video,
     delete_video_clips,
     local_data,
+    release_stuck_clips,
     video_busy_reason,
 )
 
@@ -44,6 +46,8 @@ def delete_all(
         raise AppError(
             "Type DELETE to confirm", code="not_confirmed", status_code=status.HTTP_400_BAD_REQUEST
         )
+    videos = select(Video.id).where(Video.user_id == user.id)
+    release_stuck_clips(db, select(Job.id).where(Job.video_id.in_(videos)))
     reason = busy_reason(db, user.id)
     if reason:
         raise ConflictError(reason)
@@ -54,6 +58,7 @@ def _idle_video(db: Session, user: User, video_id: str) -> Video:
     video = db.get(Video, video_id)
     if video is None or video.user_id != user.id:
         raise NotFoundError("Video not found")
+    release_stuck_clips(db, select(Job.id).where(Job.video_id == video.id))
     reason = video_busy_reason(db, video)
     if reason:
         raise ConflictError(reason)

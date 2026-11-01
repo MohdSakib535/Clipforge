@@ -3,7 +3,10 @@ their files go; the music library stays; refused while work is running."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
+from sqlalchemy import select
 
 from app.api.deps import DEV_EMAIL
 from app.models import (
@@ -18,7 +21,9 @@ from app.models import (
     VideoStatus,
 )
 from app.services import storage as storage_mod
+from app.services.discard import CUT_OFF, release_stuck_clips
 from app.services.storage import LocalStorageService
+from app.tasks import dispatch
 
 
 @pytest.fixture
@@ -112,3 +117,65 @@ def test_refused_while_work_is_running(client, db_session, store, busy):
     assert r.status_code == 409
     assert db_session.query(Clip).count() == 2  # nothing deleted
     assert store.path_for(f"videos/{d['video'].id}/source.mp4").exists()
+
+
+def _rendering(db_session, clip, minutes_ago: int) -> None:
+    clip.status = ClipStatus.rendering
+    clip.updated_at = datetime.now(UTC) - timedelta(minutes=minutes_ago)
+    db_session.commit()
+
+
+def test_cut_off_rerender_does_not_block_delete_all(client, db_session, store, monkeypatch):
+    """A clip left "rendering" by a worker restart (nothing running or queued
+    for it) no longer holds up deleting everything."""
+    d = _data(db_session, store)
+    _rendering(db_session, d["clips"][0], minutes_ago=10)
+    monkeypatch.setattr(dispatch, "clip_work_pending", lambda: False)
+    r = client.post("/data/delete-all", json={"confirm": "DELETE"})
+    assert r.status_code == 200
+    assert db_session.query(Clip).count() == 0
+
+
+def test_cut_off_rerender_does_not_block_deleting_a_video(client, db_session, store, monkeypatch):
+    d = _data(db_session, store)
+    _rendering(db_session, d["clips"][0], minutes_ago=10)
+    monkeypatch.setattr(dispatch, "clip_work_pending", lambda: False)
+    assert client.delete(f"/data/videos/{d['video'].id}/clips").status_code == 200
+
+
+def test_rerender_still_waiting_blocks_and_names_the_video(client, db_session, store, monkeypatch):
+    d = _data(db_session, store)
+    for c in d["clips"]:
+        _rendering(db_session, c, minutes_ago=10)
+    monkeypatch.setattr(dispatch, "clip_work_pending", lambda: True)
+    r = client.post("/data/delete-all", json={"confirm": "DELETE"})
+    assert r.status_code == 409
+    assert '2 of "film.mp4"' in r.json()["error"]["message"]
+    db_session.expire_all()
+    assert {c.status for c in db_session.query(Clip)} == {ClipStatus.rendering}
+
+
+def test_just_queued_rerender_is_not_taken_for_cut_off(client, db_session, store, monkeypatch):
+    d = _data(db_session, store)
+    _rendering(db_session, d["clips"][0], minutes_ago=0)  # its task may not be queued yet
+    monkeypatch.setattr(dispatch, "clip_work_pending", lambda: False)
+    assert client.post("/data/delete-all", json={"confirm": "DELETE"}).status_code == 409
+    db_session.refresh(d["clips"][0])
+    assert d["clips"][0].status == ClipStatus.rendering
+
+
+def test_release_marks_cut_off_clips_failed(db_session, store, monkeypatch):
+    d = _data(db_session, store)
+    monkeypatch.setattr(dispatch, "clip_work_pending", lambda: False)
+    jobs = select(Job.id).where(Job.video_id == d["video"].id)
+    _rendering(db_session, d["clips"][0], minutes_ago=10)
+    assert release_stuck_clips(db_session, jobs) == 1
+    db_session.refresh(d["clips"][0])
+    assert d["clips"][0].status == ClipStatus.failed
+    assert d["clips"][0].error == CUT_OFF
+    # A clip of a job still processing is its job's to finish.
+    d["job"].status = JobStatus.running
+    _rendering(db_session, d["clips"][1], minutes_ago=10)
+    assert release_stuck_clips(db_session, jobs) == 0
+    db_session.refresh(d["clips"][1])
+    assert d["clips"][1].status == ClipStatus.rendering

@@ -4,9 +4,10 @@ computer ("Local videos" tab) and delete one video, its clips, or all data."""
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
@@ -22,6 +23,7 @@ from app.models import (
     VideoStatus,
 )
 from app.services.storage import get_storage
+from app.tasks import dispatch
 
 log = get_logger(__name__)
 
@@ -99,15 +101,64 @@ def data_usage(db: Session, user_id: str) -> dict:
     }
 
 
+# A clip queued for a re-render this recently is never taken for cut off: its
+# task may not have reached the queue yet.
+STUCK_AFTER = timedelta(minutes=2)
+CUT_OFF = (
+    "The re-render was cut off (a worker restarted). "
+    "Re-render this clip or apply the change again."
+)
+
+
+def release_stuck_clips(db: Session, jobs: Select) -> int:
+    """Clips of ``jobs`` still marked "rendering" while no re-render or music
+    mix is running or waiting were cut off: a worker restarted mid-render and
+    nothing will ever finish them. They are marked failed, so they stop
+    holding up deletes. Clips of a job still processing are left alone.
+    Returns how many."""
+    running = select(Job.id).where(Job.status.in_([JobStatus.queued, JobStatus.running]))
+    stuck = (
+        db.query(Clip)
+        .filter(
+            Clip.job_id.in_(jobs),
+            Clip.job_id.not_in(running),
+            Clip.status == ClipStatus.rendering,
+            Clip.updated_at < datetime.now(UTC) - STUCK_AFTER,
+        )
+        .all()
+    )
+    if not stuck or dispatch.clip_work_pending():
+        return 0
+    for clip in stuck:
+        clip.status = ClipStatus.failed
+        clip.error = CUT_OFF
+    db.commit()
+    log.warning("stuck_clips_released", extra={"clip_ids": [c.id for c in stuck]})
+    return len(stuck)
+
+
 def busy_reason(db: Session, user_id: str) -> str | None:
     """Why all data can't be deleted right now (work still writing files)."""
     videos = select(Video.id).where(Video.user_id == user_id)
-    jobs = select(Job.id).where(Job.video_id.in_(videos))
     running = [JobStatus.queued, JobStatus.running]
     if db.query(Job).filter(Job.video_id.in_(videos), Job.status.in_(running)).count():
         return "A job is still processing. Wait for it to finish or use Start over, then try again."
-    if db.query(Clip).filter(Clip.job_id.in_(jobs), Clip.status == ClipStatus.rendering).count():
-        return "Some clips are still re-rendering (colour, trim or music). Try again soon."
+    # Which videos: often not the one on screen (an earlier video, a reel made from one).
+    rendering = (
+        db.query(Video.filename, func.count(Clip.id))
+        .join(Job, Job.video_id == Video.id)
+        .join(Clip, Clip.job_id == Job.id)
+        .filter(Video.user_id == user_id, Clip.status == ClipStatus.rendering)
+        .group_by(Video.id, Video.filename)
+        .all()
+    )
+    if rendering:
+        which = ", ".join(f'{n} of "{name}"' for name, n in rendering[:3])
+        more = ", ..." if len(rendering) > 3 else ""
+        return (
+            f"Clips are still re-rendering (colour, trim or music): {which}{more}. "
+            "Try again soon."
+        )
     preparing = [VideoStatus.downloading, VideoStatus.uploaded, VideoStatus.ingesting]
     if db.query(Video).filter(Video.user_id == user_id, Video.status.in_(preparing)).count():
         return "A video is still downloading or being prepared. Try again when it is ready."

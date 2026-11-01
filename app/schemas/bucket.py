@@ -30,7 +30,7 @@ class BucketStatus(BaseModel):
 class BucketUploadInit(BaseModel):
     filename: str = Field(min_length=1, max_length=512)
     size_bytes: int = Field(gt=0)
-    folder: Literal["uploads", "audio"] = "uploads"  # a video, or a music file
+    folder: Literal["uploads", "audio"] = "uploads"  # a video or ZIP file, or a music file
 
 
 class BucketUploadRef(BaseModel):

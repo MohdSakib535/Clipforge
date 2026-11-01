@@ -52,7 +52,15 @@ _AUDIO_TYPES = {
     ".flac": "audio/flac",
 }
 AUDIO_EXTENSIONS = frozenset(_AUDIO_TYPES)  # what counts as audio (listing)
-_CONTENT_TYPES = {**_VIDEO_TYPES, **_AUDIO_TYPES, ".srt": "application/x-subrip"}
+# ZIP files (e.g. a downloaded ZIP of clips) go up and are listed with the videos.
+_ZIP_TYPES = {".zip": "application/zip"}
+ZIP_EXTENSIONS = frozenset(_ZIP_TYPES)
+_CONTENT_TYPES = {
+    **_VIDEO_TYPES,
+    **_AUDIO_TYPES,
+    **_ZIP_TYPES,
+    ".srt": "application/x-subrip",
+}
 
 # What S3 error codes mean for the user ({bucket} = BUCKET_NAME).
 _WRONG_KEYS = "The bucket keys are wrong. Check BUCKET_ACCESS_KEY_ID and BUCKET_SECRET_ACCESS_KEY."
@@ -244,8 +252,9 @@ def download_link(key: str) -> str:
     name = key.rsplit("/", 1)[-1]
     ext = Path(name).suffix
     fallback = name.encode("ascii", "ignore").decode().replace('"', "")
-    if not Path(fallback).stem.strip("_-"):  # e.g. a Hindi name
-        fallback = ("audio" if ext.lower() in AUDIO_EXTENSIONS else "video") + ext
+    if not fallback.removesuffix(ext).strip("_-"):  # e.g. a Hindi name
+        kind = "audio" if ext.lower() in AUDIO_EXTENSIONS else "video"
+        fallback = ("files" if ext.lower() in ZIP_EXTENSIONS else kind) + ext
     disposition = f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name)}"
     with _bucket() as (client, bucket_name):
         return client.generate_presigned_url(
@@ -355,10 +364,11 @@ def rename(key: str, name: str) -> str:
 
 
 def list_videos() -> tuple[list[dict], bool]:
-    """Every video in the bucket, in any folder, newest first: {"key", "name",
-    "folder", "size_bytes", "uploaded_at"} ("folder" is "" at the top). Also
-    whether the bucket has more than MAX_LISTED objects (the rest is left out)."""
-    return _list(VIDEO_EXTENSIONS)
+    """Every video and ZIP file in the bucket, in any folder, newest first:
+    {"key", "name", "folder", "size_bytes", "uploaded_at"} ("folder" is "" at
+    the top). Also whether the bucket has more than MAX_LISTED objects (the
+    rest is left out)."""
+    return _list(VIDEO_EXTENSIONS | ZIP_EXTENSIONS)
 
 
 def list_audio() -> tuple[list[dict], bool]:

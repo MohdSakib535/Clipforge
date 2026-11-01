@@ -173,6 +173,28 @@ def test_download_saves_the_video_under_its_name(client, s3):
     assert disposition == "attachment; filename=\"My_trip.mp4\"; filename*=UTF-8''My_trip.mp4"
 
 
+def test_zip_file_goes_up_and_is_listed_with_the_videos(client, s3):
+    sent = _send(client, "Garden_approved.zip", [b"PK-", b"zip"])
+    assert sent["key"] == "clipforge/uploads/Garden_approved.zip"
+    assert s3.objects[sent["key"]] == (b"PK-zip", "application/zip")
+    _send(client, "My trip.mp4", [b"video"])
+    videos = client.get("/bucket/videos").json()["videos"]
+    assert [v["name"] for v in videos] == ["My_trip.mp4", "Garden_approved.zip"]
+
+    _, disposition = _download(client, sent["key"])
+    assert disposition.startswith('attachment; filename="Garden_approved.zip"')
+    hindi = _send(client, "बगीचा.zip", [b"zip"])["key"]
+    assert _download(client, hindi)[1].startswith('attachment; filename="files.zip"')
+
+    assert client.delete("/bucket/videos", params={"key": sent["key"]}).status_code == 204
+    assert sent["key"] not in s3.objects
+    # Not a music file.
+    start = client.post(
+        "/bucket/uploads", json={"filename": "songs.zip", "size_bytes": 3, "folder": "audio"}
+    )
+    assert start.json()["error"]["code"] == "unsupported_type"
+
+
 def test_download_of_a_hindi_name_keeps_it(client, s3):
     key = _send(client, "जीवन बदलने वाले.mp4", [b"video"])["key"]
     assert key == "clipforge/uploads/जीवन_बदलने_वाले.mp4"

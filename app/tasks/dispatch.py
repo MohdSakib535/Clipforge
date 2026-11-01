@@ -61,3 +61,35 @@ def enqueue_clip_render(clip_id: str, keep_approved: bool = False, urgent: bool 
     render_single_clip.apply_async(
         args=[clip_id, keep_approved], priority=URGENT_PRIORITY if urgent else BATCH_PRIORITY
     )
+
+
+# Work that re-makes a clip already there: a re-render (trim, colour) on the
+# "renders" queue and the background-music mix on the "audio" queue.
+CLIP_WORK_QUEUES = ("renders", "audio")
+CLIP_WORK_TASKS = {"render_single_clip", "mix_background_audio"}
+
+
+def clip_work_pending() -> bool:
+    """Is a clip re-render or music mix waiting in its queue or held by a
+    worker? If not, a clip still marked "rendering" was cut off (its worker
+    restarted mid-render) and nothing will ever finish it. True when it
+    can't be told (the broker can't be reached)."""
+    from app.tasks.celery_app import celery_app
+
+    try:
+        # Queue, then reserved, then active: a task moving along that way
+        # while we look is still seen.
+        with celery_app.connection_for_read() as conn:
+            conn.ensure_connection(max_retries=1)
+            channel = conn.default_channel
+            for queue in CLIP_WORK_QUEUES:
+                if channel.queue_declare(queue=queue, passive=False).message_count:
+                    return True
+        inspect = celery_app.control.inspect(timeout=1.0)
+        for replies in (inspect.reserved(), inspect.active()):
+            for tasks in (replies or {}).values():
+                if any(t.get("name") in CLIP_WORK_TASKS for t in tasks):
+                    return True
+    except Exception:
+        return True
+    return False

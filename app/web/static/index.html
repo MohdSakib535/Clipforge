@@ -1410,16 +1410,16 @@ BUCKET_PREFIX=clipforge</pre>
         <template x-if="status?.set_up">
           <div class="space-y-5">
             <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
-              <h2 class="text-lg font-medium">Upload videos to your bucket</h2>
+              <h2 class="text-lg font-medium">Upload videos and ZIP files to your bucket</h2>
               <p class="text-xs text-slate-400 mt-1 mb-4">
                 Bucket <b class="text-slate-200" x-text="status.bucket"></b> (<span x-text="status.endpoint"></span>).
-                Videos go to <code class="text-sky-300" x-text="status.uploads_folder"></code>, a folder of their own:
+                Videos and ZIP files go to <code class="text-sky-300" x-text="status.uploads_folder"></code>, a folder of their own:
                 reels go to <span x-text="status.reels_folders.join(' and ')"></span>.
               </p>
               <label class="inline-block px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm cursor-pointer"
                      :class="sending ? 'opacity-40 pointer-events-none' : ''">
-                <input type="file" multiple class="hidden" accept="video/*,.mp4,.m4v,.mov,.mkv,.webm,.avi" @change="pickBucketFiles($event)" />
-                Choose videos…
+                <input type="file" multiple class="hidden" accept="video/*,.mp4,.m4v,.mov,.mkv,.webm,.avi,.zip,application/zip" @change="pickBucketFiles($event)" />
+                Choose videos or ZIP files…
               </label>
 
               <div x-show="queue.length" class="mt-4 space-y-2">
@@ -1445,7 +1445,7 @@ BUCKET_PREFIX=clipforge</pre>
               <div x-show="queue.length" class="flex flex-wrap gap-2 mt-4">
                 <button x-show="!sending && toSend().length" @click="sendToBucket()"
                   class="px-4 py-2 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-sm"
-                  x-text="`Upload ${toSend().length} video${toSend().length === 1 ? '' : 's'}`"></button>
+                  x-text="`Upload ${toSend().length} file${toSend().length === 1 ? '' : 's'}`"></button>
                 <button x-show="sending" @click="cancelBucket()" class="px-4 py-2 rounded-lg bg-rose-700/80 hover:bg-rose-600 text-sm">Cancel</button>
                 <button x-show="!sending && queue.some(q => q.state!=='waiting')" @click="clearFinished()"
                   class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Clear finished</button>
@@ -1456,8 +1456,8 @@ BUCKET_PREFIX=clipforge</pre>
             <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
               <div class="flex items-center justify-between gap-2 mb-3">
                 <div>
-                  <h2 class="text-lg font-medium">Videos in your bucket (<span x-text="files.length"></span>)</h2>
-                  <p class="text-xs text-slate-400 mt-1">Every video in <b x-text="status.bucket"></b>, in any folder: your uploads, your reels and anything else. <b>Download</b> saves one on this computer, straight from the bucket; <b>Delete</b> removes it from the bucket for good.</p>
+                  <h2 class="text-lg font-medium">Videos and ZIP files in your bucket (<span x-text="files.length"></span>)</h2>
+                  <p class="text-xs text-slate-400 mt-1">Every video and ZIP file in <b x-text="status.bucket"></b>, in any folder: your uploads, your reels and anything else. <b>Download</b> saves one on this computer, straight from the bucket; <b>Delete</b> removes it from the bucket for good.</p>
                 </div>
                 <button @click="loadFiles()" :disabled="listing" class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs flex-none"
                   x-text="listing ? 'Loading…' : 'Refresh'"></button>
@@ -1471,22 +1471,44 @@ BUCKET_PREFIX=clipforge</pre>
                 <input type="search" x-model="filter.text" @input="shown = 100" placeholder="Search by name or folder"
                   class="flex-1 min-w-[12rem] bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500" />
               </div>
+              <!-- Tick several: download or delete them together -->
+              <div x-show="files.length" class="flex flex-wrap items-center gap-2 mb-2 text-xs">
+                <label class="flex items-center gap-1.5 text-slate-300" title="Tick every file shown below (search and folder applied)">
+                  <input type="checkbox" :checked="allShownChosen()" @change="chooseAllShown($event.target.checked)"
+                    :disabled="!!bulkJob || !shownFiles().length" />
+                  Select all shown
+                </label>
+                <span x-show="chosen.length" class="text-slate-400"
+                  x-text="`${chosen.length} selected · ${fmtBytes(chosenFiles().reduce((n, f) => n + f.size_bytes, 0))}`"></span>
+                <button x-show="chosen.length" @click="downloadChosen()" :disabled="!!bulkJob"
+                  class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40"
+                  x-text="`Download selected (${chosen.length})`"></button>
+                <button x-show="chosen.length" @click="deleteChosen()" :disabled="!!bulkJob || !!deleting"
+                  class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40"
+                  x-text="`Delete selected (${chosen.length})`"></button>
+                <button x-show="chosen.length" @click="chosen = []" :disabled="!!bulkJob"
+                  class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Clear</button>
+                <span x-show="bulkJob" class="text-amber-300"
+                  x-text="bulkJob && `${bulkJob.action === 'download' ? 'Starting downloads' : 'Deleting'} ${bulkJob.done}/${bulkJob.total}…`"></span>
+              </div>
               <p x-show="listError" class="text-sm text-rose-300" x-text="listError"></p>
               <p x-show="truncated" class="text-xs text-amber-300">This bucket is very big: only the newest part of it is listed.</p>
-              <p x-show="!files.length && !listing && !listError" class="text-xs text-slate-500">No videos in the bucket yet.</p>
-              <p x-show="files.length && !filtered().length" class="text-xs text-slate-500">No video matches.</p>
+              <p x-show="!files.length && !listing && !listError" class="text-xs text-slate-500">No videos or ZIP files in the bucket yet.</p>
+              <p x-show="files.length && !filtered().length" class="text-xs text-slate-500">No file matches.</p>
               <div class="divide-y divide-slate-800">
-                <template x-for="f in filtered().slice(0, shown)" :key="f.key">
+                <template x-for="f in shownFiles()" :key="f.key">
                   <div class="flex items-center gap-3 py-2 text-sm">
+                    <input type="checkbox" :checked="isChosen(f)" @change="toggleChosen(f)" :disabled="!!bulkJob"
+                      class="flex-none" :aria-label="`Select ${f.name}`" />
                     <div class="min-w-0 flex-1">
                       <div class="truncate" x-text="f.name"></div>
                       <div class="text-xs text-slate-500 truncate" x-text="f.folder || '(top of the bucket)'"></div>
                     </div>
                     <span class="text-xs text-slate-400 flex-none" x-text="fmtBytes(f.size_bytes)"></span>
                     <span class="text-xs text-slate-500 flex-none hidden sm:inline" x-text="fmtWhen(f.uploaded_at)"></span>
-                    <a :href="fileLink(f)" target="_blank" rel="noopener" class="text-xs underline text-slate-300 hover:text-white flex-none">Open</a>
+                    <a x-show="!isZip(f)" :href="fileLink(f)" target="_blank" rel="noopener" class="text-xs underline text-slate-300 hover:text-white flex-none">Open</a>
                     <a :href="downloadLink(f)" class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs flex-none">Download</a>
-                    <button @click="deleteFile(f)" :disabled="!!deleting"
+                    <button @click="deleteFile(f)" :disabled="!!deleting || !!bulkJob"
                       class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40 text-xs flex-none"
                       x-text="deleting===f.key ? 'Deleting…' : 'Delete'"></button>
                   </div>
