@@ -8,7 +8,7 @@ function reelMaker() {
     options: {
       platforms: [], languages: [], styles: [], script_types: [], description_max: 1500,
       script_models: [], script_model_default: "",
-      duration: { min: 15, max: 300, default: 35 }, max_scenes: 20,
+      duration: { min: 15, max: 300, default: 35 }, max_scenes: 20, story_pace: 0.94,
       timing: { picture_s: 58, load_s: 5, script_s: 25, script_s_per_s: 0.5, render_s_per_s: 0.35 },
     },
     form: {
@@ -597,11 +597,11 @@ function reelMaker() {
     estimateS() {
       if (!this.draft) return 0;
       const lang = this.options.languages.find((l) => l.key === this.reel.language);
-      // A slower voice ("calm") takes longer for the same words; a story is read a
-      // little slower (0.92), with 0.8 s between scenes (reel_render.STORY_*).
+      // Each voice reads at its own (measured) pace; a story is read a little
+      // slower, with 0.8 s between scenes (reel_render.STORY_*).
       const story = this.reel.script_type === "story";
-      const speed = (lang?.voices.find((v) => v.key === this.genVoice())?.speed || 1) * (story ? 0.92 : 1);
-      const wps = (lang?.words_per_s || 2.8) * speed;
+      const voice = lang?.voices.find((v) => v.key === this.genVoice());
+      const wps = (voice?.words_per_s || 2.8) * (story ? this.options.story_pace : 1);
       const words = this.draft.scenes.reduce((n, s) => n + this.words(s.narration), 0);
       const gaps = (this.draft.scenes.length - 1) * (story ? 0.8 : 0.25);
       return Math.round(words / wps + gaps + 0.8);

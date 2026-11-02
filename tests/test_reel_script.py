@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from app.services import reel_script
+from app.services import reel_render, reel_script, tts
 from app.services.reel_script import ScriptError, normalize_script
 
 
@@ -22,7 +22,24 @@ def test_a_slower_voice_gets_fewer_words():
     usual = reel_script.words_per_scene(40, "hi", 6, "hm_psi")
     assert reel_script.words_per_scene(40, "hi", 6, "hm_calm") < usual  # speaks at 0.9
     assert reel_script.words_per_scene(40, "hi", 6, "hm_young") > usual  # at 1.08
-    assert reel_script.words_per_scene(40, "hi", 6) == usual
+    assert reel_script.words_per_scene(40, "hi", 6, "hf_beta") > usual  # a faster voice
+
+
+def test_a_reel_may_run_a_little_long_but_hardly_short():
+    assert reel_script.length_window(300) == (291, 345)  # 5 min: up to 45 s more
+    assert reel_script.length_window(240) == pytest.approx((232.8, 276))  # 4 min: 15%
+    assert reel_script.length_window(35) == pytest.approx((32, 40.25))
+    assert reel_script.length_window(15) == (12, 18)
+    assert reel_script.aim_s(300) == 322.5  # written a bit long: the model writes short
+
+
+def test_the_words_fill_the_length_but_the_pauses_and_call_to_action():
+    wps = tts.words_per_s("hi", "hf_alpha")
+    # 15 scenes: 14 breaths of 0.8 s and 0.8 s after the last one.
+    words = reel_script.script_words(322.5, "hi", 15, "hf_alpha", story=True)
+    assert words == pytest.approx((322.5 - 14 * 0.8 - 0.8) * wps * reel_render.STORY_PACE)
+    per_scene = reel_script.words_per_scene(300, "hi", 15, "hf_alpha", story=True)
+    assert per_scene == round((words - reel_script.CALL_TO_ACTION_WORDS) / 15)
 
 
 def test_prompt_has_language_platform_and_size():
@@ -116,7 +133,8 @@ def test_spoken_length_counts_words_pace_and_pauses():
     texts = [" ".join(["शब्द"] * 15), " ".join(["शब्द"] * 10)]
     # 25 words at 2.5 a second, 0.25 s after each scene and 0.55 s more at the end.
     assert reel_script.spoken_seconds(texts, "hi") == pytest.approx(10 + 0.5 + 0.55)
-    assert reel_script.spoken_seconds(texts, "hi", "hm_calm") == pytest.approx(25 / 2.25 + 1.05)
+    calm = tts.words_per_s("hi", "hm_calm")  # measured
+    assert reel_script.spoken_seconds(texts, "hi", "hm_calm") == pytest.approx(25 / calm + 1.05)
 
 
 def _scenes(*word_counts):
@@ -135,23 +153,24 @@ def test_a_too_long_script_is_rewritten_shorter(monkeypatch):
 
     def fake_chat(messages, schema, **options):
         asked.append(messages[-1]["content"])
-        return {"narrations": [" ".join(["छोटा"] * 22) for _ in range(4)]}
+        return {k: " ".join(["छोटा"] * 24) for k in schema["required"]}
 
     monkeypatch.setattr(reel_script, "_chat", fake_chat)
     scenes = _scenes(40, 40, 40, 40)  # ~66 s for a 40 s reel
     reel_script.fit_length(scenes, "hi", 40)
-    assert "they must take 40 seconds. Rewrite them shorter" in asked[0]
-    assert [len(sc["narration"].split()) for sc in scenes] == [22] * 4
+    assert "they must take 43 seconds. Rewrite all of them shorter" in asked[0]
+    assert len(asked) == 1  # it fits now
+    assert [len(sc["narration"].split()) for sc in scenes] == [24] * 4
     assert all(sc["image_prompt"] == "p" for sc in scenes)  # the pictures stay
 
 
 def test_a_rewrite_that_does_not_help_is_dropped(monkeypatch):
     scenes = _scenes(40, 40, 40, 40)
-    longer = {"narrations": [" ".join(["x"] * 60) for _ in range(4)]}
+    longer = {f"scene_{i}": " ".join(["x"] * 60) for i in range(1, 5)}
     monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: longer)
     reel_script.fit_length(scenes, "hi", 40)
-    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: {"narrations": ["x"] * 3})
-    reel_script.fit_length(scenes, "hi", 40)  # the wrong count
+    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: {"scene_1": "x"})
+    reel_script.fit_length(scenes, "hi", 40)  # scenes left out
 
     def broken(*a, **k):
         raise ScriptError("Ollama isn't running")
@@ -159,6 +178,63 @@ def test_a_rewrite_that_does_not_help_is_dropped(monkeypatch):
     monkeypatch.setattr(reel_script, "_chat", broken)
     reel_script.fit_length(scenes, "hi", 40)
     assert [len(sc["narration"].split()) for sc in scenes] == [40] * 4
+
+
+def test_a_script_a_little_long_is_kept_but_a_short_one_is_not(monkeypatch):
+    monkeypatch.setattr(reel_script, "_chat", lambda *a, **k: pytest.fail("no rewrite needed"))
+    scenes = _scenes(*[54] * 15)  # ~328 s for 5 min: 28 s long is fine
+    reel_script.fit_length(scenes, "hi", 300)
+    assert [len(sc["narration"].split()) for sc in scenes] == [54] * 15
+
+    asked = []
+    monkeypatch.setattr(reel_script, "_chat", lambda m, s, **o: asked.append(s) or {})
+    reel_script.fit_length(_scenes(*[46] * 15), "hi", 300)  # ~280 s: 20 s short
+    assert asked
+
+
+def test_only_the_scenes_too_short_are_written_longer(monkeypatch):
+    asked = []
+
+    def fake_chat(messages, schema, **options):
+        asked.append((messages[-1]["content"], schema["required"]))
+        return {k: " ".join(["लंबा"] * 39) for k in schema["required"]}
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    scenes = _scenes(40, 10, 40, 10)  # ~42 s for a 60 s reel: scenes 2 and 4 fell short
+    reel_script.fit_length(scenes, "hi", 60)
+    [(prompt, keys)] = asked
+    assert keys == ["scene_2", "scene_4"]
+    # Written for 64.5 s, halfway into the 9 s a 60 s reel may run long.
+    assert "they must take 64 seconds. Rewrite only scenes 2, 4 longer" in prompt
+    assert "about 39 words each" in prompt
+    assert "Scene 1: " in prompt and "Scene 4: " in prompt  # the whole story is given
+    assert [len(sc["narration"].split()) for sc in scenes] == [40, 39, 40, 39]
+
+
+def test_a_script_still_too_short_is_rewritten_once_more(monkeypatch):
+    scene_2 = iter([15, 39])  # the first rewrite still falls short there
+
+    def fake_chat(messages, schema, **options):
+        return {"scene_2": " ".join(["लंबा"] * next(scene_2)), "scene_4": " ".join(["लंबा"] * 39)}
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    scenes = _scenes(40, 10, 40, 10)
+    reel_script.fit_length(scenes, "hi", 60)
+    assert [len(sc["narration"].split()) for sc in scenes] == [40, 39, 40, 39]
+
+
+def test_the_length_is_rewritten_at_most_twice(monkeypatch):
+    calls = []
+
+    def no_better(messages, schema, **options):
+        calls.append(schema["required"])
+        return {k: " ".join(["x"] * 10) for k in schema["required"]}
+
+    monkeypatch.setattr(reel_script, "_chat", no_better)
+    scenes = _scenes(40, 10, 40, 10)
+    reel_script.fit_length(scenes, "hi", 60)
+    assert len(calls) == reel_script.LENGTH_TRIES == 2
+    assert [len(sc["narration"].split()) for sc in scenes] == [40, 10, 40, 10]
 
 
 def test_the_call_to_action_goes_on_after_the_length_fix(monkeypatch):
@@ -172,8 +248,8 @@ def test_the_call_to_action_goes_on_after_the_length_fix(monkeypatch):
 
     def fake_chat(messages, schema, **options):
         asked.append(messages[-1]["content"])
-        if "narrations" in schema["properties"]:
-            return {"narrations": [" ".join(["छोटा"] * 8) for _ in range(3)]}
+        if "scene_1" in schema["properties"]:
+            return {k: " ".join(["छोटा"] * 8) for k in schema["required"]}
         return script
 
     monkeypatch.setattr(reel_script, "_chat", fake_chat)
@@ -373,7 +449,7 @@ def test_picture_prompts_in_hindi_are_put_into_english(monkeypatch):
     asked = []
 
     def fake_chat(messages, schema, **options):
-        if {"narrations", "topic", "lines"} & set(schema["properties"]):
+        if {"scene_1", "topic", "lines"} & set(schema["properties"]):
             return {}  # the length and Hindi fixes: nothing usable, all is kept
         asked.append(messages[-1]["content"])
         return replies[len(asked) - 1]
@@ -587,7 +663,7 @@ def test_a_story_flows_and_is_paced_like_one():
     )
     lines = ["शब्द " * 20] * 3
     longer = reel_script.spoken_seconds(lines, "hi", story=True)
-    assert longer == pytest.approx(60 / (2.5 * 0.92) + 2 * 0.8 + 0.8)
+    assert longer == pytest.approx(60 / (2.5 * reel_render.STORY_PACE) + 2 * 0.8 + 0.8)
     assert reel_script.spoken_seconds(lines, "hi") == pytest.approx(60 / 2.5 + 2 * 0.25 + 0.8)
 
 

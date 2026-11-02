@@ -34,8 +34,10 @@ class Language:
     prompt_name: str  # how the script writer is told which language to write
     kokoro_lang: str  # espeak-ng code Kokoro turns the text into sounds with
     voices: dict[str, str] = field(default_factory=dict)  # Kokoro voice or MIXES key -> label
-    # Kokoro's speaking rate (measured), used to size the script to the length.
+    # Kokoro's speaking rate (measured), used to size the script to the length;
+    # voices that were measured one by one have theirs in voice_words_per_s.
     words_per_s: float = 2.8
+    voice_words_per_s: dict[str, float] = field(default_factory=dict)
     caption_font: str = "Noto Sans"
     sample: str = ""  # read out by the "Listen" button next to the voices
 
@@ -53,6 +55,14 @@ LANGUAGES: dict[str, Language] = {
          "hm_omega": "Male 1", "hm_psi": "Male 2", "hm_mix": "Male 3 · mixed",
          "hm_deep": "Male 4 · deep", "hm_calm": "Male 5 · calm", "hm_young": "Male 6 · young"},
         words_per_s=2.5,
+        # Measured 2026-11-02 on 585 words of real reel narrations: the female
+        # voices read up to ~20% faster than the male ones.
+        voice_words_per_s={
+            "hf_alpha": 2.68, "hf_beta": 3.02, "hf_mix": 2.83, "hf_low": 3.03,
+            "hf_calm": 2.50, "hf_bright": 2.82,
+            "hm_omega": 2.55, "hm_psi": 2.54, "hm_mix": 2.54, "hm_deep": 2.56,
+            "hm_calm": 2.37, "hm_young": 2.68,
+        },
         caption_font="Noto Sans Devanagari",
         sample="नमस्ते! यह आपकी रील की आवाज़ है। सुनिए, आज की कहानी बहुत खास है।",
     ),
@@ -118,6 +128,14 @@ def voice_speed(voice: str | None) -> float:
     """How fast ``voice`` speaks compared with its language's usual pace."""
     mix = MIXES.get(voice or "")
     return mix.speed if mix else 1.0
+
+
+def words_per_s(language: str, voice: str | None = None) -> float:
+    """How many words a second ``voice`` reads at its usual pace."""
+    lang = LANGUAGES[language]
+    if voice in lang.voice_words_per_s:
+        return lang.voice_words_per_s[voice]
+    return lang.words_per_s * voice_speed(voice)
 
 
 def voice_key(voice: str) -> str:

@@ -194,14 +194,14 @@ def options() -> dict:
             {
                 "key": k,
                 "label": lang.label,
-                "words_per_s": lang.words_per_s,
                 "voices": [
-                    {"key": v, "label": label, "speed": tts.voice_speed(v)}
+                    {"key": v, "label": label, "words_per_s": tts.words_per_s(k, v)}
                     for v, label in lang.voices.items()
                 ],
             }
             for k, lang in tts.LANGUAGES.items()
         ],
+        "story_pace": reel_render.STORY_PACE,
         "styles": [{"key": k, "label": s.label} for k, s in reel_render.STYLES.items()],
         "script_types": [{"key": k, "label": t.label} for k, t in reel_script.SCRIPT_TYPES.items()],
         "description_max": reel_script.MAX_DESCRIPTION,

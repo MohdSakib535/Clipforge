@@ -42,8 +42,10 @@ HIGHLIGHT = "&H0000D7FF&"  # the word being spoken: warm yellow (ASS colours are
 # "Story" scripts are told like a story, not cut like a reel: the narrator a
 # little slower, a breath between scenes while the picture fades into the next
 # (the next line starts once it is there), every picture drifting slowly
-# closer, calm captions and the music dipping under the voice.
+# closer and calm captions.
 STORY_SPEED = 0.92
+# ...which makes Kokoro read ~6% fewer words a second, not 8% (measured).
+STORY_PACE = 0.94
 STORY_GAP_S = 0.8
 STORY_ZOOM = 0.08
 VIDEO_NAME = "reel.mp4"
@@ -549,7 +551,6 @@ def render(
                     str(mixed),
                     volume_pct=music_volume,
                     duration_s=duration,
-                    duck=story,
                 )
             )
             voiced = mixed

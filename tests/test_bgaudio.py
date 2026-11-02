@@ -486,18 +486,8 @@ def test_clip_file_version_changes_when_file_changes(client, db_session, monkeyp
     assert version() != v1
 
 
-def test_story_music_dips_under_the_voice():
-    plain = bgaudio.build_mix_cmd("c.mp4", "m.m4a", "o.mp4", volume_pct=25, duration_s=30.0)
-    assert "sidechaincompress" not in plain[plain.index("-filter_complex") + 1]
-    ducked = bgaudio.build_mix_cmd(
-        "c.mp4", "m.m4a", "o.mp4", volume_pct=25, duration_s=30.0, duck=True
-    )
-    graph = ducked[ducked.index("-filter_complex") + 1]
-    assert "asplit=2[fg][voice]" in graph and "[bg][voice]sidechaincompress=" in graph
-
-
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
-def test_ducked_music_is_quieter_while_the_voice_speaks(tmp_path):
+def test_music_keeps_its_volume_while_the_voice_speaks(tmp_path):
     clip, music, out = tmp_path / "clip.mp4", tmp_path / "music.wav", tmp_path / "out.mp4"
     # A "voice" at 300 Hz for 2 s, then 1 s of silence, three times; music at 1 kHz.
     voice = "sine=f=300:d=9,volume=0.3,volume=enable='between(mod(t,3),2,3)':volume=0"
@@ -507,7 +497,7 @@ def test_ducked_music_is_quieter_while_the_voice_speaks(tmp_path):
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=1000:d=9",
                     str(music)], check=True)  # fmt: skip
     ffmpeg.run(bgaudio.build_mix_cmd(str(clip), str(music), str(out), volume_pct=30,
-                                     duration_s=9.0, duck=True))  # fmt: skip
+                                     duration_s=9.0))  # fmt: skip
 
     def music_level(start: float, end: float) -> float:
         err = subprocess.run(
@@ -517,4 +507,5 @@ def test_ducked_music_is_quieter_while_the_voice_speaks(tmp_path):
         ).stderr  # fmt: skip
         return float(re.search(r"mean_volume: (-?[\d.]+)", err).group(1))
 
-    assert music_level(2.3, 2.9) - music_level(0.5, 1.5) > 8  # dB louder in the pause
+    # The set volume all through: not pushed down under the voice.
+    assert abs(music_level(2.3, 2.9) - music_level(0.5, 1.5)) < 1

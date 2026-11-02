@@ -18,9 +18,9 @@ from dataclasses import dataclass
 import httpx
 
 from app.config.settings import get_settings
-from app.services.reel_render import END_GAP_S, GAP_S, STORY_GAP_S, STORY_SPEED
+from app.services.reel_render import END_GAP_S, GAP_S, STORY_GAP_S, STORY_PACE
 from app.services.romanize import contains_devanagari, romanize
-from app.services.tts import LANGUAGES, voice_speed
+from app.services.tts import LANGUAGES, words_per_s
 
 MIN_DURATION_S, MAX_DURATION_S = 15, 300
 MAX_SCENES = 20
@@ -129,18 +129,52 @@ def scene_count(duration_s: int) -> int:
 
 
 def pace(language: str, voice: str | None = None, story: bool = False) -> float:
-    """Words a second as the reel reads them: a slower voice ("calm") or a
-    story (read a little slower) fit fewer words."""
-    return LANGUAGES[language].words_per_s * voice_speed(voice) * (STORY_SPEED if story else 1.0)
+    """Words a second as the reel reads them (measured per voice): a slower
+    voice ("calm") or a story (read a little slower) fit fewer words."""
+    return words_per_s(language, voice) * (STORY_PACE if story else 1.0)
+
+
+# The call to action is written with the script but read after the last scene,
+# so the scenes leave room for it (it is ~10 words in every language).
+CALL_TO_ACTION_WORDS = 10
+
+
+# A good script beats an exact length (the creator's wish): a reel may run up
+# to 15% long (at most 45 s: a 5 min reel up to 5:45), but hardly short.
+LENGTH_OVER = 0.15
+LENGTH_OVER_MAX_S = 45.0
+LENGTH_UNDER = 0.03
+LENGTH_SLACK_S = 3.0  # short reels: this much either way
+
+
+def length_window(duration_s: int) -> tuple[float, float]:
+    """The shortest and longest a reel of ``duration_s`` may come out (s)."""
+    under = max(LENGTH_SLACK_S, LENGTH_UNDER * duration_s)
+    over = max(LENGTH_SLACK_S, min(LENGTH_OVER_MAX_S, LENGTH_OVER * duration_s))
+    return duration_s - under, duration_s + over
+
+
+def aim_s(duration_s: int) -> float:
+    """The length scripts are written for: halfway into the room above
+    ``duration_s`` (322.5 s for 5 min), as the model writes short more often."""
+    return (duration_s + length_window(duration_s)[1]) / 2
+
+
+def script_words(
+    duration_s: float, language: str, scenes: int, voice: str | None = None, story: bool = False
+) -> float:
+    """The words that fill ``duration_s`` once the pauses reel_render puts
+    between the scenes and after the last one are taken off."""
+    gap = STORY_GAP_S if story else GAP_S
+    talk = duration_s - gap * (scenes - 1) - END_GAP_S
+    return max(scenes, talk) * pace(language, voice, story)
 
 
 def words_per_scene(
     duration_s: int, language: str, scenes: int, voice: str | None = None, story: bool = False
 ) -> int:
-    # 0.9: the short pauses between scenes; a story's longer ones come off first.
-    talk = duration_s - (scenes - 1) * (STORY_GAP_S - GAP_S if story else 0)
-    total = max(scenes, talk) * pace(language, voice, story) * 0.9
-    return max(6, round(total / scenes))
+    words = script_words(aim_s(duration_s), language, scenes, voice, story)
+    return max(6, round((words - CALL_TO_ACTION_WORDS) / scenes))
 
 
 # Extra writing rules for some languages (the small model mixes scripts).
@@ -433,7 +467,7 @@ def spoken_seconds(
     return words / pace(language, voice, story) + gap * (len(narrations) - 1) + END_GAP_S
 
 
-LENGTH_TOLERANCE = 0.2  # a script this far off the reel's length is rewritten once
+LENGTH_TRIES = 2  # rewrites at most of a script outside length_window
 
 
 def fit_length(
@@ -446,29 +480,83 @@ def fit_length(
     model: str | None = None,
 ) -> None:
     """Small models don't keep to a word count (a 40 s script came back at
-    ~70 s, a 3 min one at ~2 min 15 s). If the narrations (with the call to
-    action still to come) are more than 20% off the reel's length, ask once for
-    them rewritten to it; the rewrite is kept only if it is closer."""
+    ~70 s; a 5 min one had 523 words for ~700, its later scenes ever shorter).
+    While the narrations (with the call to action still to come) are outside
+    length_window - a script a little long is left as it is - the scenes
+    furthest off (the long ones when it must get shorter, the short ones when
+    it must get longer) are rewritten to aim_s; a rewrite is kept only if it
+    comes closer to the window."""
     wps = pace(language, voice, story)
     extra = 0 if not cta or _has_call_to_action(scenes[-1]["narration"]) else len(cta.split())
+    n = len(scenes)
+    low, high = length_window(duration_s)
+    aim = aim_s(duration_s)
+    target = script_words(aim, language, n, voice, story) - extra  # words in the scenes
 
     def seconds(texts: list[str]) -> float:
         return spoken_seconds(texts, language, voice, story) + extra / wps
 
-    current = [sc["narration"] for sc in scenes]
-    before = seconds(current)
-    if abs(before - duration_s) <= LENGTH_TOLERANCE * duration_s:
-        return
-    n = len(scenes)
-    w = max(4, round(words_per_scene(duration_s, language, n, voice, story) - extra / n))
+    def off(texts: list[str]) -> float:
+        """Seconds outside the window (0 inside it)."""
+        s = seconds(texts)
+        return max(low - s, s - high, 0.0)
+
+    for _ in range(LENGTH_TRIES):
+        current = [sc["narration"] for sc in scenes]
+        if not off(current):
+            return
+        before = seconds(current)
+        shorter = before > high
+        counts = [len(t.split()) for t in current]
+        each = target / n
+        picked = [i for i, c in enumerate(counts) if (c > each if shorter else c < each)]
+        kept = sum(c for i, c in enumerate(counts) if i not in picked)
+        w = max(4, round((target - kept) / len(picked)))
+        try:
+            texts = _rewrite_to_length(
+                current, picked, w, before, round(aim), language, shorter, model
+            )
+        except BadReplyError:
+            continue
+        except ScriptError:
+            return
+        if texts is None:
+            continue
+        rewritten = list(current)
+        for i, t in zip(picked, texts, strict=True):
+            rewritten[i] = t
+        if off(rewritten) < off(current):
+            for sc, t in zip(scenes, rewritten, strict=True):
+                sc["narration"] = t
+
+
+def _rewrite_to_length(
+    narrations: list[str],
+    picked: list[int],
+    words: int,
+    before: float,
+    duration_s: int,
+    language: str,
+    shorter: bool,
+    model: str | None,
+) -> list[str] | None:
+    """The narrations ``picked`` (by index) rewritten to about ``words`` words
+    each, the others given as the story around them; None if the reply can't
+    be used."""
+    n = len(narrations)
     lang = LANGUAGES[language].prompt_name
-    shorter = before > duration_s
+    keys = [f"scene_{i + 1}" for i in picked]  # the reply's fields, so none gets mixed up
+    which = (
+        "all of them"
+        if len(picked) == n
+        else "only scenes " + ", ".join(str(i + 1) for i in picked)
+    )
     how = (
         "Cut extra details and repeated words; keep every key moment."
         if shorter
         else "Add concrete details, a short line of dialogue or a feeling; never filler."
     )
-    listed = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(current))
+    listed = "\n".join(f"Scene {i + 1}: {t}" for i, t in enumerate(narrations))
     messages = [
         {
             "role": "system",
@@ -479,41 +567,31 @@ def fit_length(
             "content": (
                 f"These are the {n} narrations of a voice-over in {lang}, one per scene. Read "
                 f"aloud they take about {before:.0f} seconds; they must take {duration_s} "
-                f"seconds. Rewrite them {'shorter' if shorter else 'longer'}: about {w} words "
-                f"each ({max(1, w - 3)} to {w + 3}), exactly {n} narrations in the same order. "
-                f"Keep the same story: the same events in the same scenes, the same names, all "
-                f"in {lang}.{LANGUAGE_NOTES.get(language, '')} {how} Write only the words "
-                f"the narrator says: never word counts or notes.\n{listed}"
+                f"seconds. Rewrite {which} {'shorter' if shorter else 'longer'}: about "
+                f"{words} words each ({max(1, words - 3)} to {words + 3}), as "
+                f"{', '.join(keys)}. Keep the same story: the same events in the same scenes, "
+                f"the same names, all in {lang}.{LANGUAGE_NOTES.get(language, '')} {how} Write "
+                f"only the words the narrator says: never word counts or notes.\n{listed}"
             ),
         },
     ]
     text = {"type": "string"}
-    schema = {
-        "type": "object",
-        "properties": {
-            "narrations": {"type": "array", "items": text, "minItems": n, "maxItems": n}
-        },
-        "required": ["narrations"],
-    }
-    num_predict = max(600, round(n * (w + 4) * 3.5) + 200)  # Devanagari takes many tokens
-    try:
-        raw = _chat(
-            messages,
-            schema,
-            temperature=0.4,
-            num_predict=num_predict,
-            num_ctx=max(4096, num_predict + len(listed) // 2 + 1024),
-            model=model,
-        )
-    except ScriptError:
-        return
-    texts = raw.get("narrations") if isinstance(raw, dict) else None
-    if not isinstance(texts, list) or len(texts) != n:
-        return
-    rewritten = [_spoken(_clean(t, drop_latin_brackets=language != "en")) for t in texts]
-    if all(rewritten) and abs(seconds(rewritten) - duration_s) < abs(before - duration_s):
-        for sc, t in zip(scenes, rewritten, strict=True):
-            sc["narration"] = t
+    schema = {"type": "object", "properties": dict.fromkeys(keys, text), "required": keys}
+    # Devanagari takes many tokens.
+    num_predict = max(600, round(len(picked) * (words + 4) * 3.5) + 200)
+    raw = _chat(
+        messages,
+        schema,
+        temperature=0.4,
+        num_predict=num_predict,
+        num_ctx=max(4096, num_predict + len(listed) // 2 + 1024),
+        model=model,
+    )
+    texts = [raw.get(k) if isinstance(raw, dict) else None for k in keys]
+    if not all(isinstance(t, str) for t in texts):
+        return None
+    texts = [_spoken(_clean(t, drop_latin_brackets=language != "en")) for t in texts]
+    return texts if all(texts) else None
 
 
 # Letters of any script but Latin (Devanagari, Greek, Cyrillic, CJK, ...).

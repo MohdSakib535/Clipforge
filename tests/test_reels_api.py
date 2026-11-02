@@ -8,7 +8,7 @@ import pytest
 
 from app.config.settings import get_settings
 from app.models import AudioTrack, Reel
-from app.services import reel_render
+from app.services import reel_render, tts
 
 SCRIPT = {
     "title": "Morning habits",
@@ -44,7 +44,9 @@ def test_options_list_platforms_languages_and_voices(client):
     hindi = next(lang for lang in body["languages"] if lang["key"] == "hi")
     assert hindi["label"] == "Hindi" and hindi["voices"][0]["key"] == "hf_alpha"
     calm = next(v for v in hindi["voices"] if v["key"] == "hm_calm")
-    assert (calm["label"], calm["speed"]) == ("Male 5 · calm", 0.9)
+    assert calm["label"] == "Male 5 · calm"
+    assert calm["words_per_s"] == tts.words_per_s("hi", "hm_calm")  # its own, measured pace
+    assert body["story_pace"] == reel_render.STORY_PACE
     assert body["duration"] == {"min": 15, "max": 300, "default": 35}
     assert body["max_scenes"] == 20
     assert [s["key"] for s in body["styles"]] == ["cinematic", "realistic", "anime", "3d"]
