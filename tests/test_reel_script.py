@@ -19,10 +19,10 @@ def test_scene_count_follows_the_length():
 
 
 def test_a_slower_voice_gets_fewer_words():
-    usual = reel_script.words_per_scene(40, "hi", 6, "hm_psi")
-    assert reel_script.words_per_scene(40, "hi", 6, "hm_calm") < usual  # speaks at 0.9
-    assert reel_script.words_per_scene(40, "hi", 6, "hm_young") > usual  # at 1.08
-    assert reel_script.words_per_scene(40, "hi", 6, "hf_beta") > usual  # a faster voice
+    usual = reel_script.words_per_scene(120, "hi", 8, "hm_psi")
+    assert reel_script.words_per_scene(120, "hi", 8, "hm_calm") < usual  # speaks at 0.9
+    assert reel_script.words_per_scene(120, "hi", 8, "hm_young") > usual  # at 1.08
+    assert reel_script.words_per_scene(120, "hi", 8, "hf_beta") > usual  # a faster voice
 
 
 def test_a_reel_may_run_a_little_long_but_hardly_short():

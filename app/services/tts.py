@@ -9,9 +9,12 @@ kokoro-onnx and numpy are imported lazily: the API only needs ``LANGUAGES``.
 
 from __future__ import annotations
 
+import functools
 import os
+import re
 import subprocess
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -55,13 +58,14 @@ LANGUAGES: dict[str, Language] = {
          "hm_omega": "Male 1", "hm_psi": "Male 2", "hm_mix": "Male 3 · mixed",
          "hm_deep": "Male 4 · deep", "hm_calm": "Male 5 · calm", "hm_young": "Male 6 · young"},
         words_per_s=2.5,
-        # Measured 2026-11-02 on 585 words of real reel narrations: the female
-        # voices read up to ~20% faster than the male ones.
+        # Measured 2026-11-02 on 585 words of real reel narrations, read as
+        # reels read them (by_sentence, pauses included): the female voices
+        # read up to ~20% faster than the male ones.
         voice_words_per_s={
-            "hf_alpha": 2.68, "hf_beta": 3.02, "hf_mix": 2.83, "hf_low": 3.03,
-            "hf_calm": 2.50, "hf_bright": 2.82,
-            "hm_omega": 2.55, "hm_psi": 2.54, "hm_mix": 2.54, "hm_deep": 2.56,
-            "hm_calm": 2.37, "hm_young": 2.68,
+            "hf_alpha": 2.59, "hf_beta": 2.93, "hf_mix": 2.74, "hf_low": 2.94,
+            "hf_calm": 2.40, "hf_bright": 2.73,
+            "hm_omega": 2.51, "hm_psi": 2.52, "hm_mix": 2.51, "hm_deep": 2.51,
+            "hm_calm": 2.34, "hm_young": 2.66,
         },
         caption_font="Noto Sans Devanagari",
         sample="नमस्ते! यह आपकी रील की आवाज़ है। सुनिए, आज की कहानी बहुत खास है।",
@@ -138,11 +142,17 @@ def words_per_s(language: str, voice: str | None = None) -> float:
     return lang.words_per_s * voice_speed(voice)
 
 
+# Raised when text is read differently (the Hindi fixes, one sentence at a
+# time), so voice clips made before are made again.
+READING = 3
+
+
 def voice_key(voice: str) -> str:
-    """What makes the voice, for naming cached voice clips: changing a mix
-    makes its clips again."""
+    """What makes the voice, for naming cached voice clips: changing a mix,
+    or how text is read, makes its clips again."""
     mix = MIXES.get(voice)
-    return f"{voice}={mix.base}+{mix.blend}@{mix.pitch}x{mix.speed}" if mix else voice
+    key = f"{voice}={mix.base}+{mix.blend}@{mix.pitch}x{mix.speed}" if mix else voice
+    return f"{key}#{READING}"
 
 
 def default_voice(language: str) -> str:
@@ -207,9 +217,240 @@ def _phonemes(kokoro, text: str, espeak_lang: str) -> str:
     return "".join(p for p in phonemes if p in kokoro.tokenizer.vocab).strip()
 
 
-def synthesize(text: str, language: str, voice: str, speed: float = 1.0):
-    """Speak ``text`` (``speed`` > 1 reads faster). Returns (mono float32
-    samples, sample rate)."""
+# ---------------------------------------------------------------------------
+# Hindi: what espeak-ng reads wrong
+# ---------------------------------------------------------------------------
+# Kokoro learnt Hindi from espeak-ng's sounds (through misaki, which gives the
+# same sounds as _phonemes), so espeak's mistakes are fixed in the text it
+# gets; the captions keep the text as written.
+
+_VIRAMA, _NUKTA = "्", "़"
+_CHANDRABINDU = "ँ"
+_SIGNS = "ँंः"  # chandrabindu, anusvara, visarga
+_HINDI_WORD = re.compile(r"[ऀ-ॣॱ-ॿ]+")  # not ।, ॥ or digits
+_VOWEL_SOUNDS = frozenset("aʌəɛeiɪoɔuʊæɐ")  # in espeak's Hindi sounds
+
+
+def _is_consonant(ch: str) -> bool:
+    return "क" <= ch <= "ह" or "क़" <= ch <= "य़"
+
+
+def _is_vowel_sign(ch: str) -> bool:
+    return "ऺ" <= ch <= "ौ" or ch in "ॎॏॢॣ"
+
+
+def _is_vowel(ch: str) -> bool:
+    return "ऄ" <= ch <= "औ" or ch in "ॠॡ"
+
+
+@dataclass
+class _Akshara:
+    """A written syllable: a vowel, or a consonant with its vowel sign or virama."""
+
+    text: str
+    consonant: bool = False
+    inherent: bool = False  # a consonant with its own "a" (no vowel sign, no virama)
+    virama: bool = False
+    coda: bool = False  # an anusvara or visarga after it: it ends in a consonant sound
+
+
+def _aksharas(word: str) -> list[_Akshara] | None:
+    """``word`` in written syllables; None if it has anything else in it."""
+    out, i = [], 0
+    while i < len(word):
+        ch = word[i]
+        i += 1
+        if _is_vowel(ch):
+            syl = _Akshara(ch)
+        elif _is_consonant(ch):
+            syl = _Akshara(ch, consonant=True)
+            if word[i : i + 1] == _NUKTA:
+                syl.text += _NUKTA
+                i += 1
+            if word[i : i + 1] == _VIRAMA:
+                syl.text, syl.virama = syl.text + _VIRAMA, True
+                i += 1
+            elif i < len(word) and _is_vowel_sign(word[i]):
+                syl.text += word[i]
+                i += 1
+            else:
+                syl.inherent = True
+        else:
+            return None
+        while i < len(word) and word[i] in _SIGNS:
+            syl.coda |= word[i] != _CHANDRABINDU  # which only makes the vowel nasal
+            syl.text += word[i]
+            i += 1
+        out.append(syl)
+    return out
+
+
+def silent_schwas(word: str) -> tuple[str, int] | None:
+    """``word`` with a virama after each consonant whose "a" Hindi doesn't say,
+    and how many vowels are then said; None if every "a" is said. Ohala's rule,
+    applied right to left: the "a" between a vowel + consonant and a consonant
+    + vowel drops (बचपन "bach-pan", देखकर "dekh-kar", समझना "sa-majh-na");
+    a word's last "a" is never said."""
+    syl = _aksharas(word)
+    if not syl or len(syl) < 3:
+        return None
+    last = len(syl) - 1
+    dropped: set[int] = set()
+
+    def said(i: int) -> bool:  # syllable i has a vowel that is said
+        s = syl[i]
+        return not s.virama and not (s.inherent and not s.coda and (i == last or i in dropped))
+
+    def ends_in_vowel(i: int) -> bool:
+        return said(i) and not syl[i].coda
+
+    for i in range(last - 1, 0, -1):
+        s, after = syl[i], syl[i + 1]
+        if s.inherent and not s.coda and ends_in_vowel(i - 1) and after.consonant and said(i + 1):
+            dropped.add(i)
+    if not dropped:
+        return None
+    marked = "".join(s.text + _VIRAMA * (i in dropped) for i, s in enumerate(syl))
+    return marked, sum(said(i) for i in range(len(syl)))
+
+
+# English words written in Hindi: an f is written फ, which espeak reads "ph"
+# (फॉलो "pholo"); ॉ and ऑ come only in English words.
+_ENGLISH_F_WORDS = frozenset(
+    "फोन फोटो फोटोज़ फेसबुक फिल्म फिल्में फ्री फ्रेंड फ्रेंड्स फैमिली फैन फैंस फेमस "
+    "फिट फीचर फ्यूचर फैक्ट फैशन फ्लाइट फैक्ट्री लाइफ सेफ स्टाफ".split()
+)
+_PH = re.compile(f"फ(?!{_NUKTA})")
+
+
+def _english_f(word: str) -> str:
+    if "ॉ" in word or "ऑ" in word or word in _ENGLISH_F_WORDS:
+        return _PH.sub("फ" + _NUKTA, word)
+    return word
+
+
+# Words espeak reads wrong whatever the rule says, as it is given them.
+_SPELLINGS = {
+    "ज़िंदगी": "ज़िन्दगी",  # "jind-gi": espeak drops the "a" after the anusvara
+    "इंतज़ार": "इन्तज़ार",  # "in-tjaar"
+    "अजनबी": "अज्नबी",  # "a-jan-bi"
+}
+# Words said with a z or f (ज़, फ़) that scripts often write without the dot;
+# not the ones that mean something else without it (राज/राज़, सजा/सज़ा).
+_DOTTED = (
+    "ज़रूर ज़रूरी ज़्यादा आवाज़ बाज़ार मज़ा मज़ेदार अंदाज़ नज़र नज़दीक ज़मीन ज़माना ज़हर कमज़ोर "
+    "ज़ोर ज़िद ज़िंदा ज़िम्मेदार ज़िम्मेदारी हज़ार गुज़र गुज़रा इज़्ज़त सफ़र फ़ैसला साफ़ माफ़ हफ़्ता "
+    "फ़िक्र तरफ़ फ़ायदा फ़ायदे दफ़्तर तारीफ़"
+).split()
+
+
+def _nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
+
+
+_AS_SAID = {
+    key: _nfc(said)
+    for written, said in [*_SPELLINGS.items(), *((w, w) for w in _DOTTED)]
+    for key in (_nfc(written), _nfc(written).replace(_NUKTA, ""))
+}
+
+# Two words made one (ताज + महल): the "a" between them is dropped and each part
+# follows the rule on its own (on the whole word it gives "taa-jam-hal").
+_SECOND_PARTS = ("महल", "नगर", "परी")
+# अ- ("not") + a word: the rule would drop the "a" after the अ ("as-marth").
+_READ_BY_ESPEAK = frozenset({"असमर्थ", "असफल", "असफलता", "असहज"})
+
+
+_hi_espeak = None
+
+
+def _espeak_hindi(words: list[str]) -> list[str]:
+    """espeak-ng's sounds for each Hindi word (after _get_kokoro set it up)."""
+    global _hi_espeak
+    from phonemizer.backend import EspeakBackend
+
+    with _espeak_lock:
+        if _hi_espeak is None:
+            _hi_espeak = EspeakBackend("hi", language_switch="remove-flags")
+        return _hi_espeak.phonemize(words, strip=True)
+
+
+def _vowels(sounds: str) -> int:
+    return sum(ch in _VOWEL_SOUNDS for ch in sounds)
+
+
+@functools.lru_cache(maxsize=20000)
+def _hindi_word(word: str) -> str:
+    """How espeak-ng is given ``word``. Its silent "a"s are marked only where
+    espeak says them, and only if it then says exactly the vowels it should:
+    the marks can make espeak drop another "a" (खतरनाक "khatrnak")."""
+    if word in _AS_SAID:
+        return _AS_SAID[word]
+    if word.endswith("ंदगी"):  # गंदगी, शर्मिंदगी: "-n-da-gi", as ज़िंदगी
+        word = word[: -len("ंदगी")] + "न्दगी"
+    word = _english_f(word)
+    if word in _READ_BY_ESPEAK:
+        return word
+    for part in _SECOND_PARTS:
+        head = word[: -len(part)]
+        if word.endswith(part) and len(head) >= 2 and _is_consonant(head[-1]):
+            return _hindi_word(head) + _VIRAMA + _hindi_word(part)
+    fix = silent_schwas(word)
+    if fix is None:
+        return word
+    marked, vowels = fix
+    before, after = _espeak_hindi([word, marked])
+    if _vowels(before) > vowels and _vowels(after) == vowels:
+        return marked
+    return word
+
+
+# Kokoro reads a long text faster than a short one (a 55-word scene came out
+# ~11% faster than its sentences read one by one, measured), so a reel sped up
+# in its long scenes. ``by_sentence`` reads them one by one, with these pauses.
+SENTENCE_GAP_S = 0.3
+CLAUSE_GAP_S = 0.15
+_MAX_PIECE_WORDS = 24  # a longer sentence is cut at its commas
+_SENTENCE_MARKS = "।॥.!?…"
+_SENTENCE_END = re.compile(rf"(?<=[{_SENTENCE_MARKS}])[\"”’']?\s+")
+_CLAUSE_END = re.compile(r"(?<=[,;:])\s+")
+
+
+def sentences(text: str) -> list[str]:
+    """``text`` in the pieces read one by one: its sentences, a long one cut
+    at its commas (into pieces of at most _MAX_PIECE_WORDS words where it can)."""
+    pieces = []
+    for sentence in _SENTENCE_END.split(text.strip()):
+        long = len(sentence.split()) > _MAX_PIECE_WORDS
+        piece = ""
+        for clause in _CLAUSE_END.split(sentence) if long else [sentence]:
+            joined = f"{piece} {clause}".strip()
+            if piece and len(joined.split()) > _MAX_PIECE_WORDS:
+                pieces.append(piece)
+                joined = clause
+            piece = joined
+        pieces.append(piece)
+    return [p for p in pieces if any(ch.isalnum() for ch in p)]
+
+
+def _gap_after(piece: str) -> float:
+    return SENTENCE_GAP_S if piece.rstrip("\"”’'")[-1:] in _SENTENCE_MARKS else CLAUSE_GAP_S
+
+
+def hindi_for_espeak(text: str) -> str:
+    """``text`` as espeak-ng reads it right."""
+    # NFC: a dotted letter typed as one character (U+095B) is ज + ़ after it.
+    return _HINDI_WORD.sub(lambda m: _hindi_word(m.group()), _nfc(text))
+
+
+def synthesize(
+    text: str, language: str, voice: str, speed: float = 1.0, *, by_sentence: bool = False
+):
+    """Speak ``text`` (``speed`` > 1 reads faster); ``by_sentence``: one
+    sentence at a time, at an even pace however long the text. Returns (mono
+    float32 samples, sample rate)."""
+    import numpy as np
+
     lang = LANGUAGES.get(language)
     if lang is None or voice not in lang.voices:
         raise TTSError(f"Unknown voice {voice!r} for language {language!r}")
@@ -222,13 +463,23 @@ def synthesize(text: str, language: str, voice: str, speed: float = 1.0):
             if mix.blend:
                 style = (style + kokoro.get_voice_style(mix.blend)) / 2
             speed *= mix.speed
-        samples, sample_rate = kokoro.create(
-            _phonemes(kokoro, text, lang.kokoro_lang),
-            voice=style,
-            speed=speed,
-            lang=lang.kokoro_lang,
-            is_phonemes=True,
-        )
+        if language == "hi":
+            text = hindi_for_espeak(text)
+        pieces = (sentences(text) if by_sentence else None) or [text]
+        parts = []
+        for i, piece in enumerate(pieces):
+            samples, sample_rate = kokoro.create(
+                _phonemes(kokoro, piece, lang.kokoro_lang),
+                voice=style,
+                speed=speed,
+                lang=lang.kokoro_lang,
+                is_phonemes=True,
+            )
+            parts.append(samples)
+            if i < len(pieces) - 1:
+                gap = round(_gap_after(piece) / speed * sample_rate)
+                parts.append(np.zeros(gap, np.float32))
+        samples = np.concatenate(parts) if len(parts) > 1 else parts[0]
         if mix is not None and mix.pitch:
             samples = shift_pitch(samples, sample_rate, mix.pitch)
         return samples, sample_rate

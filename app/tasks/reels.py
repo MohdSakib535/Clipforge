@@ -102,7 +102,7 @@ def render_reel(reel_id: str) -> None:
             for path, sc in zip(voices, scenes, strict=True):
                 if not path.exists():
                     samples, sample_rate = tts.synthesize(
-                        sc["narration"], language, voice, speed=speed
+                        sc["narration"], language, voice, speed=speed, by_sentence=True
                     )
                     reel_render.write_wav(path, samples, sample_rate)
 

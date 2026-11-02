@@ -93,7 +93,8 @@ def fakes(tmp_path, monkeypatch):
         counts = calls["counts"].pop(0) if calls["counts"] else None  # what Vision "sees"
         return imagegen.Picture(png.read_bytes(), counts)
 
-    def fake_synthesize(text, language, voice, speed=1.0):
+    def fake_synthesize(text, language, voice, speed=1.0, by_sentence=False):
+        assert by_sentence  # an even pace, however long the scene
         calls["voices"].append((text, voice))
         calls["speeds"].append(speed)
         t = np.arange(24000) / 24000
