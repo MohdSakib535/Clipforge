@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session
 from app.config.settings import get_settings
 from app.core.logging import get_logger
 from app.db.session import SessionLocal
-from app.models import AudioTrack, Reel
-from app.services import imagegen, music, reel_render, reel_script, tts
+from app.models import AudioTrack, Brief, Reel
+from app.services import brief_script, imagegen, music, reel_render, reel_script, tts
 from app.services.ffmpeg import FFmpegError
 from app.services.storage import get_storage
+from app.tasks import dispatch
 from app.tasks.celery_app import celery_app
 
 log = get_logger(__name__)
@@ -34,33 +35,70 @@ def _update(db: Session, reel_id: str, **fields) -> bool:
 
 
 @celery_app.task(name="write_reel_script")
-def write_reel_script(reel_id: str) -> None:
+def write_reel_script(reel_id: str, before: dict | None = None, then_render: bool = False) -> None:
+    """``before``: what the current script was written for (script type,
+    length, description, writer), put back if no new script comes;
+    ``then_render``: make the video from the new script straight after
+    ("Generate video" with another script type or length)."""
     with SessionLocal() as db:
         reel = db.get(Reel, reel_id)
         if reel is None:
             return
+        look = None  # a reel from a brief: the brief's look, as it is now
         try:
-            script = reel_script.generate_script(
-                reel.topic,
-                reel.platform,
-                reel.language,
-                reel.duration_s,
-                reel.script_type,
-                reel.description or "",
-                reel.voice,
-                model=reel.script_model,
-                # What it does next; also shows it is still at work (a 12B
-                # model takes minutes, past which a reel looks cut off).
-                on_step=lambda stage: _update(db, reel_id, stage=stage),
-            )
+            # What it does next; also shows it is still at work (a 12B
+            # model takes minutes, past which a reel looks cut off).
+            def on_step(stage: str) -> bool:
+                return _update(db, reel_id, stage=stage)
+
+            if reel.brief_id:
+                brief = db.get(Brief, reel.brief_id)
+                if brief is None:
+                    raise brief_script.BriefMissing(
+                        "The brief of this reel was deleted, so its script can't be written again."
+                    )
+                look = brief.visual_style or None
+                script = brief_script.generate_script(
+                    {"niche": brief.niche, "rules": brief.rules, "visual_style": look or ""},
+                    reel.topic,
+                    reel.platform,
+                    reel.language,
+                    reel.duration_s,
+                    reel.description or "",
+                    reel.voice,
+                    model=reel.script_model,
+                    on_step=on_step,
+                )
+            else:
+                script = reel_script.generate_script(
+                    reel.topic,
+                    reel.platform,
+                    reel.language,
+                    reel.duration_s,
+                    reel.script_type,
+                    reel.description or "",
+                    reel.voice,
+                    model=reel.script_model,
+                    on_step=on_step,
+                )
         except reel_script.ScriptError as exc:
             reel = db.get(Reel, reel_id, populate_existing=True)
             if reel is not None:
-                # A failed "write again" keeps the script there was.
+                # A failed "write again" keeps the script there was, and what
+                # it was written for.
                 status = "script_ready" if reel.script else "failed"
-                _update(db, reel_id, status=status, stage=None, error=str(exc)[:2000])
+                kept = (before or {}) if reel.script else {}
+                _update(db, reel_id, status=status, stage=None, error=str(exc)[:2000], **kept)
             return
-        _update(db, reel_id, script=script, status="script_ready", stage=None, error=None)
+        fields = {"script": script, "error": None}
+        if look:
+            fields["custom_style"] = look
+        if not then_render:
+            _update(db, reel_id, status="script_ready", stage=None, **fields)
+            return
+        fields |= {"status": "generating", "stage": "Waiting to start", "progress": 0}
+        if _update(db, reel_id, **fields):
+            dispatch.enqueue_reel_render(reel_id)
 
 
 @celery_app.task(name="render_reel")
@@ -75,7 +113,7 @@ def render_reel(reel_id: str) -> None:
             return
         script = reel.script
         scenes = script["scenes"]
-        language, voice, style = reel.language, reel.voice, reel.style
+        language, voice, style = reel.language, reel.voice, reel.picture_style
         # Told like a story: read a little slower, with its own voice clips.
         story = reel.script_type == "story"
         speed = reel_render.STORY_SPEED if story else 1.0

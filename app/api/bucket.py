@@ -98,6 +98,7 @@ def bucket_status() -> BucketStatus:
         bucket=settings.bucket_name.strip(),
         endpoint=settings.bucket_endpoint_url.strip() or "AWS S3",
         uploads_folder=bucket.uploads_folder(),
+        upload_folders={s: bucket.uploads_folder(s) for s in ("clips", "reels")},
         reels_folders=[bucket.key_for("reels") + "/", bucket.key_for("clips") + "/"],
         audio_folder=bucket.audio_folder(),
     )
@@ -115,8 +116,9 @@ def list_videos(_user: User = Depends(get_current_user)) -> BucketVideos:
 def start_upload(
     body: BucketUploadInit, _user: User = Depends(get_current_user)
 ) -> BucketUploadStart:
-    """Start sending a video or ZIP file (or, with folder "audio", a music
-    file); then PUT /bucket/uploads/part for each piece and POST
+    """Start sending a video or ZIP file to the folder for "Clip a video" or
+    "Create a reel" (folder "clips" / "reels"), or a music file (folder
+    "audio"); then PUT /bucket/uploads/part for each piece and POST
     /bucket/uploads/complete. It keeps its name (name-2... if taken)."""
     audio = body.folder == "audio"
     allowed = bucket.AUDIO_EXTENSIONS if audio else bucket.VIDEO_EXTENSIONS | bucket.ZIP_EXTENSIONS
@@ -128,7 +130,7 @@ def start_upload(
         )
     if body.size_bytes > bucket.PART_SIZE * bucket.MAX_PARTS:
         raise AppError("File exceeds maximum upload size", code="too_large", status_code=413)
-    folder = bucket.audio_folder() if audio else bucket.uploads_folder()
+    folder = bucket.audio_folder() if audio else bucket.uploads_folder(body.folder)
     key = bucket.free_key(folder, video_stem(body.filename), ext)
     return BucketUploadStart(
         key=key, upload_id=bucket.start_upload(key), part_size=bucket.PART_SIZE

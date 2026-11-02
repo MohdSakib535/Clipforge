@@ -45,6 +45,9 @@ function reelMaker() {
       }
       // The music library (tracks) is loaded and polled by clipforge().
       this.$watch("tracks", () => this.pickPendingTrack());
+      // An open reel has one script type: on the left and in "Script idea".
+      this.$watch("form.script_type", (v) => this.reel && (this.idea.script_type = v));
+      this.$watch("idea.script_type", (v) => this.reel && (this.form.script_type = v));
       window.addEventListener("clipforge:reels-changed", () => this.loadReels());
       await this.loadReels();
     },
@@ -119,16 +122,18 @@ function reelMaker() {
       const t = this.options.timing;
       return n ? t.load_s + n * t.picture_s : 0;
     },
-    // A new reel: the script, every picture, then the video.
-    newReelEta() {
+    // A new reel (or a new script for one): the script, every picture, then the video.
+    newReelEta(model = this.form.script_model) {
       const t = this.options.timing, d = this.form.duration_s;
-      const script = (t.script_s + t.script_s_per_s * d) * this.slowness(this.form.script_model);
+      const script = (t.script_s + t.script_s_per_s * d) * this.slowness(model);
       return script + this.picturesEta(this.sceneCount(d)) + t.render_s_per_s * d;
     },
     // "Generate video" in picture style `key`: the reel's own style redraws only
-    // new or changed scenes, another style redraws every picture.
+    // new or changed scenes, another style redraws every picture; another
+    // script type or length writes a new script first.
     generateEta(key) {
       if (!this.reel || !this.draft) return 0;
+      if (this.newScript()) return this.newReelEta(this.idea.script_model);
       const saved = this.reel.script || { scenes: [] };
       const n = key !== this.reel.style
         ? this.draft.scenes.length
@@ -179,11 +184,13 @@ function reelMaker() {
       this.draft = reel.script ? this.toDraft(reel.script) : null;
       this.idea = { script_type: reel.script_type, description: reel.description, script_model: reel.script_model };
       this.editModel = reel.script_model;
-      // The form on the left shows the open reel's language, voice and style;
-      // "Generate video" uses what is picked there.
+      // The form on the left shows the open reel's language, voice, style,
+      // length and script type; "Generate video" uses what is picked there.
       this.form.language = reel.language;
       this.form.voice = reel.voice;
       this.form.style = reel.style;
+      this.form.duration_s = reel.duration_s;
+      this.form.script_type = reel.script_type;
       this.gen = { musicId: reel.music_id || "", musicVolume: reel.music_volume };
       this.watchReel();
     },
@@ -191,6 +198,18 @@ function reelMaker() {
     // reel's language; otherwise the reel keeps its own.
     genVoice() {
       return this.form.language === this.reel.language && this.form.voice ? this.form.voice : this.reel.voice;
+    },
+    // Another script type or length on the left than the open reel's: its
+    // script must be written again ("Generate video" does that first).
+    newScript() {
+      if (!this.reel || !this.draft) return "";
+      const changed = [];
+      if (this.form.script_type !== this.reel.script_type) changed.push(`script type (${this.scriptTypeLabel(this.form.script_type)})`);
+      if (this.form.duration_s !== this.reel.duration_s) changed.push(`length (${this.lengthLabel(this.form.duration_s)})`);
+      return changed.join(" and ");
+    },
+    lengthLabel(s) {
+      return s < 60 ? `${s} s` : this.fmtDur(s);
     },
     voiceLabel(lang, key) {
       return this.voicesFor(lang).find((v) => v.key === key)?.label || key;
@@ -277,7 +296,8 @@ function reelMaker() {
     async rewrite() {
       if (!confirm("Write a completely new script? Your edits to this one will be lost.")) return;
       try {
-        this.reel = await this.postJSON(`/reels/${this.reel.id}/rewrite`, this.idea);
+        // As long as the length on the left (the open reel's, unless changed).
+        this.reel = await this.postJSON(`/reels/${this.reel.id}/rewrite`, { ...this.idea, duration_s: this.form.duration_s });
         this.updateListItem(this.reel);
         this.watchReel();
       } catch (e) {
@@ -286,14 +306,19 @@ function reelMaker() {
     },
 
     async generate() {
+      const changed = this.newScript();
+      if (changed && !confirm(`New ${changed}: a new script is written first, then the video is made from it ` +
+        "(every picture is drawn again). Your edits to this script will be lost.")) return;
       this.saving = true;
       try {
-        await this.putScript(); // the video is made from the saved script
+        if (!changed) await this.putScript(); // the video is made from the saved script
         this.reel = await this.postJSON(`/reels/${this.reel.id}/generate`, {
           voice: this.genVoice(),
           style: this.form.style,
           music_id: this.gen.musicId || null,
           music_volume: this.gen.musicVolume,
+          // Another script type or length: the server writes the script, then makes the video.
+          ...(changed && { rewrite: { ...this.idea, script_type: this.form.script_type, duration_s: this.form.duration_s } }),
         });
         this.updateListItem(this.reel);
         this.watchReel();

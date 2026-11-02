@@ -35,8 +35,9 @@ def factory(db_session, monkeypatch):
 
 def _reel(db_session, **fields) -> Reel:
     fields.setdefault("script_type", "tips")  # paced as a reel (a story is slower)
+    fields.setdefault("duration_s", 20)
     reel = Reel(user_id="u1", platform="instagram", language="en", voice="af_heart",
-                topic="water", duration_s=20, **fields)  # fmt: skip
+                topic="water", **fields)  # fmt: skip
     db_session.add(reel)
     db_session.commit()
     return reel
@@ -74,6 +75,35 @@ def test_script_failure_keeps_an_existing_script(db_session, factory, monkeypatc
     assert (first.status, first.error) == ("failed", "Ollama isn't running")
     assert (again.status, again.script) == ("script_ready", SCRIPT)
     assert again.error == "Ollama isn't running"
+
+
+def test_generate_with_a_new_script_makes_the_video_next(db_session, factory, monkeypatch):
+    reel = _reel(db_session, status="scripting", script=SCRIPT, duration_s=60)
+    new = {**SCRIPT, "title": "Water, the facts"}
+    monkeypatch.setattr(reel_script, "generate_script", lambda *a, **k: new)
+    renders = []
+    monkeypatch.setattr(reels.dispatch, "enqueue_reel_render", renders.append)
+    before = {"script_type": "story", "duration_s": 20, "description": None, "script_model": None}
+    reels.write_reel_script.apply(args=[reel.id, before, True])
+    db_session.refresh(reel)
+    assert (reel.status, reel.stage, reel.script) == ("generating", "Waiting to start", new)
+    assert (reel.script_type, reel.duration_s) == ("tips", 60)  # the new ones stay
+    assert renders == [reel.id]
+
+
+def test_a_failed_new_script_puts_back_what_the_old_one_was_for(db_session, factory, monkeypatch):
+    def broken(*a, **k):
+        raise reel_script.ScriptError("Ollama isn't running")
+
+    monkeypatch.setattr(reel_script, "generate_script", broken)
+    monkeypatch.setattr(reels.dispatch, "enqueue_reel_render", lambda rid: pytest.fail("no video"))
+    reel = _reel(db_session, status="scripting", script=SCRIPT, duration_s=60)
+    before = {"script_type": "story", "duration_s": 20, "description": "Calm", "script_model": None}
+    reels.write_reel_script.apply(args=[reel.id, before, True])
+    db_session.refresh(reel)
+    assert (reel.status, reel.script) == ("script_ready", SCRIPT)
+    assert reel.error == "Ollama isn't running"
+    assert (reel.script_type, reel.duration_s, reel.description) == ("story", 20, "Calm")
 
 
 @pytest.fixture

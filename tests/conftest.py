@@ -88,11 +88,15 @@ def client(db_session, monkeypatch):
         "music": [],
         "audio_link": [],
         "reel_script": [],
+        "reel_script_kw": [],  # before=, then_render= of each
         "reel_render": [],
     }
-    monkeypatch.setattr(
-        "app.tasks.dispatch.enqueue_reel_script", lambda rid: calls["reel_script"].append(rid)
-    )
+
+    def enqueue_reel_script(rid, **kw):
+        calls["reel_script"].append(rid)
+        calls["reel_script_kw"].append(kw)
+
+    monkeypatch.setattr("app.tasks.dispatch.enqueue_reel_script", enqueue_reel_script)
     monkeypatch.setattr(
         "app.tasks.dispatch.enqueue_reel_render", lambda rid: calls["reel_render"].append(rid)
     )

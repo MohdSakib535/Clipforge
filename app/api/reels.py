@@ -65,7 +65,7 @@ def _pictures(reel: Reel) -> list[Path]:
     if not reel.script:
         return []
     folder = reel_render.reel_dir(reel.id)
-    return reel_render.scene_pictures(folder, reel.script, get_settings(), reel.style)
+    return reel_render.scene_pictures(folder, reel.script, get_settings(), reel.picture_style)
 
 
 def _warning(picture: Path) -> str | None:
@@ -98,6 +98,7 @@ def _out(reel: Reel) -> ReelOut:
         script_model=reel.script_model or get_settings().reel_script_model,
         duration_s=reel.duration_s,
         style=reel.style,
+        brief_id=reel.brief_id,
         status=reel.status,
         stalled=_stalled(reel),
         stage=reel.stage,
@@ -181,6 +182,34 @@ def _start_render(db: Session, reel: Reel) -> None:
     reel.error = None
     db.commit()
     dispatch.enqueue_reel_render(reel.id)
+
+
+# What a script is written for; put back if a new one doesn't come.
+_IDEA = ("script_type", "duration_s", "description", "script_model")
+
+
+def _start_script(
+    db: Session, reel: Reel, idea: ReelRewrite | None, then_render: bool = False
+) -> None:
+    """Ask the LLM for a new script (replaces the current one), optionally
+    with another script type, length, description or writer; with
+    ``then_render`` the video is made from it straight after."""
+    before = {k: getattr(reel, k) for k in _IDEA} if reel.script else None
+    if (
+        idea is not None and idea.script_type is not None and not reel.brief_id
+    ):  # told as its brief says
+        reel.script_type = _check_script_type(idea.script_type)
+    if idea is not None and idea.duration_s is not None:
+        reel.duration_s = idea.duration_s
+    if idea is not None and idea.description is not None:
+        reel.description = idea.description or None
+    if idea is not None and idea.script_model is not None:
+        reel.script_model = _check_script_model(idea.script_model)
+    reel.status = "scripting"
+    reel.stage = "Writing the script"
+    reel.error = None
+    db.commit()
+    dispatch.enqueue_reel_script(reel.id, before=before, then_render=then_render)
 
 
 @router.get("/options")
@@ -280,7 +309,12 @@ def create_reel(
 
 @router.get("", response_model=list[ReelOut])
 def list_reels(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    reels = db.query(Reel).filter(Reel.user_id == user.id).order_by(Reel.created_at.desc()).all()
+    reels = (
+        db.query(Reel)
+        .filter(Reel.user_id == user.id, Reel.brief_id.is_(None))  # not the Brief reels tab's
+        .order_by(Reel.created_at.desc())
+        .all()
+    )
     return [_out(r) for r in reels]
 
 
@@ -369,20 +403,10 @@ def rewrite_script(
     user: User = Depends(get_current_user),
 ) -> ReelOut:
     """Ask the LLM for a new script (replaces the current one), optionally
-    with another script type or description."""
+    with another script type, length or description."""
     reel = _get(db, user, reel_id)
     _not_busy(reel)
-    if body is not None and body.script_type is not None:
-        reel.script_type = _check_script_type(body.script_type)
-    if body is not None and body.description is not None:
-        reel.description = body.description or None
-    if body is not None and body.script_model is not None:
-        reel.script_model = _check_script_model(body.script_model)
-    reel.status = "scripting"
-    reel.stage = "Writing the script"
-    reel.error = None
-    db.commit()
-    dispatch.enqueue_reel_script(reel.id)
+    _start_script(db, reel, body)
     db.refresh(reel)
     return _out(reel)
 
@@ -395,7 +419,9 @@ def generate_video(
     user: User = Depends(get_current_user),
 ) -> ReelOut:
     """Make the video from the saved script. Returns at once with status
-    "generating"; poll until "ready" (about 20 s per new picture)."""
+    "generating"; poll until "ready" (about 20 s per new picture). With
+    ``rewrite`` (another script type or length), a new script is written
+    first ("scripting") and the video is made from it."""
     reel = _get(db, user, reel_id)
     _not_busy(reel)
     if not reel.script:
@@ -408,7 +434,10 @@ def generate_video(
             raise NotFoundError("Music track not found")
     reel.music_id = body.music_id
     reel.music_volume = body.music_volume
-    _start_render(db, reel)
+    if body.rewrite is not None:
+        _start_script(db, reel, body.rewrite, then_render=True)  # the new voice sets its pace
+    else:
+        _start_render(db, reel)
     db.refresh(reel)
     return _out(reel)
 

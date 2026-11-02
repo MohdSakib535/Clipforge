@@ -1,5 +1,6 @@
 """The "Bucket" section: videos from this computer go to the bucket in parts,
-into their own folder (<prefix>/uploads/), never replacing another file; every
+into their own folder (<prefix>/uploads/clips/ for "Clip a video",
+<prefix>/uploads/reels/ for "Create a reel"), never replacing another file; every
 video in the bucket can be opened, downloaded and deleted."""
 
 from __future__ import annotations
@@ -110,10 +111,11 @@ def s3(monkeypatch):
     return fake
 
 
-def _send(client, filename: str, pieces: list[bytes]) -> dict:
+def _send(client, filename: str, pieces: list[bytes], **folder) -> dict:
     """What the page does: start, one PUT per piece, complete."""
     start = client.post(
-        "/bucket/uploads", json={"filename": filename, "size_bytes": sum(map(len, pieces))}
+        "/bucket/uploads",
+        json={"filename": filename, "size_bytes": sum(map(len, pieces)), **folder},
     )
     assert start.status_code == 200, start.text
     ref = {k: start.json()[k] for k in ("key", "upload_id")}
@@ -133,6 +135,10 @@ def test_status_shows_where_videos_go(client, s3):
         "bucket": "my-reels",
         "endpoint": "AWS S3",
         "uploads_folder": "clipforge/uploads/",
+        "upload_folders": {
+            "clips": "clipforge/uploads/clips/",
+            "reels": "clipforge/uploads/reels/",
+        },
         "reels_folders": ["clipforge/reels/", "clipforge/clips/"],
         "audio_folder": "clipforge/audio/",
     }
@@ -140,19 +146,38 @@ def test_status_shows_where_videos_go(client, s3):
 
 def test_video_goes_up_in_parts_into_its_own_folder(client, s3):
     sent = _send(client, "My trip.mp4", [b"first-", b"second-", b"last"])
-    assert sent["key"] == "clipforge/uploads/My_trip.mp4"
+    assert sent["key"] == "clipforge/uploads/clips/My_trip.mp4"
     assert sent["part_size"] == bucket.PART_SIZE
-    assert s3.objects["clipforge/uploads/My_trip.mp4"] == (b"first-second-last", "video/mp4")
+    assert s3.objects["clipforge/uploads/clips/My_trip.mp4"] == (b"first-second-last", "video/mp4")
 
     videos = client.get("/bucket/videos").json()["videos"]
     assert [(v["name"], v["folder"], v["size_bytes"]) for v in videos] == [
-        ("My_trip.mp4", "clipforge/uploads/", 17)
+        ("My_trip.mp4", "clipforge/uploads/clips/", 17)
     ]
     resp = client.get("/bucket/videos/link", params={"key": sent["key"]}, follow_redirects=False)
     assert resp.status_code == 307
     assert (
-        resp.headers["location"] == "https://signed.example/my-reels/clipforge/uploads/My_trip.mp4"
+        resp.headers["location"]
+        == "https://signed.example/my-reels/clipforge/uploads/clips/My_trip.mp4"
     )
+
+
+def test_the_part_of_the_app_picked_is_the_folder(client, s3):
+    reel = _send(client, "My trip.mp4", [b"a reel"], folder="reels")["key"]
+    clip = _send(client, "My trip.mp4", [b"a clip"], folder="clips")["key"]
+    # Each folder has its own names: the same name is free in the other.
+    assert reel == "clipforge/uploads/reels/My_trip.mp4"
+    assert clip == "clipforge/uploads/clips/My_trip.mp4"
+    assert [v["folder"] for v in client.get("/bucket/videos").json()["videos"]] == [
+        "clipforge/uploads/clips/",
+        "clipforge/uploads/reels/",
+    ]
+    for folder in ("uploads", "../reels", ""):
+        resp = client.post(
+            "/bucket/uploads", json={"filename": "a.mp4", "size_bytes": 3, "folder": folder}
+        )
+        assert resp.status_code == 422, folder
+    assert s3.started == {}
 
 
 def _download(client, key: str) -> tuple[str, str]:
@@ -169,13 +194,13 @@ def _download(client, key: str) -> tuple[str, str]:
 def test_download_saves_the_video_under_its_name(client, s3):
     key = _send(client, "My trip.mp4", [b"video"])["key"]
     link, disposition = _download(client, key)
-    assert link == "https://signed.example/my-reels/clipforge/uploads/My_trip.mp4"
+    assert link == "https://signed.example/my-reels/clipforge/uploads/clips/My_trip.mp4"
     assert disposition == "attachment; filename=\"My_trip.mp4\"; filename*=UTF-8''My_trip.mp4"
 
 
 def test_zip_file_goes_up_and_is_listed_with_the_videos(client, s3):
     sent = _send(client, "Garden_approved.zip", [b"PK-", b"zip"])
-    assert sent["key"] == "clipforge/uploads/Garden_approved.zip"
+    assert sent["key"] == "clipforge/uploads/clips/Garden_approved.zip"
     assert s3.objects[sent["key"]] == (b"PK-zip", "application/zip")
     _send(client, "My trip.mp4", [b"video"])
     videos = client.get("/bucket/videos").json()["videos"]
@@ -197,7 +222,7 @@ def test_zip_file_goes_up_and_is_listed_with_the_videos(client, s3):
 
 def test_download_of_a_hindi_name_keeps_it(client, s3):
     key = _send(client, "जीवन बदलने वाले.mp4", [b"video"])["key"]
-    assert key == "clipforge/uploads/जीवन_बदलने_वाले.mp4"
+    assert key == "clipforge/uploads/clips/जीवन_बदलने_वाले.mp4"
     _, disposition = _download(client, key)
     # Browsers take filename*; the plain filename is for old ones (ASCII only).
     assert disposition == (
@@ -222,7 +247,7 @@ def test_every_video_in_the_bucket_is_listed_and_can_be_downloaded(client, s3, m
     body = client.get("/bucket/videos").json()
     assert body["truncated"] is False
     assert [(v["folder"], v["name"]) for v in body["videos"]] == [  # newest first
-        ("clipforge/uploads/", "My_trip.mp4"),
+        ("clipforge/uploads/clips/", "My_trip.mp4"),
         ("", "intro.webm"),
         ("old-videos/2024/", "Wedding.MOV"),
         ("clipforge/clips/Garden/youtube_shorts/", "part-001-5e6f.mp4"),
@@ -276,9 +301,9 @@ def test_a_name_in_use_is_never_replaced(client, s3):
     second = _send(client, "clip.mov", [b"two"])["key"]
     third = _send(client, "clip.mov", [b"three"])["key"]
     assert (first, second, third) == (
-        "clipforge/uploads/clip.mov",
-        "clipforge/uploads/clip-2.mov",
-        "clipforge/uploads/clip-3.mov",
+        "clipforge/uploads/clips/clip.mov",
+        "clipforge/uploads/clips/clip-2.mov",
+        "clipforge/uploads/clips/clip-3.mov",
     )
     assert s3.objects[first] == (b"one", "video/quicktime")
     videos = client.get("/bucket/videos").json()["videos"]
@@ -289,8 +314,8 @@ def test_a_name_in_use_is_never_replaced(client, s3):
 def test_without_permission_to_look_the_name_gets_the_time(client, s3):
     s3.head_status = 403
     key = _send(client, "clip.mp4", [b"x"])["key"]
-    assert key.startswith("clipforge/uploads/clip-") and key.endswith(".mp4")
-    assert len(key) == len("clipforge/uploads/clip-20261028-120000.mp4")
+    assert key.startswith("clipforge/uploads/clips/clip-") and key.endswith(".mp4")
+    assert len(key) == len("clipforge/uploads/clips/clip-20261028-120000.mp4")
 
 
 def test_cancel_drops_the_pieces_sent(client, s3):
@@ -298,7 +323,7 @@ def test_cancel_drops_the_pieces_sent(client, s3):
     ref = {"key": start["key"], "upload_id": start["upload_id"]}
     client.put("/bucket/uploads/part", params={**ref, "number": 1}, content=b"12345")
     assert client.post("/bucket/uploads/abort", json=ref).status_code == 204
-    assert s3.aborted == ["clipforge/uploads/big.mkv"] and s3.objects == {}
+    assert s3.aborted == ["clipforge/uploads/clips/big.mkv"] and s3.objects == {}
 
 
 def test_uploads_only_write_videos_to_the_uploads_folder(client, s3):

@@ -1,6 +1,7 @@
 // "Bucket": send videos from this computer straight to the bucket, into their
-// own folder (<prefix>/uploads/), apart from the reels; and see, open,
-// download and delete every video in the bucket. Each file goes up in parts through the
+// own folder (<prefix>/uploads/clips/ or uploads/reels/: the part of the app
+// they are for), apart from the reels; and see, open, download and delete
+// every video in the bucket, in two lists: "Clip a video" and "Create a reel". Each file goes up in parts through the
 // API, so the bucket needs no CORS setup and the bar shows real progress.
 // Music goes straight to <prefix>/audio/ too: a file (in parts, as videos) or
 // the audio of a link (the server fetches it and deletes it once it is in the
@@ -10,16 +11,22 @@
 // (error/notice), the music lists (tracks, bucketMusic) and helpers (fmtBytes, fmtWhen, ...).
 function bucketUploads() {
   return {
-    status: null, // GET /bucket: { set_up, bucket, endpoint, uploads_folder, reels_folders }
+    status: null, // GET /bucket: { set_up, bucket, endpoint, uploads_folder, upload_folders, reels_folders }
     files: [], // every video in the bucket, any folder, newest first
     truncated: false, // a very big bucket: only part of it is listed
     listing: false,
     listError: "",
-    filter: { text: "", area: "all" },
-    shown: 100, // rows on screen; "Show more" adds 100
+    // The two lists (and the two places an upload can go).
+    sections: [
+      { key: "clips", title: "Clip a video", about: "What you uploaded for Clip a video, and any folder ClipForge doesn't use." },
+      { key: "reels", title: "Create a reel", about: "Reels this app sent to the bucket (from a topic or from a video) and what you uploaded for Create a reel." },
+    ],
+    uploadTo: "clips", // the list picked videos go to: "clips" | "reels"
+    filters: { clips: { text: "", area: "all" }, reels: { text: "", area: "all" } },
+    shown: { clips: 100, reels: 100 }, // rows on screen in each list; "Show more" adds 100
     deleting: null, // key of the video or audio file being deleted
-    chosen: [], // keys ticked in the video list, to download or delete together
-    bulkJob: null, // { action: "download" | "delete", done, total } while one runs
+    chosen: [], // keys ticked in the video lists, to download or delete together
+    bulkJob: null, // { section, action: "download" | "delete", done, total } while one runs
     // Audio files in the bucket, any folder, newest first: bucketMusic, kept
     // by clipforge() (its music pickers offer them too).
     audioTruncated: false,
@@ -111,7 +118,7 @@ function bucketUploads() {
       for (const q of this.toSend()) {
         if (ctrl.signal.aborted) break;
         try {
-          await this.sendFile(q, ctrl.signal);
+          await this.sendFile(q, ctrl.signal, this.uploadTo);
           q.state = "done";
           sent++;
         } catch (e) {
@@ -122,7 +129,8 @@ function bucketUploads() {
       this.sending = false;
       this._send = null;
       if (sent) {
-        this.notice = `${sent} file${sent > 1 ? "s" : ""} uploaded to the bucket.`;
+        const list = this.sections.find((x) => x.key === this.uploadTo).title;
+        this.notice = `${sent} file${sent > 1 ? "s" : ""} uploaded to the bucket, listed under "${list}".`;
         await this.loadFiles();
       }
     },
@@ -130,8 +138,8 @@ function bucketUploads() {
       this._send?.abort();
     },
 
-    // folder: "uploads" (videos) | "audio" (music)
-    async sendFile(q, signal, folder = "uploads") {
+    // folder: "clips" | "reels" (videos, by the list they go to) | "audio" (music)
+    async sendFile(q, signal, folder = "clips") {
       q.state = "uploading";
       q.pct = 0;
       q.error = "";
@@ -206,34 +214,39 @@ function bucketUploads() {
       }
     },
 
-    // ----- Tick several videos / ZIP files: download or delete them together -----
+    // ----- Tick several videos / ZIP files in a list: download or delete them together -----
     isChosen(f) {
       return this.chosen.includes(f.key);
     },
     toggleChosen(f) {
       this.chosen = this.isChosen(f) ? this.chosen.filter((k) => k !== f.key) : [...this.chosen, f.key];
     },
-    // The rows on screen (search, folder and "Show more" applied).
-    shownFiles() {
-      return this.filtered().slice(0, this.shown);
+    // The rows on screen in a list (search, folder and "Show more" applied).
+    shownFiles(sec) {
+      return this.filtered(sec).slice(0, this.shown[sec]);
     },
-    allShownChosen() {
-      const rows = this.shownFiles();
+    allShownChosen(sec) {
+      const rows = this.shownFiles(sec);
       return rows.length > 0 && rows.every((f) => this.isChosen(f));
     },
-    chooseAllShown(on) {
-      const keys = this.shownFiles().map((f) => f.key);
+    chooseAllShown(sec, on) {
+      const keys = this.shownFiles(sec).map((f) => f.key);
       this.chosen = on ? [...new Set([...this.chosen, ...keys])] : this.chosen.filter((k) => !keys.includes(k));
     },
-    chosenFiles() {
-      return this.files.filter((f) => this.isChosen(f));
+    // The ticked files of one list: the other list's stay ticked.
+    chosenFiles(sec) {
+      return this.sectionFiles(sec).filter((f) => this.isChosen(f));
+    },
+    clearChosen(sec) {
+      const keys = new Set(this.sectionFiles(sec).map((f) => f.key));
+      this.chosen = this.chosen.filter((k) => !keys.has(k));
     },
     // One after the other, a second apart, each in a hidden frame: started all
     // at once, the browser drops some. Chrome asks once to allow several downloads.
-    async downloadChosen() {
-      const list = this.chosenFiles();
+    async downloadChosen(sec) {
+      const list = this.chosenFiles(sec);
       if (!list.length || this.bulkJob) return;
-      this.bulkJob = { action: "download", done: 0, total: list.length };
+      this.bulkJob = { section: sec, action: "download", done: 0, total: list.length };
       for (const f of list) {
         const frame = document.createElement("iframe");
         frame.hidden = true;
@@ -246,14 +259,14 @@ function bucketUploads() {
       this.bulkJob = null;
       this.notice = `${list.length} download${list.length > 1 ? "s" : ""} started: see your browser's downloads.`;
     },
-    async deleteChosen() {
-      const list = this.chosenFiles();
+    async deleteChosen(sec) {
+      const list = this.chosenFiles(sec);
       if (!list.length || this.bulkJob) return;
       const names = list.slice(0, 10).map((f) => `• ${f.name}`).join("\n") +
         (list.length > 10 ? `\n… and ${list.length - 10} more` : "");
       if (!confirm(`Delete ${list.length} file${list.length > 1 ? "s" : ""} from the bucket?\n\n${names}\n\n` +
         "They are deleted from the bucket for good: it can't be undone. Copies on this computer, if any, are kept.")) return;
-      this.bulkJob = { action: "delete", done: 0, total: list.length };
+      this.bulkJob = { section: sec, action: "delete", done: 0, total: list.length };
       const failed = [];
       for (const f of list) {
         try {
@@ -356,30 +369,41 @@ function bucketUploads() {
       }
     },
 
-    // ----- The list: every video and ZIP file in the bucket, by where it came from -----
+    // ----- The two lists: every video and ZIP file in the bucket, by where it came from -----
     isZip(f) {
       return f.name.toLowerCase().endsWith(".zip"); // can't be played: Download only
     },
-    area(f) {
-      const [reels, clips] = this.status.reels_folders;
-      if (f.key.startsWith(this.status.uploads_folder)) return "uploads";
-      if (f.key.startsWith(reels)) return "reels";
-      if (f.key.startsWith(clips)) return "clips";
-      return "other";
+    // [list, folder] of a file. "Create a reel" sends its reels from a topic to
+    // reels/ and from a video to clips/; "Clip a video" sends nothing itself, so
+    // its list is what was uploaded for it (uploads/clips/, and uploads/ from
+    // before there was a choice) and any folder ClipForge doesn't use.
+    place(f) {
+      const s = this.status;
+      const [topic, video] = s.reels_folders;
+      if (f.key.startsWith(topic)) return ["reels", "topic"];
+      if (f.key.startsWith(video)) return ["reels", "video"];
+      if (f.key.startsWith(s.upload_folders.reels)) return ["reels", "uploads"];
+      if (f.key.startsWith(s.uploads_folder)) return ["clips", "uploads"];
+      return ["clips", "other"];
     },
-    areas() {
-      const labels = {
-        all: "All files", uploads: "Your uploads", reels: "Reels from a topic",
-        clips: "Reels from a video", other: "Other folders",
-      };
-      return Object.entries(labels).map(([key, label]) => ({
-        key, label, count: key === "all" ? this.files.length : this.files.filter((f) => this.area(f) === key).length,
-      }));
+    sectionFiles(sec) {
+      return this.files.filter((f) => this.place(f)[0] === sec);
     },
-    filtered() {
-      const text = this.filter.text.trim().toLowerCase();
-      return this.files.filter((f) =>
-        (this.filter.area === "all" || this.area(f) === this.filter.area) &&
+    // The folder menu of a list: only the folders it has files in (one: no menu).
+    areas(sec) {
+      const files = this.sectionFiles(sec);
+      const labels = { topic: "Reels from a topic", video: "Reels from a video", uploads: "Your uploads", other: "Other folders" };
+      const found = Object.entries(labels)
+        .map(([key, label]) => ({ key, label, count: files.filter((f) => this.place(f)[1] === key).length }))
+        .filter((a) => a.count);
+      return found.length > 1 ? [{ key: "all", label: "All files", count: files.length }, ...found] : [];
+    },
+    filtered(sec) {
+      const text = this.filters[sec].text.trim().toLowerCase();
+      // A folder whose files are all deleted leaves the menu: the whole list again.
+      const area = this.areas(sec).some((a) => a.key === this.filters[sec].area) ? this.filters[sec].area : "all";
+      return this.sectionFiles(sec).filter((f) =>
+        (area === "all" || this.place(f)[1] === area) &&
         (!text || f.key.toLowerCase().includes(text)));
     },
   };

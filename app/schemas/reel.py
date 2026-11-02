@@ -35,11 +35,14 @@ class ReelCreate(BaseModel):
 
 
 class ReelRewrite(BaseModel):
-    """ "Write again", optionally with another script type or description."""
+    """ "Write again", optionally with another script type, length or description."""
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
     script_type: str | None = Field(default=None, description="Omit to keep the current type.")
+    duration_s: int | None = Field(
+        default=None, ge=MIN_DURATION_S, le=MAX_DURATION_S, description="Omit to keep the length."
+    )
     description: str | None = Field(
         default=None, max_length=MAX_DESCRIPTION, description="Omit to keep; empty to drop."
     )
@@ -115,6 +118,10 @@ class ReelGenerate(BaseModel):
     style: str | None = Field(default=None, description="Omit to keep the current style.")
     music_id: str | None = Field(default=None, description="Library track; null = no music.")
     music_volume: int = Field(default=20, ge=0, le=100, description="100 = as loud as the voice.")
+    # Another script type or length: a new script first, then the video from it.
+    rewrite: ReelRewrite | None = Field(
+        default=None, description="Write a new script with these first; omit to use the saved one."
+    )
 
 
 class ReelOut(BaseModel):
@@ -128,6 +135,7 @@ class ReelOut(BaseModel):
     script_model: str  # the one that writes (wrote) its script
     duration_s: int
     style: str
+    brief_id: str | None = None  # a reel of the "Brief reels" tab
     status: str  # scripting | script_ready | generating | ready | failed
     # Still "scripting"/"generating" but no progress for a long time (cut off
     # by a restart): it can be started again.
