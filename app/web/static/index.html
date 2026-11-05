@@ -9,6 +9,12 @@
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
     <style>
       [x-cloak] { display: none !important; }
+      /* The fonts a clip frame's text is drawn with in the video (served by the API). */
+      @font-face { font-family: "CF Noto Sans"; src: url(/fonts/NotoSans-Regular.ttf); font-weight: 400; }
+      @font-face { font-family: "CF Noto Sans"; src: url(/fonts/NotoSans-Bold.ttf); font-weight: 700; }
+      @font-face { font-family: "CF Noto Deva"; src: url(/fonts/NotoSansDevanagari-Regular.ttf); font-weight: 400; }
+      @font-face { font-family: "CF Noto Deva"; src: url(/fonts/NotoSansDevanagari-Bold.ttf); font-weight: 700; }
+      .frame-font { font-family: "CF Noto Sans", "CF Noto Deva", sans-serif; }
       body { background: #0b1020; }
     </style>
   </head>
@@ -26,6 +32,8 @@
               :class="mode==='clip' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Clip a video</button>
             <button @click="mode='reel'" class="px-3 py-1 rounded"
               :class="mode==='reel' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Create a reel</button>
+            <button @click="mode='brief'" class="px-3 py-1 rounded"
+              :class="mode==='brief' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Brief reels</button>
             <button @click="mode='bucket'" class="px-3 py-1 rounded"
               :class="mode==='bucket' ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'">Bucket</button>
             <button @click="mode='local'" class="px-3 py-1 rounded"
@@ -299,6 +307,8 @@
                class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download approved (<span x-text="approvedCount()"></span>) ZIP</a>
             <a :href="`/jobs/${job?.id}/export.zip`" class="px-3 py-1.5 rounded-lg text-sm"
                :class="approvedCount() > 0 ? 'bg-slate-700 hover:bg-slate-600' : 'bg-emerald-600 hover:bg-emerald-500'">Download all (ZIP)</a>
+            <button @click="openMobile()" :disabled="!clips.some(c => isPlayable(c))" title="See every ready clip as it looks in the Facebook app on a phone"
+              class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm">📱 Mobile preview</button>
             <button @click="refreshClips()" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Refresh</button>
             <button @click="deleteAllData()" :disabled="wiping" title="Delete every video, clip and transcript to free disk space (music library is kept)"
               class="px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-sm"
@@ -516,11 +526,234 @@
                   x-text="c.status==='approved' ? 'Approved ✓' : 'Approve'"></button>
                 <a :href="downloadUrl(c)" x-show="c.has_file" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Download</a>
                 <a :href="`/clips/${c.id}/captions.srt`" x-show="c.has_srt" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Captions (.srt)</a>
+                <button @click="openMobile(c)" :disabled="!isPlayable(c)" title="See this clip as it looks in the Facebook app on a phone"
+                  class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">📱 Mobile preview</button>
                 <button @click="del(c)" class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 text-xs">Delete</button>
               </div>
             </div>
           </template>
         </div>
+
+        <!-- Mobile preview: each clip in a phone frame laid out like the Facebook app (16:9 clips sit
+             in the middle with black above and below, 9:16 ones fill the screen). x-if so the players
+             are removed (and stop) when it closes. Tap the video to play / pause.
+             Left: the editor - the video placed / sized on a 1080x1920 screen and text layers anywhere,
+             shown live on the phones (drag to move); "Apply" re-renders the clips with it. -->
+        <template x-if="mobile.ids.length">
+          <div class="fixed inset-0 z-50 bg-black/85 overflow-auto" @keydown.escape.window="closeMobile($event)" @click.self="closeMobile()">
+            <div class="min-h-full flex flex-col items-center py-6 px-4" @click.self="closeMobile()">
+              <div class="flex items-center gap-3 mb-5">
+                <span class="text-sm text-slate-300" x-text="mobile.ids.length > 1 ? `Mobile preview · ${mobile.ids.length} clips` : 'Mobile preview'"></span>
+                <button @click="closeMobile()" class="px-3 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Close ✕</button>
+              </div>
+              <div class="flex flex-wrap lg:flex-nowrap justify-center items-start gap-8 w-full" @click.self="closeMobile()">
+
+                <!-- Frame editor (like a video editing app): drag texts / the video on a phone. -->
+                <div class="w-80 shrink-0 bg-slate-900 rounded-xl border border-slate-700 p-4 text-xs space-y-3 lg:sticky lg:top-4"
+                     @keydown.window="frameNudge($event)">
+                  <label class="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                    <input type="checkbox" :checked="!!mobile.draft" @change="toggleFrame($event.target.checked)" />
+                    Edit the video (9:16 · 1080×1920)
+                  </label>
+                  <p x-show="!mobile.draft" class="text-slate-400">Put the video where you like on a 9:16 screen and add your own text anywhere, also on the video. Drag things on the phone to move them.</p>
+                  <template x-if="mobile.draft">
+                    <div class="space-y-3">
+                      <div>
+                        <div class="text-slate-400 mb-1">Background</div>
+                        <div class="flex items-center gap-1.5">
+                          <template x-for="b in [['blur','Blurred video'],['black','Black'],['color','Colour']]" :key="b[0]">
+                            <button @click="mobile.draft.background = b[0]" class="px-2 py-1 rounded"
+                              :class="mobile.draft.background === b[0] ? 'bg-indigo-600' : 'bg-slate-800 hover:bg-slate-700'" x-text="b[1]"></button>
+                          </template>
+                          <input type="color" x-show="mobile.draft.background === 'color'" x-model="mobile.draft.bg_color" class="w-8 h-7 bg-transparent cursor-pointer" />
+                        </div>
+                      </div>
+                      <div class="bg-slate-800/60 rounded-lg p-2.5 space-y-2">
+                        <div class="font-medium text-slate-200">Video</div>
+                        <label class="flex items-center gap-2">
+                          <span class="w-8 text-slate-400">Size</span>
+                          <input type="range" min="30" max="100" step="1" x-model.number="mobile.draft.video_scale" class="flex-1" />
+                          <span class="w-9 text-right text-slate-400" x-text="`${mobile.draft.video_scale}%`"></span>
+                        </label>
+                        <div class="flex items-center gap-1.5">
+                          <span class="text-slate-500 flex-1">Drag the video on the phone to move it.</span>
+                          <button @click="mobile.draft.video_x = 50; mobile.draft.video_y = 50" class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600">Centre</button>
+                        </div>
+                      </div>
+
+                      <!-- Text layers (later ones on top) -->
+                      <div class="space-y-1.5">
+                        <div class="flex items-center justify-between">
+                          <span class="font-medium text-slate-200">Texts</span>
+                          <button @click="addText()" :disabled="mobile.draft.texts.length >= 12"
+                            class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">+ Add text</button>
+                        </div>
+                        <template x-for="(t, i) in mobile.draft.texts" :key="i">
+                          <div class="flex items-center gap-1 rounded px-1.5 py-1 cursor-pointer"
+                               :class="mobile.sel === i ? 'bg-indigo-900/60 ring-1 ring-indigo-500' : 'bg-slate-800 hover:bg-slate-700'" @click="mobile.sel = i">
+                            <span class="flex-1 truncate" :class="t.text.trim() ? '' : 'text-slate-500 italic'" x-text="t.text.trim() || '(empty)'"></span>
+                            <button @click.stop="moveLayer(i, 1)" title="Bring forward" class="px-1 text-slate-400 hover:text-white">↑</button>
+                            <button @click.stop="moveLayer(i, -1)" title="Send backward" class="px-1 text-slate-400 hover:text-white">↓</button>
+                            <button @click.stop="copyText(i)" :disabled="mobile.draft.texts.length >= 12" title="Copy" class="px-1 text-slate-400 hover:text-white">⧉</button>
+                            <button @click.stop="delText(i)" title="Delete" class="px-1 text-rose-400 hover:text-rose-300">✕</button>
+                          </div>
+                        </template>
+                        <p x-show="!mobile.draft.texts.length" class="text-slate-500">No text yet. Click "+ Add text".</p>
+                      </div>
+
+                      <!-- The selected text -->
+                      <template x-if="selText()">
+                        <div class="bg-slate-800/60 rounded-lg p-2.5 space-y-2">
+                          <textarea x-model="selText().text" rows="2" class="w-full bg-slate-800 rounded px-2 py-1 text-xs"
+                            placeholder="Type here… e.g. Part {part} · Follow for next part"></textarea>
+                          <label class="flex items-center gap-2">
+                            <span class="w-8 text-slate-400">Size</span>
+                            <input type="range" min="16" max="200" step="2" x-model.number="selText().size" class="flex-1" />
+                            <span class="w-7 text-right text-slate-400" x-text="selText().size"></span>
+                          </label>
+                          <div class="flex items-center gap-2 flex-wrap">
+                            <label class="flex items-center gap-1.5">Colour
+                              <input type="color" x-model="selText().color" class="w-7 h-6 bg-transparent cursor-pointer" /></label>
+                            <button @click="selText().bold = !selText().bold" class="w-7 py-0.5 rounded font-bold"
+                              :class="selText().bold ? 'bg-indigo-600' : 'bg-slate-700'" title="Bold">B</button>
+                            <button @click="selText().italic = !selText().italic" class="w-7 py-0.5 rounded italic"
+                              :class="selText().italic ? 'bg-indigo-600' : 'bg-slate-700'" title="Italic">I</button>
+                            <template x-for="a in [['left','⇤'],['center','↔'],['right','⇥']]" :key="a[0]">
+                              <button @click="selText().align = a[0]" class="w-7 py-0.5 rounded"
+                                :class="selText().align === a[0] ? 'bg-indigo-600' : 'bg-slate-700'" :title="`Align ${a[0]}`" x-text="a[1]"></button>
+                            </template>
+                          </div>
+                          <div class="flex items-center gap-3 flex-wrap">
+                            <label class="flex items-center gap-1" title="A dark edge around the letters"><input type="checkbox" x-model="selText().outline" :disabled="selText().box" /> Outline</label>
+                            <label class="flex items-center gap-1" title="A solid box behind the text"><input type="checkbox" x-model="selText().box" /> Box</label>
+                            <input type="color" x-show="selText().box" x-model="selText().box_color" title="Box colour" class="w-7 h-6 bg-transparent cursor-pointer" />
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <label class="flex items-center gap-1">X <input type="number" min="0" max="1080" step="1" x-model.number="selText().x" class="w-16 bg-slate-800 rounded px-1 py-0.5" /></label>
+                            <label class="flex items-center gap-1">Y <input type="number" min="0" max="1920" step="1" x-model.number="selText().y" class="w-16 bg-slate-800 rounded px-1 py-0.5" /></label>
+                            <button @click="selText().x = 540" class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600" title="Centre it left-to-right">Centre</button>
+                          </div>
+                        </div>
+                      </template>
+                      <p class="text-slate-500">Drag a text on the phone to put it anywhere; arrow keys nudge it (Shift = faster). <code class="text-indigo-300">{part}</code> = the part number, <code class="text-indigo-300">{title}</code> = the clip's title, so one edit works for every clip. Hindi and English both work; emoji are left out of the video.</p>
+                      <label class="flex items-center gap-1.5 text-slate-400"><input type="checkbox" x-model="mobile.showUi" /> Show Facebook's buttons on the phones</label>
+                    </div>
+                  </template>
+                  <div class="pt-1 space-y-2">
+                    <button @click="applyFrame()" :disabled="mobile.applying || mobileClips().every(c => frameApplied(c) || !isPlayable(c))"
+                      class="w-full px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-sm"
+                      x-text="mobile.applying ? 'Applying…' : (mobile.draft ? 'Apply' : 'Remove the edit') + (mobile.ids.length > 1 ? (mobile.draft ? ' to' : ' from') + ` all ${mobile.ids.length} clips` : '') + ' (re-render)'"></button>
+                    <p class="text-slate-400" x-show="mobileClips().some(c => c.status === 'rendering')">Re-rendering… each phone updates when its clip is ready.</p>
+                    <p class="text-amber-300" x-show="!mobileClips().some(c => c.status === 'rendering') && mobileClips().some(c => !frameApplied(c))">Preview only: not in the video yet. Click Apply.</p>
+                    <p class="text-emerald-300" x-show="!mobileClips().some(c => c.status === 'rendering') && mobileClips().every(c => frameApplied(c))">✓ The video files have this.</p>
+                    <p class="text-slate-500">Re-rendering keeps each clip's colour and music. Downloads get the new file.</p>
+                  </div>
+                </div>
+
+                <div class="flex flex-wrap justify-center gap-8" @click.self="closeMobile()">
+                <template x-for="c in mobileClips()" :key="c.id">
+                  <div class="flex flex-col items-center gap-2">
+                    <!-- The phone screen (cqw = 1% of its width, used to place things around a 16:9 video). -->
+                    <div class="relative h-[min(78vh,700px)] aspect-[9/19.5] rounded-[2.2rem] ring-[6px] ring-slate-700 bg-black overflow-hidden text-white select-none shadow-2xl"
+                         style="container-type: inline-size">
+                      <div x-show="!isPlayable(c)" class="absolute inset-0 flex items-center justify-center text-sm text-slate-400"
+                           x-text="c.status === 'failed' ? 'Render failed' : 'Rendering…'"></div>
+                      <template x-if="isPlayable(c)">
+                        <div class="absolute inset-0 cursor-pointer" @click="!mobile.draft && mobileToggle(c)">
+                          <!-- The one player. Without a frame it is what you see; with one it is drawn on the canvas below. -->
+                          <div class="absolute overflow-hidden" :style="mobileBoxStyle(c)">
+                            <video :src="mobileSource(c).url" playsinline :loop="mobileSource(c).from == null" preload="auto"
+                              class="absolute" :class="mobileVideoClass(c)" :style="mobileVideoStyle(c)"
+                              x-init="mobileEl(c, 'video', $el)" @loadeddata="mobileLoaded(c, $el)" @seeked="drawFrame(c)"
+                              @play="mobilePlayed(c)" @pause="mobile.playing[c.id] = false; drawFrame(c)"
+                              @timeupdate="mobileTime(c, $el)" @error="mobile.srcError[c.id] = true"></video>
+                          </div>
+                          <!-- The edit: 1080x1920 box, cover-fitted like the app shows a 9:16 video (100cqh = 1920 px).
+                               Drag a text or the video to move it; a tap plays / pauses. -->
+                          <template x-if="mobile.draft">
+                            <div data-frame-box class="absolute top-0 h-full left-1/2 -translate-x-1/2 aspect-[9/16] touch-none" style="container-type: size"
+                                 @pointerdown="framePointer($event, c)">
+                              <canvas width="720" height="1280" class="absolute inset-0 w-full h-full"
+                                x-init="mobileEl(c, 'canvas', $el)" x-effect="frameKey(mobile.draft); mobile.dims[c.id]; drawFrame(c)"></canvas>
+                              <div x-show="mobile.guide" class="absolute top-0 bottom-0 left-1/2 w-px bg-pink-400/80 pointer-events-none" style="z-index: 50"></div>
+                              <template x-for="(t, i) in mobile.draft.texts" :key="i">
+                                <div x-show="frameText(c, t)" class="absolute whitespace-pre-wrap break-words frame-font cursor-move"
+                                     :style="frameTextStyle(t, i)" @pointerdown.stop="framePointer($event, c, i)"><span :style="frameBoxStyle(t)" x-text="frameText(c, t)"></span></div>
+                              </template>
+                            </div>
+                          </template>
+                          <div x-show="mobile.srcError[c.id]" class="absolute inset-x-4 top-1/2 -translate-y-1/2 text-center text-xs text-amber-300 bg-black/70 rounded p-2">
+                            This browser can't play the video here. The clip is still made as shown.</div>
+                        </div>
+                      </template>
+
+                      <!-- Play sign while paused -->
+                      <div x-show="isPlayable(c) && !mobile.playing[c.id] && !mobile.draft" class="absolute inset-0 flex items-center justify-center pointer-events-none"
+                           :style="mobileLandscape(c) ? 'bottom: 12%' : ''">
+                        <div class="w-14 h-14 rounded-full bg-black/50 flex items-center justify-center text-2xl pl-1">▶</div>
+                      </div>
+
+                      <!-- Shade so the white text stays readable on a full-screen (9:16) clip -->
+                      <div x-show="mobile.showUi && !mobileLandscape(c)" class="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-black/50 to-transparent pointer-events-none"></div>
+                      <div x-show="mobile.showUi && !mobileLandscape(c)" class="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-black/70 to-transparent pointer-events-none"></div>
+
+                      <!-- Status bar + top icons: back, search, more -->
+                      <div x-show="mobile.showUi" class="absolute inset-x-0 top-0 pointer-events-none">
+                        <div class="flex justify-between px-7 pt-3 text-[11px] font-semibold"><span>9:41</span><span>▮▮▮ 37</span></div>
+                        <div class="flex items-center justify-between px-4 mt-4">
+                          <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+                          <div class="flex items-center gap-4">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5"/><circle cx="8" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="16" cy="12" r="1" fill="currentColor"/></svg>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Facebook's "Full-screen" pill just under a landscape video (its height is 9/16 of the width) -->
+                      <div x-show="mobileLandscape(c)" class="absolute left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-white/15 text-[11px] whitespace-nowrap pointer-events-none"
+                           style="top: calc(44% + 28.125cqw + 12px)">⛶ Full-screen</div>
+
+                      <!-- Right side: like, comment, share, save (spread over the same stretch of the screen as in the app) -->
+                      <div x-show="mobile.showUi" class="absolute right-3 top-[59%] bottom-[17%] flex flex-col items-center justify-between pointer-events-none">
+                        <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M7 11v9H4v-9h3zm0 0l4-7a2 2 0 0 1 3.2 2.2L13 10h5.5a2 2 0 0 1 2 2.4l-1.3 6A2 2 0 0 1 17.2 20H7"/></svg>
+                        <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-7.8 13.5L3 21l4.6-1.2A9 9 0 1 0 12 3z"/></svg>
+                        <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M14 5l7 7-7 7v-4c-5 0-8 1.5-11 5 1-6 4-10 11-11V5z"/></svg>
+                        <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4.5L6 21z"/></svg>
+                      </div>
+
+                      <!-- Bottom: page, post text (cut with "more" like the app), progress bar -->
+                      <div x-show="mobile.showUi" class="absolute inset-x-0 bottom-0 px-4 pb-6 pointer-events-none">
+                        <div class="flex items-center gap-2 mb-2 pr-12">
+                          <div class="w-9 h-9 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold shrink-0">P</div>
+                          <div class="min-w-0">
+                            <div class="text-sm font-semibold truncate">Your page</div>
+                            <div class="text-[11px] text-slate-200 truncate">♫ Your page · Original audio</div>
+                          </div>
+                        </div>
+                        <div class="text-[13px] leading-snug mb-3 pr-6">
+                          <div x-show="!mobile.more[c.id]" class="flex gap-1">
+                            <span class="truncate" x-text="mobileCaption(c) || `Part ${c.rank}`"></span>
+                            <button x-show="mobileCaption(c).length > 34" @click="mobile.more[c.id] = true"
+                              class="shrink-0 text-slate-400 font-semibold pointer-events-auto">more</button>
+                          </div>
+                          <div x-show="mobile.more[c.id]" class="max-h-40 overflow-auto whitespace-pre-line pointer-events-auto">
+                            <span x-text="mobileCaption(c)"></span>
+                            <button @click="mobile.more[c.id] = false" class="text-slate-400 font-semibold ml-1">less</button>
+                          </div>
+                        </div>
+                        <div class="h-[3px] rounded bg-white/25">
+                          <div class="h-full rounded bg-white" :style="`width: ${mobile.progress[c.id] || 0}%`"></div>
+                        </div>
+                      </div>
+                    </div>
+                    <span class="text-xs text-slate-400 mt-2" x-text="`${platformLabel(c.platform)} · Part ${c.rank}`"></span>
+                  </div>
+                </template>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
       </section>
       </div>
 
@@ -573,7 +806,7 @@
                 </template>
               </select>
               <span x-show="!(reel && draft)" class="block mt-1 text-slate-500">Rough time to make it. Every style takes about as long; longer reels take longer.</span>
-              <span x-show="reel && draft" class="block mt-1 text-slate-500">"Generate video" makes the open reel with this voice and style. The time is to make it again.</span>
+              <span x-show="reel && draft" class="block mt-1 text-slate-500">"Generate video" makes the open reel with this voice, style, length and script type. The time is to make it again.</span>
             </label>
             <label class="block text-xs text-slate-400 mb-4">Length <span class="text-slate-200" x-text="form.duration_s < 60 ? `${form.duration_s} s` : fmtDur(form.duration_s)"></span>
               <input type="range" :min="options.duration.min" :max="options.duration.max" step="5" x-model.number="form.duration_s" class="block w-full mt-2" />
@@ -949,9 +1182,11 @@
                       x-text="`New picture style (${styleLabel(form.style)}): every picture is drawn again`"></span>
                     <span x-show="genVoice() !== reel.voice" class="text-xs text-amber-300"
                       x-text="`New voice (${voiceLabel(reel.language, genVoice())}): the voice is made again`"></span>
+                    <span x-show="newScript()" class="text-xs text-amber-300"
+                      x-text="`New ${newScript()}: a new script is written first, then every picture is drawn again`"></span>
                   </div>
                   <p class="text-xs text-slate-500 mt-2">
-                    <span x-text="`Voice and picture style: ${voiceLabel(reel.language, genVoice())} · ${styleLabel(form.style)}, picked on the left.`"></span>
+                    <span x-text="`Voice, picture style, length and script type: ${voiceLabel(reel.language, genVoice())} · ${styleLabel(form.style)} · ${lengthLabel(form.duration_s)} · ${scriptTypeLabel(form.script_type)}, picked on the left.`"></span>
                     <span x-show="form.language !== reel.language" class="text-amber-300"
                       x-text="`This reel is in ${languageLabel(reel.language)}, so it keeps its own voice.`"></span>
                   </p>
@@ -1408,6 +1643,463 @@
         </div>
       </section>
 
+      <!-- BRIEF REELS: paste one brief (niche, how it is told, how it looks); every reel follows it (brief.js). -->
+      <section x-show="mode==='brief'" x-cloak x-data="briefReels()" x-init="initReels()" class="grid md:grid-cols-3 gap-5"
+        @clipforge:bucket-deleted.window="forgetBucketCopy($event.detail.key)">
+        <div class="space-y-5">
+          <!-- The brief: pasted once, split into niche / how it is told / how it looks -->
+          <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+            <div class="flex items-center justify-between gap-2 mb-3">
+              <h2 class="text-lg font-medium">My brief</h2>
+              <button x-show="briefs.length && !adding" @click="startNewBrief()" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">+ New brief</button>
+            </div>
+
+            <!-- Paste a new one -->
+            <div x-show="adding || !briefs.length">
+              <label class="block text-xs text-slate-400 mb-3">Paste your brief here
+                <textarea x-model="newBrief.content" rows="12" :maxlength="briefMax"
+                  placeholder="Paste the whole brief: what your videos are about, how the story is told, the narration style and how the pictures look. Not sure what to write? Open the example below."
+                  class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+                <span class="block mt-1 text-right text-slate-500" x-text="`${newBrief.content.length} / ${briefMax}`"></span>
+              </label>
+              <div class="flex gap-2">
+                <button @click="saveNewBrief()" :disabled="briefBusy || newBrief.content.trim().length < 20"
+                  class="flex-1 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-sm"
+                  x-text="briefBusy === 'saving' ? 'Reading the brief… (~20 s)' : 'Save brief'"></button>
+                <button x-show="adding && briefs.length" @click="adding = false" :disabled="!!briefBusy"
+                  class="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm">Cancel</button>
+              </div>
+              <p class="text-xs text-slate-500 mt-3">The writer on your Mac splits it into what the videos are about, how a script is told and how the pictures look. You can change each part after.</p>
+
+              <!-- What to write: an example, and a prompt to give ChatGPT -->
+              <details class="mt-3 bg-slate-800/40 rounded-lg px-3 py-2">
+                <summary class="text-xs text-slate-300 cursor-pointer">Not sure what to write? See an example</summary>
+                <div class="text-xs text-slate-400 mt-2 space-y-2">
+                  <p>A brief is about the <b>whole kind of video</b> you make, not one story. Give it these four things:</p>
+                  <ul class="list-disc pl-5 space-y-0.5">
+                    <li><b>What the videos are about</b>: your niche and topics.</li>
+                    <li><b>How the story is told</b>: the hook, the build-up, the ending, what to avoid.</li>
+                    <li><b>The narration</b>: the voice, the tone, short or long sentences.</li>
+                    <li><b>How the pictures look</b>: drawing style, colours, characters, symbols.</li>
+                  </ul>
+                  <pre class="text-xs text-slate-300 whitespace-pre-wrap bg-slate-950 rounded-lg p-3 max-h-64 overflow-y-auto" x-text="briefExample"></pre>
+                  <div class="flex flex-wrap gap-2">
+                    <button type="button" @click="useExample()" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Use this example</button>
+                    <button type="button" @click="copyChatGPTPrompt()" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Copy a prompt for ChatGPT</button>
+                  </div>
+                  <p>Using ChatGPT? Click <b>Copy a prompt for ChatGPT</b>, paste it there, write your niche in the brackets, then paste its answer above. A story or idea for <b>one</b> video goes in <b>Topic</b> or <b>Note</b> when you write a reel.</p>
+                </div>
+              </details>
+            </div>
+
+            <!-- A saved one: pick it, change its parts -->
+            <div x-show="briefs.length && !adding">
+              <label class="block text-xs text-slate-400 mb-3">Brief
+                <select x-model="briefId" @change="pickBrief($event.target.value)"
+                  class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                  <template x-for="b in briefs" :key="b.id">
+                    <option :value="b.id" :selected="b.id===briefId" x-text="b.name"></option>
+                  </template>
+                </select>
+              </label>
+              <template x-if="brief()">
+                <div>
+                  <label class="block text-xs text-slate-400 mb-3">What the videos are about
+                    <textarea x-model="edit.niche" rows="3" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+                  </label>
+                  <label class="block text-xs text-slate-400 mb-3">How the script is told
+                    <textarea x-model="edit.rules" rows="6" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+                  </label>
+                  <label class="block text-xs text-slate-400 mb-3">How the pictures look <span class="text-slate-500">(English, put before every picture)</span>
+                    <textarea x-model="edit.visual_style" rows="4" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+                  </label>
+                  <div class="flex flex-wrap gap-2">
+                    <button @click="saveBriefParts()" :disabled="!!briefBusy || !briefDirty() || !edit.rules.trim() || !edit.visual_style.trim()"
+                      class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-sm"
+                      x-text="briefBusy === 'saving' ? 'Saving…' : 'Save changes'"></button>
+                    <button @click="splitAgain()" :disabled="!!briefBusy" title="Reads the pasted text again and replaces the three parts"
+                      class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm"
+                      x-text="briefBusy === 'splitting' ? 'Reading… (~20 s)' : 'Split again'"></button>
+                    <button @click="deleteBrief()" :disabled="!!briefBusy"
+                      class="px-3 py-1.5 rounded-lg bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40 text-sm">Delete</button>
+                  </div>
+                  <details class="mt-3">
+                    <summary class="text-xs text-slate-400 cursor-pointer">The pasted brief</summary>
+                    <pre class="mt-2 text-xs text-slate-300 whitespace-pre-wrap bg-slate-950 rounded-lg p-3 max-h-64 overflow-y-auto" x-text="brief().content"></pre>
+                  </details>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- A new reel from the brief -->
+          <div x-show="brief() && !adding" class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+            <h2 class="text-lg font-medium mb-4">New reel</h2>
+            <div class="text-xs text-slate-400 mb-1">Platform</div>
+            <div class="grid grid-cols-2 gap-2 mb-4">
+              <template x-for="p in options.platforms" :key="p.key">
+                <button @click="form.platform=p.key" class="px-3 py-2 rounded-lg text-sm"
+                  :class="form.platform===p.key ? 'bg-indigo-600' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'" x-text="p.label"></button>
+              </template>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mb-4">
+              <label class="text-xs text-slate-400">Language
+                <select x-model="form.language" @change="form.voice = voicesFor(form.language)[0]?.key || ''"
+                  class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                  <template x-for="l in options.languages" :key="l.key">
+                    <option :value="l.key" :selected="l.key===form.language" x-text="l.label"></option>
+                  </template>
+                </select>
+              </label>
+              <div class="text-xs text-slate-400">Voice
+                <div class="flex gap-1 mt-1">
+                  <select x-model="form.voice" class="block w-full bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                    <template x-for="v in voicesFor(form.language)" :key="v.key">
+                      <option :value="v.key" :selected="v.key===form.voice" x-text="v.label"></option>
+                    </template>
+                  </select>
+                  <button type="button" @click="listen(form.language, form.voice)" title="Listen to this voice"
+                    class="px-2.5 rounded bg-slate-700 hover:bg-slate-600 text-sm text-slate-100" x-text="listenIcon(form.language, form.voice)"></button>
+                </div>
+              </div>
+            </div>
+            <label class="block text-xs text-slate-400 mb-4">Length <span class="text-slate-200" x-text="lengthLabel(form.duration_s)"></span>
+              <input type="range" :min="options.duration.min" :max="options.duration.max" step="5" x-model.number="form.duration_s" class="block w-full mt-2" />
+              <span class="block mt-1 text-slate-500">Within about 15 s over is fine: the script matters more than the exact second.</span>
+            </label>
+            <label class="block text-xs text-slate-400 mb-4">Script writer
+              <select x-model="form.script_model" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                <template x-for="m in options.script_models" :key="m.key">
+                  <option :value="m.key" :selected="m.key===form.script_model" x-text="scriptModelLabel(m)"></option>
+                </template>
+              </select>
+            </label>
+            <label class="block text-xs text-slate-400 mb-4">Topic <span class="text-slate-500">(optional: leave empty and the writer picks one for this brief)</span>
+              <textarea x-model="form.topic" rows="2" placeholder="e.g. why people chase money until it is too late"
+                class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+            </label>
+            <label class="block text-xs text-slate-400 mb-4">Note <span class="text-slate-500">(optional: a story or idea for this one video, anything extra)</span>
+              <textarea x-model="form.description" rows="3" :maxlength="options.description_max"
+                class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+            </label>
+            <button @click="createReel()" :disabled="creating || !brief()"
+              class="w-full px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40"
+              x-text="creating ? 'Starting…' : 'Write script'"></button>
+            <p class="text-xs text-slate-500 mt-3">The script is written on your Mac by Ollama (~30–60 s), in one piece, following your brief. You can edit it before the video is made.</p>
+          </div>
+
+          <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+            <h2 class="text-sm font-medium mb-3">My brief reels</h2>
+            <p x-show="!reels.length" class="text-xs text-slate-500">No reels from a brief yet.</p>
+            <div class="space-y-2">
+              <template x-for="r in reels" :key="r.id">
+                <button @click="open(r)" class="w-full flex items-center gap-3 text-left rounded-lg p-2 hover:bg-slate-800"
+                  :class="reel?.id===r.id ? 'bg-slate-800 ring-1 ring-indigo-500' : ''">
+                  <div class="w-10 aspect-[9/16] rounded bg-slate-800 overflow-hidden flex-none">
+                    <!-- x-if, not x-show: a hidden <img> still requests its src (404 before the video exists). -->
+                    <template x-if="r.has_video">
+                      <img :src="`/reels/${r.id}/thumbnail?v=${r.video_version}`" class="w-full h-full object-cover" />
+                    </template>
+                  </div>
+                  <div class="min-w-0">
+                    <div class="text-sm truncate" x-text="r.script?.title || r.topic"></div>
+                    <div class="text-xs text-slate-400 truncate">
+                      <span x-text="`${reelPlatformLabel(r.platform)} · ${languageLabel(r.language)} · `"></span>
+                      <span :class="r.status==='failed' ? 'text-rose-300' : (busy(r) ? 'text-amber-300' : '')" x-text="statusLabel(r)"></span>
+                    </div>
+                    <div x-show="r.bucket?.current" class="text-xs text-sky-300">✓ In bucket</div>
+                  </div>
+                </button>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <div class="md:col-span-2">
+          <div x-show="!reel" class="bg-slate-900/60 rounded-xl p-10 border border-slate-800 text-center text-slate-500 text-sm">
+            Save your brief, then pick a platform and language and click <b>Write script</b>. Your reels appear on the left.
+          </div>
+
+          <template x-if="reel">
+            <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
+              <div class="flex items-start justify-between gap-3 mb-4">
+                <div class="min-w-0">
+                  <div class="text-xs text-slate-400" x-text="`${reelPlatformLabel(reel.platform)} · ${languageLabel(reel.language)} · ${briefName(reel.brief_id)} · ${reel.duration_s} s`"></div>
+                  <div class="text-sm text-slate-300 truncate" x-text="reel.topic"></div>
+                </div>
+                <button @click="deleteReel()" class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 text-xs flex-none">Delete</button>
+              </div>
+
+              <div x-show="busy(reel) && reel.status==='scripting'" class="text-sm text-amber-300 mb-4">
+                Writing the script… <span class="animate-pulse">●</span>
+                <span class="text-xs text-slate-500 block mt-1">gemma3 on your Mac, ~15–30 s.</span>
+              </div>
+              <div x-show="reel.stalled" class="text-sm text-amber-300 bg-amber-950/30 rounded-lg px-3 py-2 mb-4">
+                This stopped without finishing (Docker or the Mac was restarted). You can start it again.
+              </div>
+              <div x-show="reel.error" class="text-sm text-rose-300 bg-rose-950/40 rounded-lg px-3 py-2 mb-4" x-text="reel.error"></div>
+              <details x-show="!(busy(reel) && reel.status==='scripting')" class="mb-4 bg-slate-800/40 rounded-lg px-3 py-2">
+                <summary class="text-xs text-slate-400 cursor-pointer">Script idea:
+                  <span class="text-slate-200" x-text="idea.description ? 'with your note' : 'from the brief'"></span>
+                </summary>
+                                <label class="block text-xs text-slate-400 mt-3 mb-3">Script writer
+                  <select x-model="idea.script_model" class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                    <template x-for="m in options.script_models" :key="m.key">
+                      <option :value="m.key" :selected="m.key===idea.script_model" x-text="scriptModelLabel(m)"></option>
+                    </template>
+                  </select>
+                </label>
+                <label class="block text-xs text-slate-400 mb-2">Description
+                  <textarea x-model="idea.description" rows="4" :maxlength="options.description_max" placeholder="Plot, flow, characters, tone, ending."
+                    class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500"></textarea>
+                </label>
+                <p class="text-xs text-slate-500">Change these, then click <b x-text="reel.script ? 'Write again' : 'Try again'"></b> for a new script.</p>
+              </details>
+              <button x-show="(reel.status==='failed' || reel.stalled) && !reel.script" @click="rewrite()"
+                class="mb-4 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm">Try again</button>
+
+              <div x-show="busy(reel) && reel.status==='generating'" class="mb-5">
+                <div class="h-2 bg-slate-800 rounded"><div class="h-2 bg-gradient-to-r from-indigo-500 to-fuchsia-500 rounded transition-all" :style="`width:${reel.progress}%`"></div></div>
+                <div class="flex justify-between text-xs text-slate-400 mt-1">
+                  <span x-text="reel.stage"></span><span x-text="`${reel.progress}%`"></span>
+                </div>
+                <p class="text-xs text-slate-500 mt-1">About 20 s per new picture on your Mac. Pictures appear below as they are made.</p>
+              </div>
+
+              <template x-if="reel.has_video">
+                <div class="flex flex-wrap gap-4 mb-5">
+                  <video controls :src="reelVideoUrl(reel)" class="h-[480px] aspect-[9/16] rounded-lg bg-black"></video>
+                  <div class="flex-1 min-w-[12rem] space-y-2 text-sm">
+                    <div class="text-slate-300" x-text="`Length ${reel.video_duration_s?.toFixed(1)} s`"></div>
+                    <p x-show="reel.status==='script_ready'" class="text-xs text-amber-300">The script changed since this video was made. Click <b>Generate video</b> to update it.</p>
+                    <div class="flex flex-wrap gap-2">
+                      <a :href="`/reels/${reel.id}/video?download=1`" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download video</a>
+                      <button @click="uploadReelToBucket()" :disabled="!!bucketUploading || saving || busy(reel)"
+                        title="Copies the video to your bucket (set up with BUCKET_* in .env)"
+                        class="px-3 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-sm"
+                        x-text="bucketUploading===reel.id ? 'Uploading…' : (reel.bucket?.current ? 'Upload again' : 'Upload to bucket')"></button>
+                      <button @click="downloadAndDelete()" :disabled="saving || busy(reel)"
+                        title="Saves the video on this computer, then deletes this reel and its files from the server"
+                        class="px-3 py-1.5 rounded-lg bg-rose-700/80 hover:bg-rose-600 disabled:opacity-40 text-sm">Download &amp; delete reel</button>
+                    </div>
+                    <p x-show="reel.bucket" class="text-xs">
+                      <span x-show="reel.bucket?.current" class="text-emerald-300">✓ In the bucket.</span>
+                      <span x-show="!reel.bucket?.current" class="text-amber-300">The video changed after it was uploaded. Upload again to replace the copy in the bucket.</span>
+                      <a :href="`/reels/${reel.id}/bucket`" target="_blank" rel="noopener" class="underline text-slate-300 hover:text-white">Open</a>
+                      <span class="block text-slate-500 break-all" x-text="reel.bucket?.key"></span>
+                    </p>
+                    <p class="text-xs text-slate-500">"Download &amp; delete" frees the server's disk: once the video is saved on this computer, the reel and its pictures, voice and video are deleted. Your music is kept.</p>
+                    <button x-show="draft" @click="copyCaption()" class="block px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Copy caption + hashtags</button>
+                  </div>
+                </div>
+              </template>
+
+              <template x-if="draft && !(busy(reel) && reel.status==='scripting')">
+                <div :class="busy(reel) ? 'opacity-60 pointer-events-none' : ''">
+                  <label class="block text-xs text-slate-400 mb-3">Title
+                    <input x-model="draft.title" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100" />
+                  </label>
+
+                  <div x-show="draft.hooks?.length" class="mb-4">
+                    <div class="text-xs text-slate-400 mb-1">Other hooks for scene 1 (click to use)</div>
+                    <div class="flex flex-wrap gap-2">
+                      <template x-for="h in draft.hooks" :key="h">
+                        <button @click="useHook(h)" class="text-left text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700"
+                          :class="draft.scenes[0]?.narration===h ? 'ring-1 ring-indigo-500' : ''" x-text="h"></button>
+                      </template>
+                    </div>
+                  </div>
+
+                  <!-- Characters and setting: the same in every picture (scripts from before have none). -->
+                  <details x-show="draft.characters !== undefined" open class="mb-4 bg-slate-800/40 rounded-lg px-3 py-2">
+                    <summary class="text-xs text-slate-400 cursor-pointer">Characters &amp; setting
+                      <span class="text-slate-500">(the same in every picture; a change draws its pictures again)</span></summary>
+                    <label class="block text-xs text-slate-400 mt-3 mb-3">Time and place
+                      <textarea x-model="draft.setting" rows="2" maxlength="1000" placeholder="e.g. Ancient India in the Ramayana: forests, mountains, rivers, hermitages, palaces with carved pillars, oil lamps"
+                        class="block w-full mt-1 bg-slate-900 rounded px-2 py-1 text-xs text-slate-100"></textarea>
+                    </label>
+                    <template x-for="(c, k) in draft.characters || []" :key="k">
+                      <div class="mb-3">
+                        <div class="flex items-center gap-2 mb-1">
+                          <input x-model="c.name" maxlength="60" @focus="nameBefore = c.name" @change="renameCharacter(nameBefore, c.name)"
+                            class="w-40 bg-slate-900 rounded px-2 py-1 text-xs text-slate-100 font-medium" aria-label="Character name" />
+                          <button @click="removeCharacter(k)" class="text-xs text-slate-500 hover:text-rose-300">remove</button>
+                        </div>
+                        <textarea x-model="c.look" rows="2" maxlength="800" placeholder="Age, build, face, skin, hair, clothes and their colours, what they carry"
+                          class="block w-full bg-slate-900 rounded px-2 py-1 text-xs text-slate-100" aria-label="Look"></textarea>
+                      </div>
+                    </template>
+                    <button x-show="(draft.characters || []).length < 6" @click="addCharacter()"
+                      class="mb-2 px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">+ Add character</button>
+                  </details>
+
+                  <!-- The whole voice-over in one box: a blank line starts a new picture -->
+                  <label class="block text-xs text-slate-400 mb-1">Script
+                    <textarea x-model="scriptText" @input="applyScriptText(); grow($el)" rows="14" x-effect="scriptText; $nextTick(() => grow($el))"
+                      class="block w-full mt-1 bg-slate-800 rounded px-3 py-2 text-sm leading-relaxed resize-y overflow-hidden"></textarea>
+                  </label>
+                  <div class="flex flex-wrap justify-between gap-2 text-xs text-slate-400 mb-1">
+                    <span x-text="`${draft.scenes.length} pictures · ${draft.scenes.reduce((n, s) => n + words(s.narration), 0)} words`"></span>
+                    <span x-text="`About ${estimateS()} s spoken (target ${reel.duration_s} s)`"></span>
+                  </div>
+                  <p class="text-xs text-slate-500 mb-4">A blank line starts a new picture. If you add or remove one, check the picture descriptions below.</p>
+
+                  <details open class="mb-5">
+                    <summary class="text-xs text-slate-400 cursor-pointer select-none mb-2">Pictures (<span x-text="draft.scenes.length"></span>)</summary>
+                    <div class="space-y-3">
+                      <template x-for="(s, i) in draft.scenes" :key="i">
+                        <div class="flex gap-3 bg-slate-800/50 rounded-lg p-3">
+                          <div class="w-20 flex-none">
+                            <div class="aspect-[9/16] rounded bg-slate-900 overflow-hidden flex items-center justify-center text-[10px] text-slate-500 text-center">
+                              <template x-if="reel.scene_pictures[i]">
+                                <img :src="pictureUrl(i)" class="w-full h-full object-cover" />
+                              </template>
+                              <span x-show="!reel.scene_pictures[i]">no picture yet</span>
+                            </div>
+                            <button x-show="reel.scene_pictures[i]" @click="newPicture(i)" class="mt-1 w-full text-[11px] px-1 py-0.5 rounded bg-slate-700 hover:bg-slate-600">New picture</button>
+                            <p x-show="reel.scene_pictures[i] && reel.scene_warnings?.[i]" class="mt-1 text-[10px] leading-tight text-amber-300"
+                              :title="reel.scene_warnings?.[i]" x-text="`⚠ May look wrong: ${reel.scene_warnings?.[i]}`"></p>
+                          </div>
+                          <div class="flex-1 min-w-0 text-xs">
+                            <div class="text-slate-400 mb-1" x-text="`Picture ${i + 1} · ${s.narration.split(/\s+/).slice(0, 9).join(' ')}…`"></div>
+                            <div x-show="s.characters !== undefined && (draft.characters || []).length" class="flex flex-wrap items-center gap-1 mb-1 text-[11px]">
+                              <span class="text-slate-500">In the picture:</span>
+                              <template x-for="c in draft.characters || []" :key="c.name">
+                                <button type="button" @click="toggleInScene(s, c.name)" class="px-1.5 py-0.5 rounded"
+                                  :class="(s.characters || []).includes(c.name) ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'" x-text="c.name"></button>
+                              </template>
+                              <label class="ml-1 text-slate-400"><input type="checkbox" x-model="s.crowd" class="align-middle" /> others too</label>
+                            </div>
+                            <textarea x-model="s.image_prompt" rows="4" x-effect="s.image_prompt; $nextTick(() => grow($el))" @input="grow($el)"
+                              class="w-full bg-slate-900 rounded px-2 py-1 text-xs leading-relaxed resize-y overflow-hidden"></textarea>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </details>
+
+                  <label class="block text-xs text-slate-400 mb-3">Post caption
+                    <textarea x-model="draft.caption" rows="2" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100"></textarea>
+                  </label>
+                  <label class="block text-xs text-slate-400 mb-5">Hashtags
+                    <input x-model="draft.hashtagsText" class="block w-full mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-indigo-300" />
+                  </label>
+
+                  <div class="mb-5 bg-slate-800/50 rounded-lg p-3 space-y-3">
+                    <!-- What kind of music fits (from the LLM); find one like it online, paste its link below. -->
+                    <div class="rounded-lg bg-indigo-950/40 ring-1 ring-indigo-800/60 p-3 text-xs">
+                      <template x-if="draft.music">
+                        <div>
+                          <div class="text-slate-400 mb-1">Music that fits this reel</div>
+                          <div class="text-sm text-indigo-200 font-medium" x-text="[draft.music.mood, draft.music.genre].filter(Boolean).join(' · ')"></div>
+                          <div class="text-slate-300 mt-1">
+                            <span x-show="draft.music.tempo" x-text="`Tempo: ${draft.music.tempo}`"></span>
+                            <span x-show="draft.music.tempo && draft.music.instruments"> · </span>
+                            <span x-show="draft.music.instruments" x-text="`Instruments: ${draft.music.instruments}`"></span>
+                          </div>
+                          <div class="flex flex-wrap items-center gap-2 mt-2">
+                            <span class="text-slate-400">Search:</span>
+                            <span class="text-slate-200" x-text="draft.music.search"></span>
+                          </div>
+                          <div class="flex flex-wrap gap-2 mt-2">
+                            <a :href="youtubeSearchUrl()" target="_blank" rel="noopener"
+                              class="px-2.5 py-1 rounded bg-rose-700/80 hover:bg-rose-600">Search on YouTube ↗</a>
+                            <button @click="copyMusicSearch()" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600">Copy search</button>
+                            <button @click="suggestMusic()" :disabled="reelMusic.suggesting" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
+                              x-text="reelMusic.suggesting ? 'Thinking…' : 'Suggest again'"></button>
+                          </div>
+                          <p class="text-slate-500 mt-2">Pick a track there, copy its link and paste it below in "paste a link", then click <b>Get audio</b>.</p>
+                        </div>
+                      </template>
+                      <template x-if="!draft.music">
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                          <span class="text-slate-300">Not sure which music fits? Let the AI suggest a type for this reel.</span>
+                          <button @click="suggestMusic()" :disabled="reelMusic.suggesting" class="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40"
+                            x-text="reelMusic.suggesting ? 'Thinking… (~10 s)' : 'Suggest music'"></button>
+                        </div>
+                      </template>
+                    </div>
+
+                    <div class="flex flex-wrap items-end gap-4">
+                      <label class="text-xs text-slate-400">Background music
+                        <select x-model="gen.musicId" @change="gen.musicId = await pickMusic($event.target.value)" :disabled="fetchingMusic"
+                          class="block mt-1 bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 max-w-[14rem]">
+                          <option value="">No music</option>
+                          <template x-for="m in musicChoices()" :key="m.value">
+                            <option :value="m.value" :selected="m.value===gen.musicId" x-text="m.label"></option>
+                          </template>
+                        </select>
+                      </label>
+                      <span x-show="fetchingMusic" class="text-xs text-amber-300 pb-2">Getting it from the bucket…</span>
+                      <label x-show="isTrack(gen.musicId)" class="text-xs text-slate-400">Music volume <span class="text-slate-200" x-text="`${gen.musicVolume}%`"></span>
+                        <input type="range" min="0" max="100" step="5" x-model.number="gen.musicVolume" class="block mt-2 w-32" />
+                      </label>
+                      <template x-if="isTrack(gen.musicId)">
+                        <audio controls preload="none" :src="`/audio/${gen.musicId}/file`" class="h-8"></audio>
+                      </template>
+                    </div>
+
+                    <!-- Add music to the library: upload a file or grab the audio of a link -->
+                    <div class="flex flex-wrap items-center gap-2 text-xs">
+                      <label class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 cursor-pointer"
+                             :class="reelMusic.uploading ? 'opacity-40 pointer-events-none' : ''">
+                        <input type="file" class="hidden" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.opus,.flac" @change="uploadReelMusic($event)" />
+                        <span x-text="reelMusic.uploading ? 'Uploading…' : '+ Upload audio'"></span>
+                      </label>
+                      <input type="url" x-model.trim="reelMusic.link" @keydown.enter="grabReelMusic()"
+                        placeholder="…or paste a link to grab its audio (YouTube, SoundCloud, …)"
+                        class="flex-1 min-w-[14rem] bg-slate-900 rounded-lg px-3 py-1.5 outline-none focus:ring-2 focus:ring-indigo-500" />
+                      <button @click="grabReelMusic()" :disabled="!reelMusic.link || reelMusic.grabbing"
+                        class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
+                        x-text="reelMusic.grabbing ? 'Starting…' : 'Get audio'"></button>
+                    </div>
+                    <!-- Link imports still downloading, or failed -->
+                    <template x-for="t in tracks.filter(t => t.status !== 'ready' && !t.to_bucket)" :key="t.id">
+                      <div class="flex items-center gap-2 text-xs">
+                        <span class="truncate max-w-xs" x-text="t.filename"></span>
+                        <template x-if="t.status==='processing'">
+                          <span class="flex items-center gap-2 text-amber-300">
+                            <span class="w-24 h-1.5 bg-slate-900 rounded"><span class="block h-1.5 bg-indigo-500 rounded" :style="`width:${t.progress||0}%`"></span></span>
+                            <span x-text="(t.progress||0) >= 99 ? 'Saving to the bucket…' : `Downloading ${t.progress||0}%`"></span>
+                          </span>
+                        </template>
+                        <span x-show="t.status==='failed'" class="text-rose-300 truncate max-w-md" x-text="`Failed: ${t.error||''}`"></span>
+                        <button x-show="t.status==='failed'" @click="removeTrack(t)" class="text-slate-400 hover:text-slate-200 underline">remove</button>
+                      </div>
+                    </template>
+                    <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <p class="text-slate-500">Added music is kept in your bucket (listed in every music picker and in the Bucket tab). Only use music you're allowed to use.</p>
+                      <button x-show="isTrack(gen.musicId)" @click="deleteReelMusic()" :disabled="reelMusic.deleting"
+                        class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40">Delete this track</button>
+                    </div>
+                  </div>
+
+                  <div class="flex flex-wrap items-center gap-2">
+                    <button @click="generate()" :disabled="saving || busy(reel) || fetchingMusic"
+                      class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-sm">Generate video</button>
+                    <button @click="saveScript()" :disabled="saving || !dirty()"
+                      class="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm">Save script</button>
+                    <button @click="rewrite()" :disabled="saving"
+                      class="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm">Write again</button>
+                    <span x-show="dirty()" class="text-xs text-amber-300">Unsaved changes</span>
+                    <span x-show="genVoice() !== reel.voice" class="text-xs text-amber-300"
+                      x-text="`New voice (${voiceLabel(reel.language, genVoice())}): the voice is made again`"></span>
+                    <span x-show="newScript()" class="text-xs text-amber-300"
+                      x-text="`New ${newScript()}: a new script is written first, then every picture is drawn again`"></span>
+                  </div>
+                  <p class="text-xs text-slate-500 mt-2">
+                    <span x-text="`Voice and length: ${voiceLabel(reel.language, genVoice())} · ${lengthLabel(form.duration_s)}, picked on the left. The pictures keep the look of the brief.`"></span>
+                    <span x-show="form.language !== reel.language" class="text-amber-300"
+                      x-text="`This reel is in ${languageLabel(reel.language)}, so it keeps its own voice.`"></span>
+                  </p>
+                  <p class="text-xs text-slate-500 mt-3">Pictures are made on your Mac by the image generator (start it in a terminal with <code>uv run imagegen/server.py</code>). Pictures and voice already made for the same text are reused, so changing one scene only redoes that scene.</p>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </section>
+
       <!-- BUCKET: send videos from this computer straight to the bucket, in their own folder (bucket.js). -->
       <section x-show="mode==='bucket'" x-cloak x-data="bucketUploads()" x-init="initBucket()" class="space-y-5">
         <div x-show="!status" class="text-sm text-slate-500">Loading…</div>
@@ -1438,9 +2130,20 @@ BUCKET_PREFIX=clipforge</pre>
               <h2 class="text-lg font-medium">Upload videos and ZIP files to your bucket</h2>
               <p class="text-xs text-slate-400 mt-1 mb-4">
                 Bucket <b class="text-slate-200" x-text="status.bucket"></b> (<span x-text="status.endpoint"></span>).
-                Videos and ZIP files go to <code class="text-sky-300" x-text="status.uploads_folder"></code>, a folder of their own:
-                reels go to <span x-text="status.reels_folders.join(' and ')"></span>.
+                Pick the part of the app the files are for: they go to a folder of their own and are listed under it below.
+                Reels the app sends go to <span x-text="status.reels_folders.join(' and ')"></span>.
               </p>
+              <!-- Where the files go: the "Clip a video" or the "Create a reel" list -->
+              <div class="flex flex-wrap items-center gap-2 mb-3 text-sm">
+                <span class="text-slate-300">Upload to:</span>
+                <div class="flex bg-slate-800 rounded-lg p-1" :class="sending ? 'opacity-40 pointer-events-none' : ''">
+                  <template x-for="sec in sections" :key="sec.key">
+                    <button type="button" @click="uploadTo = sec.key" class="px-3 py-1 rounded"
+                      :class="uploadTo === sec.key ? 'bg-indigo-600' : 'text-slate-400 hover:text-slate-200'" x-text="sec.title"></button>
+                  </template>
+                </div>
+                <code class="text-xs text-sky-300" x-text="status.upload_folders[uploadTo]"></code>
+              </div>
               <label class="inline-block px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm cursor-pointer"
                      :class="sending ? 'opacity-40 pointer-events-none' : ''">
                 <input type="file" multiple class="hidden" accept="video/*,.mp4,.m4v,.mov,.mkv,.webm,.avi,.zip,application/zip" @change="pickBucketFiles($event)" />
@@ -1470,7 +2173,7 @@ BUCKET_PREFIX=clipforge</pre>
               <div x-show="queue.length" class="flex flex-wrap gap-2 mt-4">
                 <button x-show="!sending && toSend().length" @click="sendToBucket()"
                   class="px-4 py-2 rounded-lg bg-sky-700 hover:bg-sky-600 disabled:opacity-40 text-sm"
-                  x-text="`Upload ${toSend().length} file${toSend().length === 1 ? '' : 's'}`"></button>
+                  x-text="`Upload ${toSend().length} file${toSend().length === 1 ? '' : 's'} to ${sections.find((x) => x.key === uploadTo).title}`"></button>
                 <button x-show="sending" @click="cancelBucket()" class="px-4 py-2 rounded-lg bg-rose-700/80 hover:bg-rose-600 text-sm">Cancel</button>
                 <button x-show="!sending && queue.some(q => q.state!=='waiting')" @click="clearFinished()"
                   class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Clear finished</button>
@@ -1478,50 +2181,53 @@ BUCKET_PREFIX=clipforge</pre>
               <p class="text-xs text-slate-500 mt-3">A file keeps its name; if that name is taken it becomes name-2, name-3… so nothing in the bucket is replaced. Keep this tab open until it finishes.</p>
             </div>
 
+            <!-- Two lists of the videos and ZIP files in the bucket: for "Clip a video" and for "Create a reel" -->
+            <template x-for="sec in sections" :key="sec.key">
             <div class="bg-slate-900/60 rounded-xl p-5 border border-slate-800">
               <div class="flex items-center justify-between gap-2 mb-3">
                 <div>
-                  <h2 class="text-lg font-medium">Videos and ZIP files in your bucket (<span x-text="files.length"></span>)</h2>
-                  <p class="text-xs text-slate-400 mt-1">Every video and ZIP file in <b x-text="status.bucket"></b>, in any folder: your uploads, your reels and anything else. <b>Download</b> saves one on this computer, straight from the bucket; <b>Delete</b> removes it from the bucket for good.</p>
+                  <h2 class="text-lg font-medium"><span x-text="sec.title"></span>: videos and ZIP files in your bucket (<span x-text="sectionFiles(sec.key).length"></span>)</h2>
+                  <p class="text-xs text-slate-400 mt-1"><span x-text="sec.about"></span> <b>Download</b> saves one on this computer, straight from the bucket; <b>Delete</b> removes it from the bucket for good.</p>
                 </div>
                 <button @click="loadFiles()" :disabled="listing" class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs flex-none"
                   x-text="listing ? 'Loading…' : 'Refresh'"></button>
               </div>
-              <div x-show="files.length" class="flex flex-wrap gap-2 mb-2">
-                <select x-model="filter.area" @change="shown = 100" class="bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
-                  <template x-for="a in areas()" :key="a.key">
-                    <option :value="a.key" :selected="a.key===filter.area" x-text="`${a.label} (${a.count})`"></option>
+              <div x-show="sectionFiles(sec.key).length" class="flex flex-wrap gap-2 mb-2">
+                <select x-show="areas(sec.key).length" x-model="filters[sec.key].area" @change="shown[sec.key] = 100" class="bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100">
+                  <template x-for="a in areas(sec.key)" :key="a.key">
+                    <option :value="a.key" :selected="a.key===filters[sec.key].area" x-text="`${a.label} (${a.count})`"></option>
                   </template>
                 </select>
-                <input type="search" x-model="filter.text" @input="shown = 100" placeholder="Search by name or folder"
+                <input type="search" x-model="filters[sec.key].text" @input="shown[sec.key] = 100" placeholder="Search by name or folder"
                   class="flex-1 min-w-[12rem] bg-slate-800 rounded px-2 py-1.5 text-sm text-slate-100 outline-none focus:ring-2 focus:ring-indigo-500" />
               </div>
               <!-- Tick several: download or delete them together -->
-              <div x-show="files.length" class="flex flex-wrap items-center gap-2 mb-2 text-xs">
+              <div x-show="sectionFiles(sec.key).length" class="flex flex-wrap items-center gap-2 mb-2 text-xs">
                 <label class="flex items-center gap-1.5 text-slate-300" title="Tick every file shown below (search and folder applied)">
-                  <input type="checkbox" :checked="allShownChosen()" @change="chooseAllShown($event.target.checked)"
-                    :disabled="!!bulkJob || !shownFiles().length" />
+                  <input type="checkbox" :checked="allShownChosen(sec.key)" @change="chooseAllShown(sec.key, $event.target.checked)"
+                    :disabled="!!bulkJob || !shownFiles(sec.key).length" />
                   Select all shown
                 </label>
-                <span x-show="chosen.length" class="text-slate-400"
-                  x-text="`${chosen.length} selected · ${fmtBytes(chosenFiles().reduce((n, f) => n + f.size_bytes, 0))}`"></span>
-                <button x-show="chosen.length" @click="downloadChosen()" :disabled="!!bulkJob"
+                <span x-show="chosenFiles(sec.key).length" class="text-slate-400"
+                  x-text="`${chosenFiles(sec.key).length} selected · ${fmtBytes(chosenFiles(sec.key).reduce((n, f) => n + f.size_bytes, 0))}`"></span>
+                <button x-show="chosenFiles(sec.key).length" @click="downloadChosen(sec.key)" :disabled="!!bulkJob"
                   class="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40"
-                  x-text="`Download selected (${chosen.length})`"></button>
-                <button x-show="chosen.length" @click="deleteChosen()" :disabled="!!bulkJob || !!deleting"
+                  x-text="`Download selected (${chosenFiles(sec.key).length})`"></button>
+                <button x-show="chosenFiles(sec.key).length" @click="deleteChosen(sec.key)" :disabled="!!bulkJob || !!deleting"
                   class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 disabled:opacity-40"
-                  x-text="`Delete selected (${chosen.length})`"></button>
-                <button x-show="chosen.length" @click="chosen = []" :disabled="!!bulkJob"
+                  x-text="`Delete selected (${chosenFiles(sec.key).length})`"></button>
+                <button x-show="chosenFiles(sec.key).length" @click="clearChosen(sec.key)" :disabled="!!bulkJob"
                   class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40">Clear</button>
-                <span x-show="bulkJob" class="text-amber-300"
+                <span x-show="bulkJob?.section === sec.key" class="text-amber-300"
                   x-text="bulkJob && `${bulkJob.action === 'download' ? 'Starting downloads' : 'Deleting'} ${bulkJob.done}/${bulkJob.total}…`"></span>
               </div>
               <p x-show="listError" class="text-sm text-rose-300" x-text="listError"></p>
               <p x-show="truncated" class="text-xs text-amber-300">This bucket is very big: only the newest part of it is listed.</p>
-              <p x-show="!files.length && !listing && !listError" class="text-xs text-slate-500">No videos or ZIP files in the bucket yet.</p>
-              <p x-show="files.length && !filtered().length" class="text-xs text-slate-500">No file matches.</p>
+              <p x-show="!sectionFiles(sec.key).length && !listing && !listError" class="text-xs text-slate-500"
+                x-text="`No videos or ZIP files for ${sec.title} in the bucket yet.`"></p>
+              <p x-show="sectionFiles(sec.key).length && !filtered(sec.key).length" class="text-xs text-slate-500">No file matches.</p>
               <div class="divide-y divide-slate-800">
-                <template x-for="f in shownFiles()" :key="f.key">
+                <template x-for="f in shownFiles(sec.key)" :key="f.key">
                   <div class="flex items-center gap-3 py-2 text-sm">
                     <input type="checkbox" :checked="isChosen(f)" @change="toggleChosen(f)" :disabled="!!bulkJob"
                       class="flex-none" :aria-label="`Select ${f.name}`" />
@@ -1539,10 +2245,11 @@ BUCKET_PREFIX=clipforge</pre>
                   </div>
                 </template>
               </div>
-              <button x-show="filtered().length > shown" @click="shown += 100"
+              <button x-show="filtered(sec.key).length > shown[sec.key]" @click="shown[sec.key] += 100"
                 class="mt-3 px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-xs"
-                x-text="`Show more (${filtered().length - shown} left)`"></button>
+                x-text="`Show more (${filtered(sec.key).length - shown[sec.key]} left)`"></button>
             </div>
+            </template>
 
             <!-- Music in the bucket: add a file or the audio of a link straight to <prefix>/audio/
                  (nothing kept on this computer); every audio file: open, download, rename, delete -->
@@ -1790,6 +2497,7 @@ BUCKET_PREFIX=clipforge</pre>
 
     <script src="/ui/app.js"></script>
     <script src="/ui/reels.js"></script>
+    <script src="/ui/brief.js"></script>
     <script src="/ui/reel_video.js"></script>
     <script src="/ui/bucket.js"></script>
     <script src="/ui/local.js"></script>

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.config.platforms import PlatformPreset
 from app.core.logging import get_logger
-from app.services import ffmpeg, reframe
+from app.services import ffmpeg, frame, reframe
 from app.services.captions import write_srt
 
 log = get_logger(__name__)
@@ -39,6 +39,11 @@ class RenderSpec:
     # ffmpeg.build_normalized_audio_cmd). When set, an ungraded copy cut just
     # copies its slice instead of running loudnorm per clip.
     normalized_audio: str | None = None
+    # Frame (services/frame.py): the clip made 1080x1920, the picture placed
+    # and sized as set, with text layers anywhere. ``frame_values`` fill its
+    # placeholders ({part}, {title}).
+    frame: dict | None = None
+    frame_values: dict | None = None
 
 
 def srt_path_for(clip_path: str) -> str:
@@ -89,9 +94,13 @@ def render_clip(spec: RenderSpec) -> None:
     (typically 0.5-2s early); ``start_s`` itself is left as requested so
     repeated re-renders don't creep earlier. With a colour grade only that cut
     is re-encoded, so the clip keeps the same frame size, start and length.
+    With a frame (any platform) the whole source picture goes on a 1080x1920
+    canvas instead - no reframe crop - see :func:`_render_framed`.
     """
     Path(spec.out_path).parent.mkdir(parents=True, exist_ok=True)
-    if spec.preset.is_vertical:
+    if spec.frame:
+        start = _render_framed(spec)
+    elif spec.preset.is_vertical:
         start = _render_vertical(spec)
     else:
         start = _render_horizontal(spec)
@@ -123,6 +132,41 @@ def _render_vertical(spec: RenderSpec) -> float:
             preset=spec.encode_preset,
         )
     )
+    return spec.start_s
+
+
+def frame_rect(spec: RenderSpec) -> tuple[int, int, int, int]:
+    """Where the picture sits on a framed clip's canvas (x, y, w, h)."""
+    return frame.frame_picture_rect(spec.frame, spec.src_width, spec.src_height)
+
+
+def _render_framed(spec: RenderSpec) -> float:
+    """The whole source picture (colour graded) placed on a 1080x1920 canvas,
+    the user's text layers burned in. Always re-encoded; starts exactly at
+    ``start_s``."""
+    with tempfile.TemporaryDirectory() as tmp:
+        ass_path = str(Path(tmp) / "frame.ass")
+        Path(ass_path).write_text(
+            frame.build_ass(spec.frame, spec.frame_values or {}),
+            encoding="utf-8",
+        )
+        vf = frame.frame_filter(
+            spec.frame,
+            spec.src_width,
+            spec.src_height,
+            ass_path,
+            pre=_join_filters(_even_size(spec), _color_filter(spec)),
+        )
+        ffmpeg.run(
+            ffmpeg.build_render_cmd(
+                spec.source_path,
+                spec.out_path,
+                spec.start_s,
+                spec.end_s,
+                vf,
+                preset=spec.encode_preset,
+            )
+        )
     return spec.start_s
 
 

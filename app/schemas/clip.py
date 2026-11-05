@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import ClipStatus
@@ -13,6 +15,8 @@ __all__ = [
     "ColorGradeResult",
     "DubLine",
     "DubRequest",
+    "FrameSettings",
+    "FrameText",
     "TranslateRequest",
     "TranslationOut",
 ]
@@ -22,6 +26,41 @@ class ColorGrade(BaseModel):
     contrast: int = 0
     brightness: int = 0
     saturation: int = 0
+
+
+_HEX = r"^#[0-9a-fA-F]{6}$"
+
+
+class FrameText(BaseModel):
+    """One text layer, anywhere on the 1080x1920 frame (also on the picture).
+    ``{part}`` / ``{title}`` are filled per clip."""
+
+    text: str = Field(default="", max_length=400)
+    # Anchor point on the canvas: the text's middle (align "center") or the
+    # middle of its left / right side.
+    x: float = Field(default=540, ge=0, le=1080)
+    y: float = Field(default=960, ge=0, le=1920)
+    align: Literal["left", "center", "right"] = "center"
+    size: int = Field(default=60, ge=16, le=200)  # px on the 1080-wide video
+    color: str = Field(default="#ffffff", pattern=_HEX)
+    bold: bool = True
+    italic: bool = False
+    outline: bool = True  # a dark edge, readable on the picture
+    box: bool = False  # a solid box behind the text (instead of the edge)
+    box_color: str = Field(default="#000000", pattern=_HEX)
+
+
+class FrameSettings(BaseModel):
+    """A 1080x1920 (9:16) clip: the picture placed and sized as set, any text
+    layers on it (services/frame.py)."""
+
+    background: Literal["black", "blur", "color"] = "blur"
+    bg_color: str = Field(default="#000000", pattern=_HEX)
+    # Middle of the picture, % of the canvas; size, % of the largest that fits.
+    video_x: float = Field(default=50, ge=0, le=100)
+    video_y: float = Field(default=50, ge=0, le=100)
+    video_scale: int = Field(default=100, ge=30, le=100)
+    texts: list[FrameText] = Field(default_factory=list, max_length=12)
 
 
 class ClipOut(BaseModel):
@@ -43,6 +82,9 @@ class ClipOut(BaseModel):
     # The grade the clip file actually has (the three above may be saved but
     # not applied yet). None: rendered before this was recorded.
     color_rendered: ColorGrade | None = None
+    frame: FrameSettings | None = None  # saved; applied on re-render
+    # The frame the file has, plus "rect" (x, y, w, h of the picture); None: no frame.
+    frame_rendered: dict | None = None
     caption_style: str | None = None
     language: str | None = None
     status: ClipStatus
@@ -76,6 +118,7 @@ class ClipUpdate(BaseModel):
     color_contrast: int | None = Field(default=None, ge=-50, le=50)
     color_brightness: int | None = Field(default=None, ge=-50, le=50)
     color_saturation: int | None = Field(default=None, ge=-50, le=50)
+    frame: FrameSettings | None = None  # null removes the frame
     status: ClipStatus | None = None
 
     @model_validator(mode="after")

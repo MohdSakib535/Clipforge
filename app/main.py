@@ -7,11 +7,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import audio, bucket, clips, config_routes, data, health, jobs, reels, videos
+from app.api import (
+    audio,
+    briefs,
+    bucket,
+    clips,
+    config_routes,
+    data,
+    health,
+    jobs,
+    reels,
+    videos,
+)
 from app.api.errors import register_exception_handlers
 from app.core.logging import configure_logging
 
 _STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
+_FONT_DIR = Path("/usr/share/fonts/truetype/noto")
 
 
 class _RevalidatingStaticFiles(StaticFiles):
@@ -52,11 +64,17 @@ def create_app() -> FastAPI:
     app.include_router(audio.router)
     app.include_router(data.router)
     app.include_router(reels.router)
+    app.include_router(briefs.router)
     app.include_router(bucket.router)
 
     # Serve the single-page dashboard from the API itself (no separate build).
     if _STATIC_DIR.exists():
         app.mount("/ui", _RevalidatingStaticFiles(directory=str(_STATIC_DIR), html=True), name="ui")
+
+        # The fonts a clip frame's text is drawn with (services/frame.py), so the
+        # mobile preview shows the text with the same letters as the video.
+        if _FONT_DIR.exists():
+            app.mount("/fonts", StaticFiles(directory=str(_FONT_DIR)), name="fonts")
 
         @app.get("/", include_in_schema=False)
         def _root() -> RedirectResponse:

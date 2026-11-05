@@ -22,7 +22,10 @@ class BucketStatus(BaseModel):
     set_up: bool  # BUCKET_NAME is set
     bucket: str
     endpoint: str  # "AWS S3" or BUCKET_ENDPOINT_URL
-    uploads_folder: str  # where the section's videos go, e.g. "clipforge/uploads/"
+    uploads_folder: str  # the section's own folder, e.g. "clipforge/uploads/"
+    # where its videos go, by the part of the app they are for:
+    # {"clips": "clipforge/uploads/clips/", "reels": "clipforge/uploads/reels/"}
+    upload_folders: dict[str, str]
     reels_folders: list[str]  # where "Upload to bucket" puts reels (kept apart)
     audio_folder: str  # where music goes, e.g. "clipforge/audio/"
 
@@ -30,7 +33,8 @@ class BucketStatus(BaseModel):
 class BucketUploadInit(BaseModel):
     filename: str = Field(min_length=1, max_length=512)
     size_bytes: int = Field(gt=0)
-    folder: Literal["uploads", "audio"] = "uploads"  # a video or ZIP file, or a music file
+    # A video or ZIP file for "Clip a video" or "Create a reel", or a music file.
+    folder: Literal["clips", "reels", "audio"] = "clips"
 
 
 class BucketUploadRef(BaseModel):

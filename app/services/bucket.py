@@ -1,9 +1,10 @@
 """Upload to a bucket: AWS S3 or any S3-compatible storage (Cloudflare R2,
 MinIO, DigitalOcean Spaces, Backblaze B2, Google Cloud Storage), set up with
 the BUCKET_* settings. Finished reels go to reels/ and clips/; videos sent from
-the "Bucket" section to their own folder, uploads/; music from the library to
-audio/. Any video in the bucket can be listed, opened, downloaded and deleted;
-any audio file renamed too. boto3 is imported on first use."""
+the "Bucket" section to their own folder, uploads/clips/ or uploads/reels/ (the
+part of the app they are for); music from the library to audio/. Any video
+in the bucket can be listed, opened, downloaded and deleted; any audio file
+renamed too. boto3 is imported on first use."""
 
 from __future__ import annotations
 
@@ -189,9 +190,12 @@ def key_for(*parts: str) -> str:
     return "/".join(p for p in (prefix, *parts) if p)
 
 
-def uploads_folder() -> str:
-    """The "Bucket" section's folder, e.g. ``clipforge/uploads/``."""
-    return key_for(UPLOADS) + "/"
+def uploads_folder(section: str = "") -> str:
+    """The "Bucket" section's folder, e.g. ``clipforge/uploads/``; with a
+    section ("clips": Clip a video, "reels": Create a reel), the folder of its
+    videos, e.g. ``clipforge/uploads/clips/``. Files sent before there was a
+    choice are at the top."""
+    return key_for(UPLOADS, section) + "/"
 
 
 def audio_folder() -> str:

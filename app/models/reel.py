@@ -27,6 +27,11 @@ class Reel(Base, TimestampMixin):
     # creator's own idea for it (plot, flow, tone), if any.
     script_type: Mapped[str] = mapped_column(String(16), default="story", server_default="story")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A reel from the "Brief reels" tab: its brief (no foreign key, so deleting
+    # the brief leaves the reel) and the look of its pictures as it was when the
+    # reel was made (put in place of ``style``, which then only names the default).
+    brief_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    custom_style: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The Ollama model that writes its script (reel_script.SCRIPT_MODELS);
     # None: the default, REEL_SCRIPT_MODEL.
     script_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -57,3 +62,9 @@ class Reel(Base, TimestampMixin):
     # Its copy in the bucket ("Upload to bucket", services/bucket.py):
     # {"key", "version", "uploaded_at"}; "version" is the video's mtime then.
     bucket: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    @property
+    def picture_style(self) -> str:
+        """What the pictures are drawn in: a key of reel_render.STYLES, or a
+        brief's own look."""
+        return self.custom_style or self.style

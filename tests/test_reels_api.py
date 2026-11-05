@@ -358,6 +358,42 @@ def test_rewrite_with_another_script_idea(client, db_session):
     _with_script(db_session, reel["id"])
     body = client.post(rewrite, json={"description": ""}).json()  # empty drops it
     assert (body["script_type"], body["description"]) == ("facts", "")
+    # What the script was written for goes along, to put back if the new one fails.
+    assert client.enqueued["reel_script_kw"][-1] == {
+        "before": {"script_type": "facts", "duration_s": 35, "description": "New idea",
+                   "script_model": None},
+        "then_render": False,
+    }  # fmt: skip
+    _with_script(db_session, reel["id"])
+    assert client.post(rewrite, json={"duration_s": 5}).status_code == 422
+    assert client.post(rewrite, json={"duration_s": 60}).json()["duration_s"] == 60
+
+
+def test_generate_with_another_script_type_or_length_writes_a_new_script_first(client, db_session):
+    reel = _create(client)
+    _with_script(db_session, reel["id"], status="ready")
+    generate = f"/reels/{reel['id']}/generate"
+    bad = {"rewrite": {"script_type": "poem"}}
+    assert client.post(generate, json=bad).status_code == 400
+    assert client.post(generate, json={"rewrite": {"duration_s": 900}}).status_code == 422
+
+    resp = client.post(
+        generate,
+        json={"voice": "hm_omega", "style": "3d",
+              "rewrite": {"script_type": "facts", "duration_s": 120}},
+    )  # fmt: skip
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert (body["status"], body["script_type"], body["duration_s"]) == ("scripting", "facts", 120)
+    assert (body["voice"], body["style"]) == ("hm_omega", "3d")  # the new script's pace
+    assert client.enqueued["reel_script"][-1] == reel["id"]
+    assert client.enqueued["reel_script_kw"][-1] == {
+        "before": {"script_type": "story", "duration_s": 35, "description": None,
+                   "script_model": None},
+        "then_render": True,
+    }  # fmt: skip
+    assert client.enqueued["reel_render"] == []  # the script task starts it
+    assert client.post(generate, json={}).status_code == 409  # busy
 
 
 def test_listen_to_a_voice_makes_the_sample_once(client, tmp_path, monkeypatch):

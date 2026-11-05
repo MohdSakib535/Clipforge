@@ -30,7 +30,7 @@ from app.services import analysis, bgaudio, dub, ffmpeg, music
 from app.services.cost import CostCapExceeded, CostTracker
 from app.services.discard import discard_job
 from app.services.filehash import file_fingerprint
-from app.services.render import RenderSpec, render_clip
+from app.services.render import RenderSpec, frame_rect, render_clip
 from app.services.romanize import has_words, is_mostly_devanagari, romanize
 from app.services.segments import Candidate, build_coverage_segments
 from app.services.storage import get_storage
@@ -671,6 +671,8 @@ def _render_spec(
         color_brightness=clip.color_brightness,
         color_saturation=clip.color_saturation,
         normalized_audio=norm if os.path.exists(norm) else None,
+        frame=clip.frame or None,
+        frame_values={"part": clip.rank, "title": clip.title},
     )
 
 
@@ -681,6 +683,15 @@ def _spec_grade(spec: RenderSpec) -> dict[str, int]:
         "brightness": spec.color_brightness,
         "saturation": spec.color_saturation,
     }
+
+
+def _spec_frame(spec: RenderSpec) -> dict | None:
+    """The frame a finished render gave the clip file (``Clip.frame_rendered``),
+    with ``rect``: where the picture sits on the canvas (x, y, w, h) - the
+    mobile preview cuts the picture out of the file with it."""
+    if not spec.frame:
+        return None
+    return {**spec.frame, "rect": list(frame_rect(spec))}
 
 
 def _render_parts(
@@ -758,7 +769,11 @@ def _render_specs(
                 future.result()
                 clip.file_path = spec.out_path
                 clip.thumbnail_path = spec.thumb_path
-                clip.extra = {**(clip.extra or {}), "color_rendered": _spec_grade(spec)}
+                clip.extra = {
+                    **(clip.extra or {}),
+                    "color_rendered": _spec_grade(spec),
+                    "frame_rendered": _spec_frame(spec),
+                }
                 clip.status = ClipStatus.ready
             except Exception as exc:
                 log.exception("clip_render_failed", extra={"clip_id": clip_id})
@@ -834,6 +849,7 @@ def render_single_clip(clip_id: str, keep_approved: bool = False) -> None:
                 "has_speech": (clip.has_speech if dubbed or words is None else has_words(spoken)),
                 # What this render used: the sliders may have moved meanwhile.
                 "color_rendered": _spec_grade(spec),
+                "frame_rendered": _spec_frame(spec),
             }
             clip.status = ClipStatus.approved if keep_approved else ClipStatus.ready
         except Exception as exc:

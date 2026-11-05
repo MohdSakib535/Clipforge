@@ -1,4 +1,5 @@
 from app.models.audio import AudioTrack
+from app.models.brief import Brief
 from app.models.clip import Clip
 from app.models.enums import ClipStatus, JobStage, JobStatus, VideoStatus
 from app.models.job import Job
@@ -14,6 +15,7 @@ __all__ = [
     "Transcript",
     "Clip",
     "AudioTrack",
+    "Brief",
     "Reel",
     "VideoStatus",
     "JobStatus",

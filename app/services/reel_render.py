@@ -170,6 +170,12 @@ STYLES: dict[str, Style] = {
 DEFAULT_STYLE = "cinematic"
 
 
+def style_prompt(style: str) -> str:
+    """A style's words: a key of STYLES, or the words themselves (a reel from a
+    brief has its own look)."""
+    return STYLES[style].prompt if style in STYLES else style
+
+
 def picture_prompt(prompt: str, style: str) -> str:
     # Without a style the pictures looked like plain stock photos. The model
     # drew a 3-panel collage for "a montage of quick shots": hence "single".
@@ -177,7 +183,7 @@ def picture_prompt(prompt: str, style: str) -> str:
         "Natural, correct anatomy. One single vertical 9:16 picture, not a collage, no text, "
         "no logos."
     )
-    return f"{STYLES[style].prompt}. {prompt.rstrip('. ')}. {suffix}"
+    return f"{style_prompt(style)}. {prompt.rstrip('. ')}. {suffix}"
 
 
 # ---------------------------------------------------------------------------

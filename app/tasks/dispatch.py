@@ -34,10 +34,12 @@ def enqueue_bg_audio_mix(clip_ids: list[str], approved_ids: list[str]) -> None:
     mix_background_audio.delay(clip_ids, approved_ids)
 
 
-def enqueue_reel_script(reel_id: str) -> None:
+def enqueue_reel_script(
+    reel_id: str, before: dict | None = None, then_render: bool = False
+) -> None:
     from app.tasks.reels import write_reel_script
 
-    write_reel_script.delay(reel_id)
+    write_reel_script.delay(reel_id, before, then_render)
 
 
 def enqueue_reel_render(reel_id: str) -> None:
