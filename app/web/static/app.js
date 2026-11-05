@@ -1,5 +1,16 @@
 const NOTICE_MS = 3000; // how long a notice (toast) stays
 
+// Frame (services/frame.py): a clip made 1080x1920 with the picture in the
+// middle and text above/below it. These match the server's numbers.
+const FRAME_W = 1080;
+const FRAME_H = 1920;
+const FRAME_TEXT_W = 960; // a text line wraps when wider (frame.TEXT_WRAP_W)
+// Emoji are not drawn in the video (libass can't), so the preview drops them too.
+const FRAME_EMOJI = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu;
+// The mobile preview's <video>/<canvas> per clip id. Kept outside Alpine: a
+// reactive proxy of a <video> can't be drawn on a canvas.
+const MOBILE_EL = new Map();
+
 function clipforge() {
   return {
     steps: ["Upload", "Rights", "Trim", "Settings", "Processing", "Review"],
@@ -30,6 +41,11 @@ function clipforge() {
     transcribe: true, // Settings step: speech-to-text on/off
     job: null,
     clips: [],
+    // Mobile preview (review step): clip ids shown in phone frames; empty = closed.
+    // playing / progress / more are per clip id (paused?, 0-100 %, caption expanded?).
+    // draft: the frame being edited (null = none); sel: its selected text layer; guide: show the centre line.
+    _mobileDrafts: {}, // clip id -> an edit not applied when the preview was closed
+    mobile: { ids: [], playing: {}, progress: {}, more: {}, draft: null, sel: -1, guide: false, showUi: true, applying: false, srcError: {}, dims: {} },
     busy: false,
     error: "",
     notice: "",
@@ -490,6 +506,8 @@ function clipforge() {
           bg_audio_volume: f.bg_audio_volume,
           bg_audio_mute_original: f.bg_audio_mute_original,
           color_rendered: f.color_rendered,
+          frame: f.frame,
+          frame_rendered: f.frame_rendered,
           bucket: f.bucket,
         });
         if (finished) {
@@ -515,6 +533,332 @@ function clipforge() {
 
     previewUrl(c) {
       return `/clips/${c.id}/preview?v=${c.file_version || 0}`;
+    },
+
+    // Mobile preview: shows a clip (or every ready clip) inside a phone frame
+    // laid out like the Facebook app, to see how it will look on a phone.
+    // Preview only - nothing is saved or re-rendered.
+    openMobile(c = null) {
+      const ids = (c ? [c] : this.clips).filter((x) => this.isPlayable(x)).map((x) => x.id);
+      if (!ids.length) {
+        this.notice = "No ready clips to preview yet.";
+        return;
+      }
+      // The editor starts from an edit left unapplied for this clip (closed by
+      // mistake), else from the frame the (first) clip has saved.
+      const first = this.clips.find((x) => x.id === ids[0]);
+      const kept = this._mobileDrafts[first.id];
+      const saved = kept !== undefined ? kept : first.frame;
+      const draft = saved ? JSON.parse(JSON.stringify(saved)) : null;
+      const sel = draft?.texts?.length ? 0 : -1;
+      this.mobile = { ids, playing: {}, progress: {}, more: {}, draft, sel, guide: false, showUi: true, applying: false, srcError: {}, dims: {} };
+    },
+    closeMobile(e = null) {
+      if (e && /INPUT|TEXTAREA|SELECT/.test(e.target?.tagName)) return; // Esc while typing
+      const first = this.mobileClips()[0];
+      if (first && !this.frameApplied(first)) {
+        this._mobileDrafts[first.id] = this.mobile.draft ? JSON.parse(JSON.stringify(this.mobile.draft)) : null;
+      } else if (first) {
+        delete this._mobileDrafts[first.id];
+      }
+      this.mobile.ids = [];
+      MOBILE_EL.clear();
+    },
+    mobileClips() {
+      return this.mobile.ids.map((id) => this.clips.find((c) => c.id === id)).filter(Boolean);
+    },
+    // 9:16 clips fill the phone screen; 16:9 ones sit in the middle with black above and below.
+    isVertical(c) {
+      return this.platforms.find((p) => p.key === c.platform)?.aspect === "9:16";
+    },
+    // The post text under the clip, as Facebook shows it: title, description, hashtags.
+    mobileCaption(c) {
+      const tags = (c.hashtags || []).map((h) => "#" + h).join(" ");
+      return [c.title, c.description, tags].map((s) => (s || "").trim()).filter(Boolean).join(" ");
+    },
+    toggleMobilePlay(el) {
+      el.paused ? el.play() : el.pause();
+    },
+
+    // ----- Frame editor (mobile preview), like a video editing app: the picture
+    // placed and sized on a 1080x1920 canvas, any number of text layers dragged
+    // anywhere on it (also on the picture). Same layout as services/frame.py.
+    newText(over = {}) {
+      return {
+        text: "New text", x: 540, y: 960, align: "center", size: 64, color: "#ffffff",
+        bold: true, italic: false, outline: true, box: false, box_color: "#000000", ...over,
+      };
+    },
+    defaultFrame() {
+      return {
+        background: "blur", bg_color: "#000000", video_x: 50, video_y: 50, video_scale: 100,
+        texts: [
+          this.newText({ text: "Your title here", y: 330 }),
+          this.newText({ text: "Part {part}", y: 1450, size: 56, box: true, box_color: "#c00000", outline: false }),
+        ],
+      };
+    },
+    toggleFrame(on) {
+      this.mobile.draft = on ? this.defaultFrame() : null;
+      this.mobile.sel = on ? 0 : -1;
+    },
+    selText() {
+      return this.mobile.draft?.texts?.[this.mobile.sel] || null;
+    },
+    addText() {
+      const texts = this.mobile.draft.texts;
+      texts.push(this.newText({ y: Math.min(1800, 960 + (texts.length % 5) * 90) }));
+      this.mobile.sel = texts.length - 1;
+    },
+    copyText(i) {
+      const texts = this.mobile.draft.texts;
+      const t = JSON.parse(JSON.stringify(texts[i]));
+      texts.splice(i + 1, 0, { ...t, y: Math.min(1920, t.y + 90) });
+      this.mobile.sel = i + 1;
+    },
+    delText(i) {
+      this.mobile.draft.texts.splice(i, 1);
+      this.mobile.sel = Math.min(this.mobile.sel, this.mobile.draft.texts.length - 1);
+    },
+    // Later layers are drawn on top: "up" brings a text in front of the next one.
+    moveLayer(i, d) {
+      const texts = this.mobile.draft.texts;
+      const j = i + d;
+      if (j < 0 || j >= texts.length) return;
+      [texts[i], texts[j]] = [texts[j], texts[i]];
+      this.mobile.sel = j;
+    },
+    // Arrow keys nudge the selected text (Shift: 10x), unless typing in a field.
+    frameNudge(e) {
+      const t = this.selText();
+      const keys = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if (!t || !keys[e.key] || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+      e.preventDefault();
+      const step = e.shiftKey ? 20 : 2;
+      t.x = Math.min(FRAME_W, Math.max(0, t.x + keys[e.key][0] * step));
+      t.y = Math.min(FRAME_H, Math.max(0, t.y + keys[e.key][1] * step));
+    },
+    // Same layout as frame.picture_rect: [x, y, w, h] of the picture on the canvas.
+    frameLayout(sw, sh, f) {
+      const even = (v) => Math.max(2, Math.round(v / 2) * 2);
+      const fit = (Math.min(FRAME_W / sw, FRAME_H / sh) * (f.video_scale ?? 100)) / 100;
+      const w = Math.min(even(sw * fit), FRAME_W);
+      const h = Math.min(even(sh * fit), FRAME_H);
+      const x = Math.round((FRAME_W * (f.video_x ?? 50)) / 100 - w / 2);
+      const y = Math.round((FRAME_H * (f.video_y ?? 50)) / 100 - h / 2);
+      const keep = (v, room) => Math.floor(Math.min(Math.max(v, 0), room) / 2) * 2;
+      return [keep(x, FRAME_W - w), keep(y, FRAME_H - h), w, h];
+    },
+    // Drag on the phone (1080x1920 box): a text moves that text, the picture
+    // moves the picture; a tap without moving plays / pauses.
+    framePointer(e, c, i = null) {
+      const box = e.currentTarget.closest("[data-frame-box]");
+      if (!box || e.button > 0) return;
+      e.preventDefault();
+      const f = this.mobile.draft;
+      const scale = FRAME_H / box.clientHeight; // canvas px per screen px
+      const r = box.getBoundingClientRect();
+      const [px, py, pw, ph] = this.frameLayout(...this.mobilePicSize(c), f);
+      let kind = "none";
+      let orig = null;
+      if (i != null) {
+        kind = "text";
+        this.mobile.sel = i;
+        orig = { x: f.texts[i].x, y: f.texts[i].y };
+      } else {
+        const cx = (e.clientX - r.left) * scale;
+        const cy = (e.clientY - r.top) * scale;
+        if (cx >= px && cx <= px + pw && cy >= py && cy <= py + ph) {
+          kind = "video";
+          orig = { x: f.video_x ?? 50, y: f.video_y ?? 50 };
+        }
+      }
+      const start = { x: e.clientX, y: e.clientY };
+      let moved = false;
+      const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+      const move = (ev) => {
+        const dx = (ev.clientX - start.x) * scale;
+        const dy = (ev.clientY - start.y) * scale;
+        if (!moved && Math.hypot(dx, dy) < 8) return;
+        moved = true;
+        if (kind === "text") {
+          const t = f.texts[i];
+          let x = clamp(orig.x + dx, 0, FRAME_W);
+          this.mobile.guide = Math.abs(x - FRAME_W / 2) < 16; // snap to the centre line
+          if (this.mobile.guide) x = FRAME_W / 2;
+          t.x = Math.round(x);
+          t.y = Math.round(clamp(orig.y + dy, 0, FRAME_H));
+        } else if (kind === "video") {
+          // Only the room the picture has: a full-width picture moves up / down only.
+          if (pw < FRAME_W) {
+            let vx = clamp(orig.x + (dx / FRAME_W) * 100, 0, 100);
+            this.mobile.guide = Math.abs(vx - 50) < 1.5;
+            if (this.mobile.guide) vx = 50;
+            f.video_x = Math.round(vx * 10) / 10;
+          }
+          if (ph < FRAME_H) f.video_y = Math.round(clamp(orig.y + (dy / FRAME_H) * 100, 0, 100) * 10) / 10;
+        }
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        this.mobile.guide = false;
+        if (!moved && kind !== "text") this.mobileToggle(c);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up, { once: true });
+    },
+    // Where the preview takes the picture from:
+    //  - the file has a frame: the picture's part of it (frame_rendered.rect)
+    //  - a framed 9:16 clip not made yet: its file is a crop, but a frame uses
+    //    the whole picture, so that part of the source video is played
+    //  - otherwise the whole file
+    mobileSource(c) {
+      if (c.frame_rendered?.rect) return { url: this.previewUrl(c), rect: c.frame_rendered.rect };
+      if (this.mobile.draft && this.isVertical(c) && this.job?.video_id) {
+        return { url: `/videos/${this.job.video_id}/source`, rect: null, from: c.start_s, to: c.end_s };
+      }
+      return { url: this.previewUrl(c), rect: null };
+    },
+    // The picture's size [w, h] in the preview: what the frame is laid out from.
+    mobilePicSize(c) {
+      const src = this.mobileSource(c);
+      if (src.rect) return [src.rect[2], src.rect[3]];
+      if (this.mobile.dims[c.id]) return this.mobile.dims[c.id];
+      return this.isVertical(c) && !src.from ? [1080, 1920] : [1920, 1080];
+    },
+    // Without a frame: shown like Facebook shows the file. A landscape picture
+    // (or the picture cut out of a framed file) sits full-width a little above
+    // the middle; a 9:16 clip fills the screen.
+    mobileLandscape(c) {
+      return !this.mobile.draft && (!!c.frame_rendered?.rect || !this.isVertical(c));
+    },
+    // The box the <video> shows in (cqw = 1% of the phone's width).
+    mobileBoxStyle(c) {
+      if (this.mobile.draft) return "inset: 0; opacity: 0;"; // drawn on the canvas instead
+      if (!this.mobileLandscape(c)) return "inset: 0;";
+      const r = c.frame_rendered?.rect;
+      const ratio = r ? r[3] / r[2] : 9 / 16;
+      return `left: 0; right: 0; aspect-ratio: ${r ? `${r[2]} / ${r[3]}` : "16 / 9"}; top: calc(44% - ${ratio * 50}cqw);`;
+    },
+    // A framed file: the video is enlarged and moved so only its picture part fills the box.
+    mobileVideoStyle(c) {
+      const r = c.frame_rendered?.rect;
+      const grade = this.colorChanged(c) ? `filter: url(#cf-${c.id});` : "";
+      if (this.mobile.draft || !r) return grade;
+      return `${grade} width: ${(FRAME_W / r[2]) * 100}%; height: auto; max-width: none; left: ${(-r[0] / r[2]) * 100}%; top: ${(-r[1] / r[3]) * 100}%;`;
+    },
+    mobileVideoClass(c) {
+      if (this.mobile.draft || c.frame_rendered?.rect) return "";
+      return this.isVertical(c) ? "inset-0 w-full h-full object-cover" : "inset-0 w-full h-full object-contain";
+    },
+    mobileToggle(c) {
+      const v = MOBILE_EL.get(c.id)?.video;
+      if (v) this.toggleMobilePlay(v);
+    },
+    // A text layer's words for one clip: placeholders filled, emoji dropped.
+    frameText(c, t) {
+      if (!t?.text) return "";
+      return t.text.replaceAll("{part}", c.rank ?? "").replaceAll("{title}", c.title || "").replace(FRAME_EMOJI, "").trim();
+    },
+    // CSS for a text layer in the 1080x1920 box (container-type: size, so
+    // 100cqh = 1920 canvas px), matching frame._style / build_ass.
+    frameTextStyle(t, i) {
+      const u = (px) => `calc(${px} * 100cqh / ${FRAME_H})`;
+      const shift = { left: "0%", center: "-50%", right: "-100%" }[t.align] || "-50%";
+      const edge = Math.max(2, Math.round(t.size * 0.06));
+      const outline = t.outline && !t.box ? `-webkit-text-stroke: ${u(edge * 2)} rgba(0,0,0,.75); paint-order: stroke fill;` : "";
+      const picked = this.mobile.sel === i ? "outline: 2px dashed #a5b4fc; outline-offset: 3px;" : "";
+      return `left: ${(t.x / FRAME_W) * 100}%; top: ${(t.y / FRAME_H) * 100}%; transform: translate(${shift}, -50%);` +
+        `width: max-content; max-width: ${(FRAME_TEXT_W / FRAME_W) * 100}%; text-align: ${t.align};` +
+        `font-size: ${u(t.size)}; line-height: 1.362; color: ${t.color}; font-weight: ${t.bold ? 700 : 400};` +
+        `font-style: ${t.italic ? "italic" : "normal"}; z-index: ${i + 1}; ${outline} ${picked}`;
+    },
+    frameBoxStyle(t) {
+      return t.box ? `background: ${t.box_color}; padding: 0 0.25em; box-decoration-break: clone; -webkit-box-decoration-break: clone;` : "";
+    },
+    // Remember a phone's <video>/<canvas>, then draw.
+    mobileEl(c, kind, el) {
+      MOBILE_EL.set(c.id, { ...(MOBILE_EL.get(c.id) || {}), [kind]: el });
+      this.drawFrame(c);
+    },
+    mobileLoaded(c, v) {
+      this.mobile.dims[c.id] = [v.videoWidth, v.videoHeight];
+      this.mobile.srcError[c.id] = false;
+      const src = this.mobileSource(c);
+      if (src.from != null) v.currentTime = src.from;
+      this.drawFrame(c);
+    },
+    mobileTime(c, v) {
+      const src = this.mobileSource(c);
+      let p = v.duration ? v.currentTime / v.duration : 0;
+      if (src.from != null) {
+        if (v.currentTime >= src.to || v.currentTime < src.from - 1) v.currentTime = src.from; // loop the part
+        p = (v.currentTime - src.from) / Math.max(0.1, src.to - src.from);
+      }
+      this.mobile.progress[c.id] = Math.min(100, Math.max(0, p * 100));
+    },
+    mobilePlayed(c) {
+      this.mobile.playing[c.id] = true;
+      const loop = () => {
+        const v = MOBILE_EL.get(c.id)?.video;
+        if (!v || v.paused || !this.mobile.ids.length) return;
+        this.drawFrame(c);
+        requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    },
+    // Draw the framed picture on the phone's canvas the way ffmpeg will:
+    // background (blurred picture / black / colour), then the picture.
+    drawFrame(c) {
+      const { video: v, canvas: cv } = MOBILE_EL.get(c.id) || {};
+      const f = this.mobile.draft;
+      if (!cv || !f) return;
+      const ctx = cv.getContext("2d");
+      const k = cv.width / FRAME_W;
+      ctx.filter = "none";
+      ctx.fillStyle = f.background === "color" ? f.bg_color : "#000";
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      if (!v || v.readyState < 2) return;
+      const src = this.mobileSource(c);
+      const [sx, sy, sw, sh] = src.rect || [0, 0, v.videoWidth, v.videoHeight];
+      const [x, y, w, h] = this.frameLayout(sw, sh, f);
+      // The live colour sliders (relative to the file's grade); the source video has none.
+      const grade = !src.from && this.colorChanged(c) ? `url(#cf-${c.id}) ` : "";
+      if (f.background === "blur") {
+        const s = Math.max(FRAME_W / sw, FRAME_H / sh) * 1.08; // a bit bigger: blur fades at the edges
+        const dw = sw * s;
+        const dh = sh * s;
+        ctx.filter = `${grade}blur(${39 * k}px) brightness(0.85)`;
+        ctx.drawImage(v, sx, sy, sw, sh, ((FRAME_W - dw) / 2) * k, ((FRAME_H - dh) / 2) * k, dw * k, dh * k);
+      }
+      ctx.filter = grade || "none";
+      ctx.drawImage(v, sx, sy, sw, sh, x * k, y * k, w * k, h * k);
+      ctx.filter = "none";
+    },
+    // Does the clip's file already have the editor's frame?
+    frameKey(f) {
+      if (!f) return "";
+      const t = (x) => [x.text, x.x, x.y, x.align, x.size, x.color, !!x.bold, !!x.italic, !!x.outline, !!x.box, x.box_color];
+      return JSON.stringify([f.background, f.bg_color, f.video_x ?? 50, f.video_y ?? 50, f.video_scale ?? 100, (f.texts || []).map(t)]);
+    },
+    frameApplied(c) {
+      return this.frameKey(c.frame_rendered) === this.frameKey(this.mobile.draft);
+    },
+    // Save the editor's frame (or no frame) on each clip shown and re-render it
+    // (keeps its colour and music). The file becomes 1080x1920.
+    async applyFrame() {
+      this.mobile.applying = true;
+      try {
+        for (const c of this.mobileClips()) {
+          if (!this.isPlayable(c) || this.frameApplied(c)) continue;
+          // A plain copy (structuredClone can't copy Alpine's reactive proxy).
+          c.frame = this.mobile.draft ? JSON.parse(JSON.stringify(this.mobile.draft)) : null;
+          await this.rerender(c);
+        }
+        this.notice = "Re-rendering with your edit. The phones update when each clip is ready.";
+      } finally {
+        this.mobile.applying = false;
+      }
     },
 
     downloadUrl(c) {
@@ -549,6 +893,7 @@ function clipforge() {
           color_contrast: c.color_contrast ?? 0,
           color_brightness: c.color_brightness ?? 0,
           color_saturation: c.color_saturation ?? 0,
+          frame: c.frame ?? null, // the text above/below (mobile preview), applied with it
         });
       }
       const r = await fetch(`/clips/${c.id}`, {

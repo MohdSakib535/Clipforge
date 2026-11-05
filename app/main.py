@@ -23,6 +23,7 @@ from app.api.errors import register_exception_handlers
 from app.core.logging import configure_logging
 
 _STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
+_FONT_DIR = Path("/usr/share/fonts/truetype/noto")
 
 
 class _RevalidatingStaticFiles(StaticFiles):
@@ -69,6 +70,11 @@ def create_app() -> FastAPI:
     # Serve the single-page dashboard from the API itself (no separate build).
     if _STATIC_DIR.exists():
         app.mount("/ui", _RevalidatingStaticFiles(directory=str(_STATIC_DIR), html=True), name="ui")
+
+        # The fonts a clip frame's text is drawn with (services/frame.py), so the
+        # mobile preview shows the text with the same letters as the video.
+        if _FONT_DIR.exists():
+            app.mount("/fonts", StaticFiles(directory=str(_FONT_DIR)), name="fonts")
 
         @app.get("/", include_in_schema=False)
         def _root() -> RedirectResponse:

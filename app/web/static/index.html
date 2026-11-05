@@ -9,6 +9,12 @@
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
     <style>
       [x-cloak] { display: none !important; }
+      /* The fonts a clip frame's text is drawn with in the video (served by the API). */
+      @font-face { font-family: "CF Noto Sans"; src: url(/fonts/NotoSans-Regular.ttf); font-weight: 400; }
+      @font-face { font-family: "CF Noto Sans"; src: url(/fonts/NotoSans-Bold.ttf); font-weight: 700; }
+      @font-face { font-family: "CF Noto Deva"; src: url(/fonts/NotoSansDevanagari-Regular.ttf); font-weight: 400; }
+      @font-face { font-family: "CF Noto Deva"; src: url(/fonts/NotoSansDevanagari-Bold.ttf); font-weight: 700; }
+      .frame-font { font-family: "CF Noto Sans", "CF Noto Deva", sans-serif; }
       body { background: #0b1020; }
     </style>
   </head>
@@ -301,6 +307,8 @@
                class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-sm">Download approved (<span x-text="approvedCount()"></span>) ZIP</a>
             <a :href="`/jobs/${job?.id}/export.zip`" class="px-3 py-1.5 rounded-lg text-sm"
                :class="approvedCount() > 0 ? 'bg-slate-700 hover:bg-slate-600' : 'bg-emerald-600 hover:bg-emerald-500'">Download all (ZIP)</a>
+            <button @click="openMobile()" :disabled="!clips.some(c => isPlayable(c))" title="See every ready clip as it looks in the Facebook app on a phone"
+              class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-sm">📱 Mobile preview</button>
             <button @click="refreshClips()" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Refresh</button>
             <button @click="deleteAllData()" :disabled="wiping" title="Delete every video, clip and transcript to free disk space (music library is kept)"
               class="px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-600 disabled:opacity-40 text-sm"
@@ -518,11 +526,234 @@
                   x-text="c.status==='approved' ? 'Approved ✓' : 'Approve'"></button>
                 <a :href="downloadUrl(c)" x-show="c.has_file" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Download</a>
                 <a :href="`/clips/${c.id}/captions.srt`" x-show="c.has_srt" class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs">Captions (.srt)</a>
+                <button @click="openMobile(c)" :disabled="!isPlayable(c)" title="See this clip as it looks in the Facebook app on a phone"
+                  class="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs">📱 Mobile preview</button>
                 <button @click="del(c)" class="px-2.5 py-1 rounded bg-rose-700/70 hover:bg-rose-600 text-xs">Delete</button>
               </div>
             </div>
           </template>
         </div>
+
+        <!-- Mobile preview: each clip in a phone frame laid out like the Facebook app (16:9 clips sit
+             in the middle with black above and below, 9:16 ones fill the screen). x-if so the players
+             are removed (and stop) when it closes. Tap the video to play / pause.
+             Left: the editor - the video placed / sized on a 1080x1920 screen and text layers anywhere,
+             shown live on the phones (drag to move); "Apply" re-renders the clips with it. -->
+        <template x-if="mobile.ids.length">
+          <div class="fixed inset-0 z-50 bg-black/85 overflow-auto" @keydown.escape.window="closeMobile($event)" @click.self="closeMobile()">
+            <div class="min-h-full flex flex-col items-center py-6 px-4" @click.self="closeMobile()">
+              <div class="flex items-center gap-3 mb-5">
+                <span class="text-sm text-slate-300" x-text="mobile.ids.length > 1 ? `Mobile preview · ${mobile.ids.length} clips` : 'Mobile preview'"></span>
+                <button @click="closeMobile()" class="px-3 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm">Close ✕</button>
+              </div>
+              <div class="flex flex-wrap lg:flex-nowrap justify-center items-start gap-8 w-full" @click.self="closeMobile()">
+
+                <!-- Frame editor (like a video editing app): drag texts / the video on a phone. -->
+                <div class="w-80 shrink-0 bg-slate-900 rounded-xl border border-slate-700 p-4 text-xs space-y-3 lg:sticky lg:top-4"
+                     @keydown.window="frameNudge($event)">
+                  <label class="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                    <input type="checkbox" :checked="!!mobile.draft" @change="toggleFrame($event.target.checked)" />
+                    Edit the video (9:16 · 1080×1920)
+                  </label>
+                  <p x-show="!mobile.draft" class="text-slate-400">Put the video where you like on a 9:16 screen and add your own text anywhere, also on the video. Drag things on the phone to move them.</p>
+                  <template x-if="mobile.draft">
+                    <div class="space-y-3">
+                      <div>
+                        <div class="text-slate-400 mb-1">Background</div>
+                        <div class="flex items-center gap-1.5">
+                          <template x-for="b in [['blur','Blurred video'],['black','Black'],['color','Colour']]" :key="b[0]">
+                            <button @click="mobile.draft.background = b[0]" class="px-2 py-1 rounded"
+                              :class="mobile.draft.background === b[0] ? 'bg-indigo-600' : 'bg-slate-800 hover:bg-slate-700'" x-text="b[1]"></button>
+                          </template>
+                          <input type="color" x-show="mobile.draft.background === 'color'" x-model="mobile.draft.bg_color" class="w-8 h-7 bg-transparent cursor-pointer" />
+                        </div>
+                      </div>
+                      <div class="bg-slate-800/60 rounded-lg p-2.5 space-y-2">
+                        <div class="font-medium text-slate-200">Video</div>
+                        <label class="flex items-center gap-2">
+                          <span class="w-8 text-slate-400">Size</span>
+                          <input type="range" min="30" max="100" step="1" x-model.number="mobile.draft.video_scale" class="flex-1" />
+                          <span class="w-9 text-right text-slate-400" x-text="`${mobile.draft.video_scale}%`"></span>
+                        </label>
+                        <div class="flex items-center gap-1.5">
+                          <span class="text-slate-500 flex-1">Drag the video on the phone to move it.</span>
+                          <button @click="mobile.draft.video_x = 50; mobile.draft.video_y = 50" class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600">Centre</button>
+                        </div>
+                      </div>
+
+                      <!-- Text layers (later ones on top) -->
+                      <div class="space-y-1.5">
+                        <div class="flex items-center justify-between">
+                          <span class="font-medium text-slate-200">Texts</span>
+                          <button @click="addText()" :disabled="mobile.draft.texts.length >= 12"
+                            class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40">+ Add text</button>
+                        </div>
+                        <template x-for="(t, i) in mobile.draft.texts" :key="i">
+                          <div class="flex items-center gap-1 rounded px-1.5 py-1 cursor-pointer"
+                               :class="mobile.sel === i ? 'bg-indigo-900/60 ring-1 ring-indigo-500' : 'bg-slate-800 hover:bg-slate-700'" @click="mobile.sel = i">
+                            <span class="flex-1 truncate" :class="t.text.trim() ? '' : 'text-slate-500 italic'" x-text="t.text.trim() || '(empty)'"></span>
+                            <button @click.stop="moveLayer(i, 1)" title="Bring forward" class="px-1 text-slate-400 hover:text-white">↑</button>
+                            <button @click.stop="moveLayer(i, -1)" title="Send backward" class="px-1 text-slate-400 hover:text-white">↓</button>
+                            <button @click.stop="copyText(i)" :disabled="mobile.draft.texts.length >= 12" title="Copy" class="px-1 text-slate-400 hover:text-white">⧉</button>
+                            <button @click.stop="delText(i)" title="Delete" class="px-1 text-rose-400 hover:text-rose-300">✕</button>
+                          </div>
+                        </template>
+                        <p x-show="!mobile.draft.texts.length" class="text-slate-500">No text yet. Click "+ Add text".</p>
+                      </div>
+
+                      <!-- The selected text -->
+                      <template x-if="selText()">
+                        <div class="bg-slate-800/60 rounded-lg p-2.5 space-y-2">
+                          <textarea x-model="selText().text" rows="2" class="w-full bg-slate-800 rounded px-2 py-1 text-xs"
+                            placeholder="Type here… e.g. Part {part} · Follow for next part"></textarea>
+                          <label class="flex items-center gap-2">
+                            <span class="w-8 text-slate-400">Size</span>
+                            <input type="range" min="16" max="200" step="2" x-model.number="selText().size" class="flex-1" />
+                            <span class="w-7 text-right text-slate-400" x-text="selText().size"></span>
+                          </label>
+                          <div class="flex items-center gap-2 flex-wrap">
+                            <label class="flex items-center gap-1.5">Colour
+                              <input type="color" x-model="selText().color" class="w-7 h-6 bg-transparent cursor-pointer" /></label>
+                            <button @click="selText().bold = !selText().bold" class="w-7 py-0.5 rounded font-bold"
+                              :class="selText().bold ? 'bg-indigo-600' : 'bg-slate-700'" title="Bold">B</button>
+                            <button @click="selText().italic = !selText().italic" class="w-7 py-0.5 rounded italic"
+                              :class="selText().italic ? 'bg-indigo-600' : 'bg-slate-700'" title="Italic">I</button>
+                            <template x-for="a in [['left','⇤'],['center','↔'],['right','⇥']]" :key="a[0]">
+                              <button @click="selText().align = a[0]" class="w-7 py-0.5 rounded"
+                                :class="selText().align === a[0] ? 'bg-indigo-600' : 'bg-slate-700'" :title="`Align ${a[0]}`" x-text="a[1]"></button>
+                            </template>
+                          </div>
+                          <div class="flex items-center gap-3 flex-wrap">
+                            <label class="flex items-center gap-1" title="A dark edge around the letters"><input type="checkbox" x-model="selText().outline" :disabled="selText().box" /> Outline</label>
+                            <label class="flex items-center gap-1" title="A solid box behind the text"><input type="checkbox" x-model="selText().box" /> Box</label>
+                            <input type="color" x-show="selText().box" x-model="selText().box_color" title="Box colour" class="w-7 h-6 bg-transparent cursor-pointer" />
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <label class="flex items-center gap-1">X <input type="number" min="0" max="1080" step="1" x-model.number="selText().x" class="w-16 bg-slate-800 rounded px-1 py-0.5" /></label>
+                            <label class="flex items-center gap-1">Y <input type="number" min="0" max="1920" step="1" x-model.number="selText().y" class="w-16 bg-slate-800 rounded px-1 py-0.5" /></label>
+                            <button @click="selText().x = 540" class="px-2 py-0.5 rounded bg-slate-700 hover:bg-slate-600" title="Centre it left-to-right">Centre</button>
+                          </div>
+                        </div>
+                      </template>
+                      <p class="text-slate-500">Drag a text on the phone to put it anywhere; arrow keys nudge it (Shift = faster). <code class="text-indigo-300">{part}</code> = the part number, <code class="text-indigo-300">{title}</code> = the clip's title, so one edit works for every clip. Hindi and English both work; emoji are left out of the video.</p>
+                      <label class="flex items-center gap-1.5 text-slate-400"><input type="checkbox" x-model="mobile.showUi" /> Show Facebook's buttons on the phones</label>
+                    </div>
+                  </template>
+                  <div class="pt-1 space-y-2">
+                    <button @click="applyFrame()" :disabled="mobile.applying || mobileClips().every(c => frameApplied(c) || !isPlayable(c))"
+                      class="w-full px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-sm"
+                      x-text="mobile.applying ? 'Applying…' : (mobile.draft ? 'Apply' : 'Remove the edit') + (mobile.ids.length > 1 ? (mobile.draft ? ' to' : ' from') + ` all ${mobile.ids.length} clips` : '') + ' (re-render)'"></button>
+                    <p class="text-slate-400" x-show="mobileClips().some(c => c.status === 'rendering')">Re-rendering… each phone updates when its clip is ready.</p>
+                    <p class="text-amber-300" x-show="!mobileClips().some(c => c.status === 'rendering') && mobileClips().some(c => !frameApplied(c))">Preview only: not in the video yet. Click Apply.</p>
+                    <p class="text-emerald-300" x-show="!mobileClips().some(c => c.status === 'rendering') && mobileClips().every(c => frameApplied(c))">✓ The video files have this.</p>
+                    <p class="text-slate-500">Re-rendering keeps each clip's colour and music. Downloads get the new file.</p>
+                  </div>
+                </div>
+
+                <div class="flex flex-wrap justify-center gap-8" @click.self="closeMobile()">
+                <template x-for="c in mobileClips()" :key="c.id">
+                  <div class="flex flex-col items-center gap-2">
+                    <!-- The phone screen (cqw = 1% of its width, used to place things around a 16:9 video). -->
+                    <div class="relative h-[min(78vh,700px)] aspect-[9/19.5] rounded-[2.2rem] ring-[6px] ring-slate-700 bg-black overflow-hidden text-white select-none shadow-2xl"
+                         style="container-type: inline-size">
+                      <div x-show="!isPlayable(c)" class="absolute inset-0 flex items-center justify-center text-sm text-slate-400"
+                           x-text="c.status === 'failed' ? 'Render failed' : 'Rendering…'"></div>
+                      <template x-if="isPlayable(c)">
+                        <div class="absolute inset-0 cursor-pointer" @click="!mobile.draft && mobileToggle(c)">
+                          <!-- The one player. Without a frame it is what you see; with one it is drawn on the canvas below. -->
+                          <div class="absolute overflow-hidden" :style="mobileBoxStyle(c)">
+                            <video :src="mobileSource(c).url" playsinline :loop="mobileSource(c).from == null" preload="auto"
+                              class="absolute" :class="mobileVideoClass(c)" :style="mobileVideoStyle(c)"
+                              x-init="mobileEl(c, 'video', $el)" @loadeddata="mobileLoaded(c, $el)" @seeked="drawFrame(c)"
+                              @play="mobilePlayed(c)" @pause="mobile.playing[c.id] = false; drawFrame(c)"
+                              @timeupdate="mobileTime(c, $el)" @error="mobile.srcError[c.id] = true"></video>
+                          </div>
+                          <!-- The edit: 1080x1920 box, cover-fitted like the app shows a 9:16 video (100cqh = 1920 px).
+                               Drag a text or the video to move it; a tap plays / pauses. -->
+                          <template x-if="mobile.draft">
+                            <div data-frame-box class="absolute top-0 h-full left-1/2 -translate-x-1/2 aspect-[9/16] touch-none" style="container-type: size"
+                                 @pointerdown="framePointer($event, c)">
+                              <canvas width="720" height="1280" class="absolute inset-0 w-full h-full"
+                                x-init="mobileEl(c, 'canvas', $el)" x-effect="frameKey(mobile.draft); mobile.dims[c.id]; drawFrame(c)"></canvas>
+                              <div x-show="mobile.guide" class="absolute top-0 bottom-0 left-1/2 w-px bg-pink-400/80 pointer-events-none" style="z-index: 50"></div>
+                              <template x-for="(t, i) in mobile.draft.texts" :key="i">
+                                <div x-show="frameText(c, t)" class="absolute whitespace-pre-wrap break-words frame-font cursor-move"
+                                     :style="frameTextStyle(t, i)" @pointerdown.stop="framePointer($event, c, i)"><span :style="frameBoxStyle(t)" x-text="frameText(c, t)"></span></div>
+                              </template>
+                            </div>
+                          </template>
+                          <div x-show="mobile.srcError[c.id]" class="absolute inset-x-4 top-1/2 -translate-y-1/2 text-center text-xs text-amber-300 bg-black/70 rounded p-2">
+                            This browser can't play the video here. The clip is still made as shown.</div>
+                        </div>
+                      </template>
+
+                      <!-- Play sign while paused -->
+                      <div x-show="isPlayable(c) && !mobile.playing[c.id] && !mobile.draft" class="absolute inset-0 flex items-center justify-center pointer-events-none"
+                           :style="mobileLandscape(c) ? 'bottom: 12%' : ''">
+                        <div class="w-14 h-14 rounded-full bg-black/50 flex items-center justify-center text-2xl pl-1">▶</div>
+                      </div>
+
+                      <!-- Shade so the white text stays readable on a full-screen (9:16) clip -->
+                      <div x-show="mobile.showUi && !mobileLandscape(c)" class="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-black/50 to-transparent pointer-events-none"></div>
+                      <div x-show="mobile.showUi && !mobileLandscape(c)" class="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-black/70 to-transparent pointer-events-none"></div>
+
+                      <!-- Status bar + top icons: back, search, more -->
+                      <div x-show="mobile.showUi" class="absolute inset-x-0 top-0 pointer-events-none">
+                        <div class="flex justify-between px-7 pt-3 text-[11px] font-semibold"><span>9:41</span><span>▮▮▮ 37</span></div>
+                        <div class="flex items-center justify-between px-4 mt-4">
+                          <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+                          <div class="flex items-center gap-4">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5"/><circle cx="8" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="16" cy="12" r="1" fill="currentColor"/></svg>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Facebook's "Full-screen" pill just under a landscape video (its height is 9/16 of the width) -->
+                      <div x-show="mobileLandscape(c)" class="absolute left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-white/15 text-[11px] whitespace-nowrap pointer-events-none"
+                           style="top: calc(44% + 28.125cqw + 12px)">⛶ Full-screen</div>
+
+                      <!-- Right side: like, comment, share, save (spread over the same stretch of the screen as in the app) -->
+                      <div x-show="mobile.showUi" class="absolute right-3 top-[59%] bottom-[17%] flex flex-col items-center justify-between pointer-events-none">
+                        <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M7 11v9H4v-9h3zm0 0l4-7a2 2 0 0 1 3.2 2.2L13 10h5.5a2 2 0 0 1 2 2.4l-1.3 6A2 2 0 0 1 17.2 20H7"/></svg>
+                        <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-7.8 13.5L3 21l4.6-1.2A9 9 0 1 0 12 3z"/></svg>
+                        <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M14 5l7 7-7 7v-4c-5 0-8 1.5-11 5 1-6 4-10 11-11V5z"/></svg>
+                        <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4.5L6 21z"/></svg>
+                      </div>
+
+                      <!-- Bottom: page, post text (cut with "more" like the app), progress bar -->
+                      <div x-show="mobile.showUi" class="absolute inset-x-0 bottom-0 px-4 pb-6 pointer-events-none">
+                        <div class="flex items-center gap-2 mb-2 pr-12">
+                          <div class="w-9 h-9 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold shrink-0">P</div>
+                          <div class="min-w-0">
+                            <div class="text-sm font-semibold truncate">Your page</div>
+                            <div class="text-[11px] text-slate-200 truncate">♫ Your page · Original audio</div>
+                          </div>
+                        </div>
+                        <div class="text-[13px] leading-snug mb-3 pr-6">
+                          <div x-show="!mobile.more[c.id]" class="flex gap-1">
+                            <span class="truncate" x-text="mobileCaption(c) || `Part ${c.rank}`"></span>
+                            <button x-show="mobileCaption(c).length > 34" @click="mobile.more[c.id] = true"
+                              class="shrink-0 text-slate-400 font-semibold pointer-events-auto">more</button>
+                          </div>
+                          <div x-show="mobile.more[c.id]" class="max-h-40 overflow-auto whitespace-pre-line pointer-events-auto">
+                            <span x-text="mobileCaption(c)"></span>
+                            <button @click="mobile.more[c.id] = false" class="text-slate-400 font-semibold ml-1">less</button>
+                          </div>
+                        </div>
+                        <div class="h-[3px] rounded bg-white/25">
+                          <div class="h-full rounded bg-white" :style="`width: ${mobile.progress[c.id] || 0}%`"></div>
+                        </div>
+                      </div>
+                    </div>
+                    <span class="text-xs text-slate-400 mt-2" x-text="`${platformLabel(c.platform)} · Part ${c.rank}`"></span>
+                  </div>
+                </template>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
       </section>
       </div>
 

@@ -54,6 +54,8 @@ def update_clip(
 ) -> Clip:
     clip = _get_clip(db, user, clip_id)
     data = body.model_dump(exclude_unset=True)
+    if body.frame is not None:
+        data["frame"] = body.frame.model_dump()  # every setting, defaults included
     if data.get("status") == ClipStatus.deleted:
         return _delete_clip(db, clip)
 
@@ -61,7 +63,9 @@ def update_clip(
     video = db.get(Video, db.get(Job, clip.job_id).video_id)
     new_start = data.get("start_s", clip.start_s)
     new_end = data.get("end_s", clip.end_s)
-    if video.duration_s and new_end > video.duration_s:
+    # A little slack: a clip's end is stored rounded to 3 decimals, so the last
+    # part can end a hair after the video (317.208 vs 317.2078 s).
+    if video.duration_s and new_end > video.duration_s + 0.01:
         raise AppError("end_s exceeds video duration", code="out_of_range", status_code=400)
     if new_end <= new_start:
         raise AppError("end_s must be > start_s", code="bad_range", status_code=400)

@@ -29,14 +29,16 @@ def test_a_single_language_text_is_unchanged(kokoro):
 
 def test_new_hindi_voices_are_made_from_hindi_voices():
     hindi = tts.LANGUAGES["hi"].voices
-    assert sum(k.startswith("hf_") for k in hindi) == 6
-    assert sum(k.startswith("hm_") for k in hindi) == 6
+    assert sum(k.startswith("hf_") for k in hindi) == 12
+    assert sum(k.startswith("hm_") for k in hindi) == 12
+    assert set(tts.LANGUAGES["hi"].voice_words_per_s) == set(hindi)  # each pace measured
     for key, mix in tts.MIXES.items():
         assert key in hindi
+        assert mix.base[:2] == key[:2]  # mostly a voice of its own kind
+        assert 0 < mix.share <= 0.5
         for kokoro_voice in filter(None, (mix.base, mix.blend)):
-            # A real Hindi Kokoro voice, of the same kind: the Indian accent stays.
+            # A real Hindi Kokoro voice: the Indian accent stays.
             assert kokoro_voice in hindi and kokoro_voice not in tts.MIXES
-            assert kokoro_voice[:2] == key[:2]
 
 
 def test_a_mixed_voice_is_blended_paced_and_pitched(monkeypatch):
@@ -62,6 +64,9 @@ def test_a_mixed_voice_is_blended_paced_and_pitched(monkeypatch):
     assert list(calls[-1][0]) == [2.0] * 4 and shifts == []  # 50/50 blend
     tts.synthesize("नमस्ते", "hi", "hm_calm", speed=1.1)  # dubbing asks for a speed too
     assert calls[-1][1] == pytest.approx(1.1 * 0.9) and shifts == [-1.0]
+    tts.synthesize("नमस्ते", "hi", "hm_narrator")  # 70% hm_omega + 30% hm_psi
+    assert list(calls[-1][0]) == pytest.approx([1.6] * 4)
+    assert calls[-1][1] == pytest.approx(0.92) and shifts[-1] == -1.5
     with pytest.raises(tts.TTSError):
         tts.synthesize("hello", "en", "hm_deep")  # a Hindi voice for English
 
@@ -72,6 +77,9 @@ def test_voice_speed_and_key():
     # Clips are made again when text is read differently.
     assert tts.voice_key("hm_omega") == f"hm_omega#{tts.READING}"
     assert tts.voice_key("hm_deep") != tts.voice_key("hm_omega")
+    # A 50/50 mix keeps its old name, so its saved clips are still used.
+    assert tts.voice_key("hm_mix") == f"hm_mix=hm_omega+hm_psi@0.0x1.0#{tts.READING}"
+    assert tts.voice_key("hm_narrator") != tts.voice_key("hm_mix")
 
 
 def test_the_silent_a_of_hindi_words_is_marked():

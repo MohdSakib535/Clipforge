@@ -500,3 +500,68 @@ def test_color_all_compares_with_the_grade_the_file_really_has(client, db_sessio
     got = {c["id"]: c for c in client.get(f"/jobs/{job_id}/clips").json()}
     assert got[approved.id]["color_rendered"] == {"contrast": 10, "brightness": 0, "saturation": 0}
     assert got[clips["rendering"].id]["color_rendered"] is None  # never recorded
+
+
+def test_clip_frame_patch(client, db_session):
+    vid = _upload_sample(client)
+    video = db_session.get(Video, vid)
+    video.status = VideoStatus.ready
+    video.rights_confirmed_at = datetime.now(UTC)
+    video.duration_s = 600.0
+    db_session.commit()
+    job_id = client.post(f"/videos/{vid}/jobs", json={"platforms": ["facebook_video"]}).json()["id"]
+    clip = Clip(
+        job_id=job_id, platform="facebook_video", start_s=0, end_s=30, status=ClipStatus.ready
+    )
+    db_session.add(clip)
+    db_session.commit()
+    assert client.get(f"/jobs/{job_id}/clips").json()[0]["frame"] is None
+
+    body = {
+        "background": "color",
+        "bg_color": "#112233",
+        "texts": [{"text": "Part {part}", "x": 100, "y": 1800, "align": "left"}],
+    }
+    ok = client.patch(f"/clips/{clip.id}", json={"frame": body})
+    assert ok.status_code == 200
+    got = ok.json()["frame"]
+    assert got["bg_color"] == "#112233" and got["texts"][0]["text"] == "Part {part}"
+    assert got["video_scale"] == 100 and got["texts"][0]["size"] == 60  # defaults filled in
+    db_session.refresh(clip)
+    assert clip.frame["texts"][0]["align"] == "left" and clip.frame["texts"][0]["outline"] is True
+
+    # Bad colour / place / alignment rejected; null removes the frame.
+    for bad in (
+        {"texts": [{"color": "red"}]},
+        {"texts": [{"x": 2000}]},
+        {"texts": [{"align": "middle"}]},
+        {"video_scale": 10},
+    ):
+        assert client.patch(f"/clips/{clip.id}", json={"frame": bad}).status_code == 422
+    assert client.patch(f"/clips/{clip.id}", json={"frame": None}).json()["frame"] is None
+
+
+def test_last_part_rounded_past_the_video_end_can_still_be_saved(client, db_session):
+    # A clip's end is stored rounded to 3 decimals: the last part of a
+    # 317.2078 s video ends at 317.208. Saving it (e.g. "Apply" in the mobile
+    # preview sends start/end too) must not fail as "past the end".
+    vid = _upload_sample(client)
+    video = db_session.get(Video, vid)
+    video.status = VideoStatus.ready
+    video.rights_confirmed_at = datetime.now(UTC)
+    video.duration_s = 317.2078
+    db_session.commit()
+    job_id = client.post(f"/videos/{vid}/jobs", json={"platforms": ["facebook_video"]}).json()["id"]
+    clip = Clip(
+        job_id=job_id,
+        platform="facebook_video",
+        start_s=270,
+        end_s=317.208,
+        status=ClipStatus.ready,
+    )
+    db_session.add(clip)
+    db_session.commit()
+    ok = client.patch(f"/clips/{clip.id}", json={"start_s": 270, "end_s": 317.208})
+    assert ok.status_code == 200
+    # Really past the end is still refused.
+    assert client.patch(f"/clips/{clip.id}", json={"end_s": 318.0}).status_code == 400

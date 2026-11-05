@@ -55,17 +55,30 @@ LANGUAGES: dict[str, Language] = {
         {"hf_alpha": "Female 1", "hf_beta": "Female 2", "hf_mix": "Female 3 · mixed",
          "hf_low": "Female 4 · soft", "hf_calm": "Female 5 · calm",
          "hf_bright": "Female 6 · bright",
+         "hf_husky": "Female 7 · husky", "hf_mature": "Female 8 · mature",
+         "hf_girl": "Female 9 · young girl", "hf_story": "Female 10 · storyteller",
+         "hf_deep": "Female 11 · deep", "hf_gentle": "Female 12 · gentle",
          "hm_omega": "Male 1", "hm_psi": "Male 2", "hm_mix": "Male 3 · mixed",
-         "hm_deep": "Male 4 · deep", "hm_calm": "Male 5 · calm", "hm_young": "Male 6 · young"},
+         "hm_deep": "Male 4 · deep", "hm_calm": "Male 5 · calm", "hm_young": "Male 6 · young",
+         "hm_soft": "Male 7 · soft", "hm_teen": "Male 8 · teen",
+         "hm_bass": "Male 9 · very deep", "hm_narrator": "Male 10 · narrator",
+         "hm_elder": "Male 11 · elder", "hm_energetic": "Male 12 · energetic"},
         words_per_s=2.5,
         # Measured 2026-11-02 on 585 words of real reel narrations, read as
         # reels read them (by_sentence, pauses included): the female voices
-        # read up to ~20% faster than the male ones.
+        # read up to ~20% faster than the male ones. Voices 7-12 (2026-11-05):
+        # measured on a 211-word narration, scaled by their base voices' ratio
+        # of the two measurements (checked on hf_mix/hm_mix: within 1%); a
+        # pitch-only voice reads at its base voice's pace.
         voice_words_per_s={
             "hf_alpha": 2.59, "hf_beta": 2.93, "hf_mix": 2.74, "hf_low": 2.94,
             "hf_calm": 2.40, "hf_bright": 2.73,
+            "hf_husky": 2.84, "hf_mature": 2.58, "hf_girl": 3.02, "hf_story": 2.70,
+            "hf_deep": 2.59, "hf_gentle": 2.63,
             "hm_omega": 2.51, "hm_psi": 2.52, "hm_mix": 2.51, "hm_deep": 2.51,
             "hm_calm": 2.34, "hm_young": 2.66,
+            "hm_soft": 2.65, "hm_teen": 2.65, "hm_bass": 2.52, "hm_narrator": 2.36,
+            "hm_elder": 2.20, "hm_energetic": 2.68,
         },
         caption_font="Noto Sans Devanagari",
         sample="नमस्ते! यह आपकी रील की आवाज़ है। सुनिए, आज की कहानी बहुत खास है।",
@@ -104,27 +117,42 @@ LANGUAGES: dict[str, Language] = {
 @dataclass(frozen=True)
 class VoiceMix:
     """A voice made from Kokoro's own voices of the same language, so the
-    accent stays: a 50/50 blend of two of them and/or a small change of pitch
-    (semitones; the voice's formants are kept, so it still sounds natural) and
-    of pace (Kokoro's speed)."""
+    accent stays: a blend of two of them (``share`` of ``blend``, 50/50 by
+    default) and/or a small change of pitch (semitones; the voice's formants
+    are kept, so it still sounds natural) and of pace (Kokoro's speed)."""
 
     base: str
     blend: str | None = None
     pitch: float = 0.0
     speed: float = 1.0
+    share: float = 0.5  # how much of ``blend`` is in the voice
 
 
 # Kokoro has only two Hindi voices of each kind; these make more types from
-# them. Measured pitch: hf_alpha ~203 Hz, hf_beta ~182, hm_omega ~124, hm_psi ~131.
+# them. Blending in an English voice brings its accent (tried 2026-11-05), so
+# only the 4 Hindi voices are used; some blend a little of the other kind.
+# Measured pitch: hf_alpha ~203 Hz, hf_beta ~182, hm_omega ~124, hm_psi ~131.
 MIXES: dict[str, VoiceMix] = {
     "hf_mix": VoiceMix("hf_alpha", blend="hf_beta"),
     "hf_low": VoiceMix("hf_beta", pitch=-1.5),
     "hf_calm": VoiceMix("hf_alpha", pitch=-0.5, speed=0.9),
     "hf_bright": VoiceMix("hf_alpha", pitch=1.5, speed=1.08),
+    "hf_husky": VoiceMix("hf_beta", blend="hm_omega", share=0.25),
+    "hf_mature": VoiceMix("hf_alpha", blend="hm_psi", share=0.3, pitch=-1.0),
+    "hf_girl": VoiceMix("hf_beta", pitch=2.5, speed=1.05),
+    "hf_story": VoiceMix("hf_beta", pitch=-0.5, speed=0.88),
+    "hf_deep": VoiceMix("hf_alpha", pitch=-2.0),
+    "hf_gentle": VoiceMix("hf_alpha", blend="hf_beta", share=0.4, pitch=-1.0, speed=0.95),
     "hm_mix": VoiceMix("hm_omega", blend="hm_psi"),
     "hm_deep": VoiceMix("hm_omega", pitch=-3.0),
     "hm_calm": VoiceMix("hm_psi", pitch=-1.0, speed=0.9),
     "hm_young": VoiceMix("hm_psi", pitch=1.5, speed=1.08),
+    "hm_soft": VoiceMix("hm_psi", blend="hf_beta", share=0.25),
+    "hm_teen": VoiceMix("hm_psi", blend="hf_alpha", share=0.35, pitch=1.0, speed=1.05),
+    "hm_bass": VoiceMix("hm_psi", pitch=-3.5),
+    "hm_narrator": VoiceMix("hm_omega", blend="hm_psi", share=0.3, pitch=-1.5, speed=0.92),
+    "hm_elder": VoiceMix("hm_omega", pitch=-2.0, speed=0.85),
+    "hm_energetic": VoiceMix("hm_omega", pitch=1.0, speed=1.1),
 }
 
 
@@ -151,8 +179,10 @@ def voice_key(voice: str) -> str:
     """What makes the voice, for naming cached voice clips: changing a mix,
     or how text is read, makes its clips again."""
     mix = MIXES.get(voice)
-    key = f"{voice}={mix.base}+{mix.blend}@{mix.pitch}x{mix.speed}" if mix else voice
-    return f"{key}#{READING}"
+    if mix is None:
+        return f"{voice}#{READING}"
+    blend = mix.blend if mix.share == 0.5 else f"{mix.blend}*{mix.share}"
+    return f"{voice}={mix.base}+{blend}@{mix.pitch}x{mix.speed}#{READING}"
 
 
 def default_voice(language: str) -> str:
@@ -460,8 +490,9 @@ def synthesize(
         style = voice
         if mix is not None:
             style = kokoro.get_voice_style(mix.base)
-            if mix.blend:
-                style = (style + kokoro.get_voice_style(mix.blend)) / 2
+            if mix.blend:  # 50/50 gives exactly (a + b) / 2, as before
+                blend = kokoro.get_voice_style(mix.blend)
+                style = style * (1 - mix.share) + blend * mix.share
             speed *= mix.speed
         if language == "hi":
             text = hindi_for_espeak(text)
