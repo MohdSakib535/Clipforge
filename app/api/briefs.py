@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.api import reels as reels_api
 from app.api.deps import get_current_user
 from app.api.errors import AppError, NotFoundError
+from app.config.settings import get_settings
 from app.db.session import get_db
 from app.models import Brief, Reel, User
 from app.schemas.brief import BriefCreate, BriefOut, BriefReelCreate, BriefUpdate
@@ -36,9 +37,11 @@ def _name_of(content: str) -> str:
 
 
 def _split(content: str) -> dict[str, str]:
-    """The brief's parts from the writer (a few seconds; it must be running)."""
+    """The brief's parts from the writer (~30 s with the 12B; it must be
+    running). The 4B one kept the brief's symbols in the look, which drew them
+    all into every picture."""
     try:
-        return brief_script.split_brief(content)
+        return brief_script.split_brief(content, model=get_settings().brief_script_model)
     except reel_script.ScriptError as exc:
         raise AppError(str(exc), code="brief_split_failed", status_code=502) from None
 
@@ -130,7 +133,10 @@ def create_brief_reel(
         topic=body.topic,
         script_type="story",  # told calmly (reel_render's story)
         description=body.description or None,
-        script_model=reels_api._check_script_model(body.script_model),
+        # Left out: the Brief reels writer (12B), not Create a reel's.
+        script_model=reels_api._check_script_model(
+            body.script_model or get_settings().brief_script_model
+        ),
         duration_s=body.duration_s,
         brief_id=brief.id,
         custom_style=brief.visual_style or None,

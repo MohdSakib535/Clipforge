@@ -466,6 +466,9 @@ def test_the_image_client_reads_what_vision_saw(monkeypatch):
     assert (pic.png, pic.counts) == (b"png", {"faces": 2, "hands": 3, "people": 2})
     monkeypatch.setattr(imagegen.httpx, "post", reply({}))  # an older generator
     assert imagegen.generate("p", width=16, height=16, seed=1, steps=1).counts is None
+    seen = {"X-Faces": "0", "X-Hands": "0", "X-People": "0", "X-Text": "1"}  # a newer generator
+    monkeypatch.setattr(imagegen.httpx, "post", reply(seen))
+    assert imagegen.generate("p", width=16, height=16, seed=1, steps=1).counts["text"] == 1
 
 
 def test_pick_the_script_writer(client, db_session, monkeypatch):

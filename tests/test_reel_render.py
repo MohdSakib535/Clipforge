@@ -301,6 +301,64 @@ def test_a_story_blends_in_the_breath_before_the_next_line():
     assert reel_render.scene_timing([40, 40], [30, 30], story=True)[1] == [10]
 
 
+def test_a_reel_from_a_brief_keeps_moving_gently():
+    moves = [reel_render.camera_move(i, 60, story=True, varied=True) for i in range(7)]
+    assert len(set(moves[:6])) == 6 and moves[6] == moves[0]  # they take turns
+    eased = "(1-cos(PI*on/60))/2"  # slow at the start and the end
+    assert moves[0] == (f"1+0.12*{eased}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)")
+    assert moves[1][:2] == ("1.12", f"(iw-iw/zoom)*{eased}")  # pans right while zoomed in
+    cmd = reel_render.build_scene_cmd(
+        "p.png", "s.mp4", frames=60, move=2, ass=None, preset="veryfast", story=True, varied=True
+    )
+    assert f"zoompan=z=1.12-0.12*{eased}:" in cmd[cmd.index("-vf") + 1]
+
+
+def test_a_reel_from_a_brief_keeps_its_colours_and_is_sharpened():
+    cmd = reel_render.build_scene_cmd("p.png", "s.mp4", frames=60, move=0, ass=None,
+                                      preset="veryfast", grade=reel_render.BRIEF_GRADE)  # fmt: skip
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "unsharp=" in vf and "saturation" not in vf
+    plain = reel_render.build_scene_cmd("p.png", "s.mp4", frames=60, move=0, ass=None,
+                                        preset="veryfast")  # fmt: skip
+    assert "saturation=1.12" in plain[plain.index("-vf") + 1]  # other reels as before
+
+
+def test_letters_in_a_picture_are_a_problem_only_for_a_reel_from_a_brief():
+    seen = {"faces": 1, "hands": 2, "people": 1, "text": 1}
+    scene = {"characters": ["Riya"]}
+    assert reel_render.picture_problems(seen, scene) == []
+    assert reel_render.picture_problems(seen, scene, text=True) == ["letters drawn in the picture"]
+    older = {"faces": 1, "hands": 2, "people": 1}  # a generator with no text count
+    assert reel_render.picture_problems(older, scene, text=True) == []
+
+
+def test_captions_follow_each_sentence_where_it_is_spoken():
+    np = pytest.importorskip("numpy")
+    sr = 1000
+    voice = lambda s: np.full(round(s * sr), 0.2, np.float32)  # noqa: E731
+    gap = lambda s: np.zeros(round(s * sr), np.float32)  # noqa: E731
+    # A short sentence read slowly, a pause, a long one read fast.
+    clip = np.concatenate([voice(2.0), gap(0.3), voice(1.0)])
+    assert reel_render.speech_spans(clip, sr) == [(0.0, 2.0), (2.3, 3.3)]
+    cues = reel_render.timed_cues("Wait. Then everything changed for him today.", clip, sr)
+    assert cues[0].text == "Wait." and cues[0].start == 0.0
+    assert cues[0].end == pytest.approx(2.3)  # it stays up through the pause
+    assert cues[1].start == pytest.approx(2.3) and cues[-1].end == pytest.approx(3.3)
+    # The stretches don't match the sentences: timed over the whole clip, as before.
+    flat = reel_render.timed_cues("Wait. Then everything changed.", voice(3.0), sr)
+    assert flat == reel_render.caption_cues("Wait. Then everything changed.", 3.0)
+
+
+def test_a_reel_seed_is_fixed_and_unused_marks_are_cleared(tmp_path):
+    assert reel_render.reel_seed("r1") == reel_render.reel_seed("r1") != reel_render.reel_seed("r2")
+    assert 0 <= reel_render.reel_seed("r1") < 2**31
+    kept, old = tmp_path / "scene01-a.png", tmp_path / "scene01-b.png"
+    for f in (kept, old, reel_render.reseed_path(kept), reel_render.reseed_path(old)):
+        f.write_bytes(b"x")
+    reel_render.remove_unused(tmp_path, {kept})
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["scene01-a.png", "scene01-a.png.reseed"]
+
+
 def test_a_story_drifts_and_has_calm_captions():
     assert reel_render.camera_move(1, 60, story=True) == (
         "1+0.08*on/60", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"

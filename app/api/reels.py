@@ -236,6 +236,7 @@ def options() -> dict:
         "description_max": reel_script.MAX_DESCRIPTION,
         "script_models": _script_models(settings.reel_script_model),
         "script_model_default": settings.reel_script_model,
+        "brief_script_model_default": settings.brief_script_model,
         "duration": {
             "min": reel_script.MIN_DURATION_S,
             "max": reel_script.MAX_DURATION_S,
@@ -459,6 +460,9 @@ def new_picture(
         raise NotFoundError("Scene not found")
     pictures[index].unlink(missing_ok=True)
     reel_render.warning_path(pictures[index]).unlink(missing_ok=True)
+    if reel.brief_id and pictures[index].parent.is_dir():
+        # Its pictures start from the reel's seed, which would draw this one again.
+        reel_render.reseed_path(pictures[index]).touch()
     _start_render(db, reel)
     db.refresh(reel)
     return _out(reel)

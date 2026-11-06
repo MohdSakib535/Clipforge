@@ -34,6 +34,20 @@ def _update(db: Session, reel_id: str, **fields) -> bool:
     return True
 
 
+def _earlier_titles(db: Session, reel: Reel, limit: int = 15) -> list[str]:
+    """The titles (else topics) of the latest other reels from the same brief:
+    without them the writer, asked for "an original concept", came back to
+    the same few ideas."""
+    others = (
+        db.query(Reel)
+        .filter(Reel.brief_id == reel.brief_id, Reel.id != reel.id)
+        .order_by(Reel.created_at.desc())
+        .limit(limit)
+    )
+    titles = [((r.script or {}).get("title") or r.topic or "").strip() for r in others]
+    return [t for t in titles if t]
+
+
 @celery_app.task(name="write_reel_script")
 def write_reel_script(reel_id: str, before: dict | None = None, then_render: bool = False) -> None:
     """``before``: what the current script was written for (script type,
@@ -59,7 +73,12 @@ def write_reel_script(reel_id: str, before: dict | None = None, then_render: boo
                     )
                 look = brief.visual_style or None
                 script = brief_script.generate_script(
-                    {"niche": brief.niche, "rules": brief.rules, "visual_style": look or ""},
+                    {
+                        "niche": brief.niche,
+                        "rules": brief.rules,
+                        "visual_style": look or "",
+                        "content": brief.content,
+                    },  # fmt: skip
                     reel.topic,
                     reel.platform,
                     reel.language,
@@ -68,6 +87,7 @@ def write_reel_script(reel_id: str, before: dict | None = None, then_render: boo
                     reel.voice,
                     model=reel.script_model,
                     on_step=on_step,
+                    earlier=_earlier_titles(db, reel),
                 )
             else:
                 script = reel_script.generate_script(
@@ -116,6 +136,10 @@ def render_reel(reel_id: str) -> None:
         language, voice, style = reel.language, reel.voice, reel.picture_style
         # Told like a story: read a little slower, with its own voice clips.
         story = reel.script_type == "story"
+        # A reel from a brief: every picture starts from the same seed (its
+        # characters and look come out more alike) and the camera keeps moving.
+        from_brief = reel.brief_id is not None
+        reel_seed = reel_render.reel_seed(reel_id) if from_brief else None
         speed = reel_render.STORY_SPEED if story else 1.0
         track = db.get(AudioTrack, reel.music_id) if reel.music_id else None
         if track is not None and not track.is_ready:
@@ -154,7 +178,12 @@ def render_reel(reel_id: str) -> None:
             deleted meanwhile."""
             prompt = reel_render.picture_prompt(reel_render.scene_prompt(scenes[i], script), style)
             best: tuple[imagegen.Picture, list[str]] | None = None
-            for _ in range(1 + settings.reel_picture_redraws):
+            # "New picture" asked for another one: the reel's seed would draw it again.
+            reseed = reel_render.reseed_path(pictures[i])
+            fresh = reseed.exists()
+            for attempt in range(1 + settings.reel_picture_redraws):
+                first = attempt == 0 and not fresh and reel_seed is not None
+                seed = reel_seed if first else random.randrange(2**31)
                 stage = f"Picture {n + 1} of {len(missing)}"
                 if best is not None:
                     stage += " (drawing it again)"
@@ -164,10 +193,10 @@ def render_reel(reel_id: str) -> None:
                     prompt,
                     width=settings.reel_image_width,
                     height=settings.reel_image_height,
-                    seed=random.randrange(2**31),
+                    seed=seed,
                     steps=settings.reel_image_steps,
                 )
-                problems = reel_render.picture_problems(picture.counts, scenes[i])
+                problems = reel_render.picture_problems(picture.counts, scenes[i], text=from_brief)
                 if best is None or len(problems) < len(best[1]):
                     best = (picture, problems)
                 if not problems:
@@ -182,6 +211,7 @@ def render_reel(reel_id: str) -> None:
             part = pictures[i].with_name(pictures[i].name + ".part")
             part.write_bytes(picture.png)
             os.replace(part, pictures[i])
+            reseed.unlink(missing_ok=True)
             return True
 
         try:
@@ -214,6 +244,8 @@ def render_reel(reel_id: str) -> None:
                     music_volume=music_volume,
                     workers=settings.render_concurrency,
                     story=story,
+                    varied=from_brief,
+                    grade=reel_render.BRIEF_GRADE if from_brief else reel_render.GRADE,
                 )
             reel_render.remove_unused(folder, set(pictures) | set(voices))
         except (imagegen.ImageGenError, tts.TTSError, FFmpegError, music.MusicError) as exc:

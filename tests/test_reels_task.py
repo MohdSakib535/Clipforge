@@ -116,10 +116,11 @@ def fakes(tmp_path, monkeypatch):
          "-frames:v", "1", str(png)],
         check=True,
     )  # fmt: skip
-    calls = {"pictures": [], "voices": [], "unloads": 0, "counts": [], "speeds": []}
+    calls = {"pictures": [], "voices": [], "unloads": 0, "counts": [], "speeds": [], "seeds": []}
 
     def fake_generate(prompt, *, width, height, seed, steps):
         calls["pictures"].append(prompt)
+        calls["seeds"].append(seed)
         counts = calls["counts"].pop(0) if calls["counts"] else None  # what Vision "sees"
         return imagegen.Picture(png.read_bytes(), counts)
 
@@ -251,3 +252,48 @@ def test_a_story_is_read_slower_and_told_as_one(db_session, factory, fakes, monk
         return sorted(p.name for p in Path(r.file_path).parent.glob("voice*.wav"))
 
     assert clips(reel) != clips(tips)  # named after the pace they were read at
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
+def test_a_reel_from_a_brief_draws_from_one_seed_and_keeps_moving(
+    db_session, factory, fakes, monkeypatch
+):
+    told = {}
+    render = reel_render.render
+
+    def spy(*args, **kwargs):
+        told["varied"] = kwargs.get("varied")
+        return render(*args, **kwargs)  # real FFmpeg: the eased moves must run
+
+    monkeypatch.setattr(reel_render, "render", spy)
+    reel = _reel(db_session, status="generating", script=PEOPLE, script_type="story",
+                 brief_id="b1")  # fmt: skip
+    # Scene 1 right at once; scene 2 has an extra person first.
+    right, two_people = {"faces": 1, "hands": 2, "people": 1}, {"faces": 2, "hands": 4, "people": 2}
+    fakes["counts"] += [right, two_people]
+    reels.render_reel.apply(args=[reel.id])
+    db_session.refresh(reel)
+    assert reel.status == "ready", reel.error
+    assert told["varied"] is True
+    seed = reel_render.reel_seed(reel.id)
+    assert fakes["seeds"][:2] == [seed, seed]  # every picture starts from the reel's seed
+    assert len(fakes["seeds"]) == 3 and fakes["seeds"][2] != seed  # drawn again: a new one
+
+    # "New picture": scene 1 again, with another seed (the reel's would repeat it).
+    first = sorted(Path(reel.file_path).parent.glob("scene*.png"))[0]
+    first.unlink()
+    reel_render.reseed_path(first).touch()
+    reel.status = "generating"
+    db_session.commit()
+    reels.render_reel.apply(args=[reel.id])
+    db_session.refresh(reel)
+    assert reel.status == "ready", reel.error
+    assert len(fakes["seeds"]) == 4 and fakes["seeds"][3] != seed
+    assert not reel_render.reseed_path(first).exists()
+
+    # An ordinary reel: a new seed for each picture, the camera as before.
+    plain = _reel(db_session, status="generating", script=SCRIPT)
+    reels.render_reel.apply(args=[plain.id])
+    db_session.refresh(plain)
+    assert plain.status == "ready" and told["varied"] is False
+    assert reel_render.reel_seed(plain.id) not in fakes["seeds"][4:]

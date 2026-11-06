@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # the reelmaker worker.
     ollama_url: str = "http://host.docker.internal:11434"
     reel_script_model: str = "gemma3:4b"
+    # "Brief reels" start with the 12B writer picked: the 4B one kept breaking
+    # the brief's rules (advice at the end) and writes weaker Hindi.
+    brief_script_model: str = "gemma3:12b"
     imagegen_url: str = "http://host.docker.internal:8189"
     # Pictures are made at 9:16 below full size (faster on a 16 GB Mac) and
     # scaled up to 1080x1920. 576x1024 looked soft; 720x1280 is sharper but

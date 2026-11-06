@@ -181,7 +181,8 @@ def words_per_scene(
 LANGUAGE_NOTES = {
     "hi": " Every word is written in Devanagari, never in Roman letters: no Hinglish like "
     '"karti hai", names and places too (लंका, राम), and English words the way they sound '
-    "(रील, वीडियो, आईएएस), even when the creator's idea is written in Hinglish.",
+    # Only words that read as examples: "आईएएस" here gave a script an IAS officer.
+    "(रील, वीडियो), even when the creator's idea is written in Hinglish.",
 }
 
 
@@ -478,6 +479,7 @@ def fit_length(
     cta: str = "",
     story: bool = False,
     model: str | None = None,
+    measure: Callable[[list[str]], float] | None = None,
 ) -> None:
     """Small models don't keep to a word count (a 40 s script came back at
     ~70 s; a 5 min one had 523 words for ~700, its later scenes ever shorter).
@@ -485,16 +487,21 @@ def fit_length(
     length_window - a script a little long is left as it is - the scenes
     furthest off (the long ones when it must get shorter, the short ones when
     it must get longer) are rewritten to aim_s; a rewrite is kept only if it
-    comes closer to the window."""
+    comes closer to the window. ``measure``: how long the narrations really
+    take (read out), instead of counting words, and the pace they are read at
+    for the rewrites."""
     wps = pace(language, voice, story)
     extra = 0 if not cta or _has_call_to_action(scenes[-1]["narration"]) else len(cta.split())
     n = len(scenes)
     low, high = length_window(duration_s)
     aim = aim_s(duration_s)
     target = script_words(aim, language, n, voice, story) - extra  # words in the scenes
+    gaps = (STORY_GAP_S if story else GAP_S) * (n - 1) + END_GAP_S
 
     def seconds(texts: list[str]) -> float:
-        return spoken_seconds(texts, language, voice, story) + extra / wps
+        if measure is None:
+            return spoken_seconds(texts, language, voice, story) + extra / wps
+        return measure([*texts[:-1], f"{texts[-1]} {cta}"] if extra else list(texts))
 
     def off(texts: list[str]) -> float:
         """Seconds outside the window (0 inside it)."""
@@ -508,6 +515,9 @@ def fit_length(
         before = seconds(current)
         shorter = before > high
         counts = [len(t.split()) for t in current]
+        if measure is not None:  # the pace these lines are really read at
+            real_wps = (sum(counts) + extra) / max(1.0, before - gaps)
+            target = max(aim - gaps, n) * real_wps - extra
         each = target / n
         picked = [i for i, c in enumerate(counts) if (c > each if shorter else c < each)]
         kept = sum(c for i, c in enumerate(counts) if i not in picked)

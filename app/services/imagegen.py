@@ -19,8 +19,9 @@ class ImageGenError(RuntimeError):
 @dataclass(frozen=True)
 class Picture:
     png: bytes
-    # {"faces", "hands", "people"} Apple's Vision saw in it on the Mac; None
-    # if it couldn't look (an older generator, or Vision failed).
+    # {"faces", "hands", "people"} Apple's Vision saw in it on the Mac, and
+    # "text" (pieces it could read) from a newer generator; None if it
+    # couldn't look (an older generator, or Vision failed).
     counts: dict[str, int] | None = None
 
 
@@ -62,6 +63,8 @@ def generate(prompt: str, *, width: int, height: int, seed: int, steps: int) -> 
         raise ImageGenError(f"Picture failed: {detail[:300]}")
     try:
         counts = {k: int(r.headers[f"x-{k}"]) for k in ("faces", "hands", "people")}
+        if "x-text" in r.headers:  # a generator from before has no text count
+            counts["text"] = int(r.headers["x-text"])
     except (KeyError, ValueError):
         counts = None
     return Picture(r.content, counts)

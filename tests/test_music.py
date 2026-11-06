@@ -191,7 +191,8 @@ def test_a_reel_mixes_in_music_fetched_for_it(db_session, factory, downloads, mo
     _made_already(monkeypatch)
     used = {}
 
-    def fake_render(folder, scenes, *, font, music, music_volume, workers, story=False):
+    def fake_render(folder, scenes, *, font, music, music_volume, workers, story=False,
+                    varied=False, grade=None):  # fmt: skip
         used.update(music=Path(music).read_bytes(), volume=music_volume)
         return 3.0
 

@@ -137,6 +137,28 @@ def test_spoken_length_counts_words_pace_and_pauses():
     assert reel_script.spoken_seconds(texts, "hi", "hm_calm") == pytest.approx(25 / calm + 1.05)
 
 
+def test_a_script_measured_read_aloud_is_fitted_to_its_real_length(monkeypatch):
+    rewrites = []
+
+    def fake_chat(messages, schema, **options):
+        rewrites.append(messages[-1]["content"])
+        return {k: " ".join(["छोटा"] * 12) for k in schema["required"]}
+
+    monkeypatch.setattr(reel_script, "_chat", fake_chat)
+    heard = []
+
+    def measure(texts):  # read slower than the words say (a script full of commas)
+        heard.append(list(texts))
+        return sum(len(t.split()) for t in texts) / 1.6 + 1.55
+
+    scenes = _scenes(20, 20, 20, 20)  # by its words ~34 s: fine for 40 s; read out ~51.5 s
+    reel_script.fit_length(scenes, "hi", 40, cta="फॉलो करें", measure=measure)
+    assert rewrites  # too long once read out
+    assert heard[0][-1].endswith("फॉलो करें")  # the call to action is read with it
+    # Rewritten at the pace it is really read at (1.6 words a second), not 2.5.
+    assert "about 16 words each" in rewrites[0]
+
+
 def _scenes(*word_counts):
     return [{"narration": " ".join(["शब्द"] * c), "image_prompt": "p"} for c in word_counts]
 

@@ -54,6 +54,9 @@ function briefReels() {
     async initReels() {
       await base.initReels.call(this); // options, music, listeners, and loadReels() below
       this.form.duration_s = DEFAULT_LENGTH_S;
+      // The better writer (12B) is picked here; the fast one can still be chosen.
+      const writer = this.options.brief_script_model_default;
+      if (this.options.script_models.some((m) => m.key === writer)) this.form.script_model = writer;
       // The one script box follows the script (a hook picked, a saved script...).
       this.$watch("draft", () => this.syncScriptText());
       await this.loadBriefs();

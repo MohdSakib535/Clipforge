@@ -27,9 +27,10 @@ IMAGEGEN_IDLE_UNLOAD_S seconds without work, so the Mac gets the RAM back. On a
 API:
     GET  /health    -> {"ok": true, "loaded": bool, "model_path": str}
     POST /generate  {"prompt", "width", "height", "seed", "steps"} -> image/png,
-                    with the faces, hands and people Apple's Vision framework
-                    sees in it (X-Faces, X-Hands, X-People; left out if it
-                    can't look), so the reel maker can draw a broken one again
+                    with the faces, hands, people and pieces of text Apple's
+                    Vision framework sees in it (X-Faces, X-Hands, X-People,
+                    X-Text; left out if it can't look), so the reel maker can
+                    draw a broken one again
     POST /unload    -> {"ok": true, "loaded": false}
 """
 
@@ -130,10 +131,23 @@ class Generator:
 GENERATOR = Generator()
 
 
+def _clear_words(results) -> int:
+    """Pieces of text Vision reads with confidence: at least 3 letters at 0.9
+    or more. A garbled label drawn by the model reads as one ("Néi Steps",
+    1.0); chains and clock faces only as unsure scraps (0.3-0.5)."""
+    count = 0
+    for result in results or []:
+        top = result.topCandidates_(1)
+        if top and top[0].confidence() >= 0.9:
+            count += sum(ch.isalpha() for ch in str(top[0].string())) >= 3
+    return count
+
+
 def count_people(png: bytes) -> dict[str, int] | None:
     """Faces, hands and people in a picture, by Apple's Vision framework
-    (built into macOS; ~40 ms after the first). The small model sometimes
-    draws an extra arm, face or person. None if Vision can't look."""
+    (built into macOS; ~40 ms after the first), and pieces of text it can
+    read (~1 s). The small model sometimes draws an extra arm, face or
+    person, or letters. None if Vision can't look."""
     try:
         import Vision
         from Foundation import NSData
@@ -145,7 +159,11 @@ def count_people(png: bytes) -> dict[str, int] | None:
         hands = Vision.VNDetectHumanHandPoseRequest.alloc().init()
         hands.setMaximumHandCount_(12)
         people = Vision.VNDetectHumanRectanglesRequest.alloc().init()
-        ok, error = handler.performRequests_error_([faces, hands, people], None)
+        text = Vision.VNRecognizeTextRequest.alloc().init()
+        text.setRecognitionLevel_(0)  # accurate: the fast one missed drawn labels
+        text.setUsesLanguageCorrection_(False)
+        text.setMinimumTextHeight_(0.005)
+        ok, error = handler.performRequests_error_([faces, hands, people, text], None)
         if not ok:
             raise RuntimeError(error)
     except Exception:
@@ -155,6 +173,7 @@ def count_people(png: bytes) -> dict[str, int] | None:
         "faces": len(faces.results() or []),
         "hands": len(hands.results() or []),
         "people": len(people.results() or []),
+        "text": _clear_words(text.results()),
     }
 
 
@@ -198,7 +217,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         counts = count_people(png)
         if counts is not None:
-            log.info("seen: %(faces)d faces, %(hands)d hands, %(people)d people", counts)
+            log.info(
+                "seen: %(faces)d faces, %(hands)d hands, %(people)d people, %(text)d texts", counts
+            )
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(len(png)))
