@@ -191,7 +191,6 @@ STYLES: dict[str, Style] = {
         "highly detailed",
     ),
 }
-DEFAULT_STYLE = "cinematic"
 
 
 def style_prompt(style: str) -> str:

@@ -23,7 +23,6 @@ from app.services import ffmpeg
 
 AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".opus", ".flac"}
 UNMIXED_NAME = "clip.nomusic.mp4"
-DEFAULT_VOLUME = 40
 
 _FADE_IN_S = 0.5
 _FADE_OUT_S = 1.5

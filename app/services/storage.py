@@ -29,15 +29,7 @@ class StorageService(ABC):
     def exists(self, key: str) -> bool: ...
 
     @abstractmethod
-    def finalize(self, key: str) -> str:
-        """Mark an upload complete; return the canonical stored path/URI."""
-
-    @abstractmethod
     def delete(self, key: str) -> None: ...
-
-    @abstractmethod
-    def url_for(self, key: str) -> str:
-        """A reference usable by the backend to locate the object."""
 
 
 class LocalStorageService(StorageService):
@@ -72,18 +64,12 @@ class LocalStorageService(StorageService):
     def exists(self, key: str) -> bool:
         return self._full(key).exists()
 
-    def finalize(self, key: str) -> str:
-        return str(self._full(key))
-
     def delete(self, key: str) -> None:
         p = self._full(key)
         if p.is_dir():
             shutil.rmtree(p, ignore_errors=True)
         elif p.exists():
             p.unlink()
-
-    def url_for(self, key: str) -> str:
-        return str(self._full(key))
 
 
 _storage: StorageService | None = None

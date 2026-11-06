@@ -173,13 +173,6 @@ class Settings(BaseSettings):
                 "or set TRANSCRIBER=local to transcribe on this machine for free."
             )
 
-    def masked_openai_key(self) -> str:
-        """Return a safe-to-log representation of the API key."""
-        if not self.openai_api_key:
-            return "<unset>"
-        tail = self.openai_api_key[-4:]
-        return f"sk-***{tail}"
-
 
 @lru_cache
 def get_settings() -> Settings:

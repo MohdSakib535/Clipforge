@@ -40,8 +40,6 @@ python-json-logger==3.2.1
 # These are required by the Celery worker (video processing) but are imported
 # lazily, so the API and the unit-test suite run without them installed.
 # ---------------------------------------------------------------------------
-ffmpeg-python==0.2.0
 numpy==1.26.4
-scenedetect[opencv]==0.6.5
 faster-whisper==1.1.0
 mediapipe==0.10.18

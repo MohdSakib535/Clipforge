@@ -104,7 +104,6 @@ def test_picture_prompt_starts_with_the_style():
     p = reel_render.picture_prompt("a cat on a roof at night.", "anime")
     assert p.startswith("Anime style illustration, ")
     assert ". a cat on a roof at night. Natural, correct anatomy. One single vertical" in p
-    assert reel_render.DEFAULT_STYLE in reel_render.STYLES
 
 
 def test_cached_files_are_named_after_what_made_them(tmp_path):
